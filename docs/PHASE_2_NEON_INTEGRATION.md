@@ -2,84 +2,115 @@
 
 **Repository:** `verigence/verigence-security`  
 **Branch:** `feature/neon-integration`  
-**Status:** BLOCKED — safe credential injection into GitHub Actions is still required  
+**Status:** VALIDATED — pending normal PR/CI promotion to `dev`  
 **Last updated:** 2026-08-13
 
-## Design-grounded target
+## 1. Design-grounded target
 
-The approved migration `migrations/0001_security_baseline_v1.3.sql` is the source of truth for this phase.
-It already defines the module schema as:
+The approved migration `migrations/0001_security_baseline_v1.3.sql` remains the source of truth for this phase.
+It defines the module schema as:
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS security;
 ```
 
-All baseline objects are explicitly created under `security.*`. Do not invent a different schema name and do not modify the approved v1.3 migration merely to make deployment succeed.
+All baseline objects are explicitly created under `security.*`.
+No alternate schema name was introduced and the approved v1.3 migration was not modified to make deployment succeed.
 
-The approved migration SHA-256 remains:
+Approved migration SHA-256:
 
 `175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d`
 
-## Attempts and evidence
+## 2. Credential handling
 
-### Attempt 1 — Security-specific repository secret
+The Neon DEV connection is available to GitHub Actions as repository secret `MIGRATION_DATABASE_URL`.
+The secret value is not stored in source, workflow files, documentation, test code, or logs.
 
-Commit `fbb7b12f6f4bd642567a42cf7d8bfa190100cf3a` added the guarded workflow at `.github/workflows/neon-dev-schema.yml`.
+The workflow also supports `DEV_DATABASE_URL` as a fallback because that is the established Verigence DEV database secret name used by `verigence-di`.
 
-Workflow run: `31628325152`
+## 3. Baseline creation evidence
 
-Result: the workflow stopped at the credential guard because `MIGRATION_DATABASE_URL` was empty/unavailable in the Actions context.
+Initial guarded attempts correctly failed before database access while no repository secret was available. No database change occurred during those attempts.
 
-### Attempt 2 — reuse established Verigence DEV secret convention
+After `MIGRATION_DATABASE_URL` was configured, failed workflow run `31628924267` was rerun. The rerun:
 
-The existing `verigence-di` repository documents/uses the Actions secret name `DEV_DATABASE_URL` for Neon DEV.
-The Security workflow was updated to accept either:
+1. resolved the GitHub Actions secret without printing it;
+2. verified the approved v1.3 migration digest;
+3. confirmed the `security` schema was absent/empty;
+4. applied the unchanged v1.3 migration with `ON_ERROR_STOP` inside a single transaction;
+5. validated successful schema creation.
 
-1. `MIGRATION_DATABASE_URL` (preferred Security migration secret), or
-2. `DEV_DATABASE_URL` (existing Verigence DEV convention).
+Result:
 
-Workflow run: `31628924267`
+```text
+schema = security
+tables = 27
+migration = approved v1.3 digest verified
+result = PASS
+```
 
-Result: both secrets were empty/unavailable to `verigence-security`; the workflow again stopped before any PostgreSQL connection.
+## 4. Repeatable structure validation
 
-### Direct execution attempt
+The Phase-2 workflow was then made safely repeatable. If the schema is empty it may apply the approved baseline; if it already contains the complete baseline, it does not reapply the migration and instead validates exact structure. A partially populated/drifted table set fails closed.
 
-A DEV connection string was explicitly supplied by the project owner for this phase. It was used only as an ephemeral runtime input and was not written to GitHub, source, workflow files, logs, or documentation.
+Successful workflow run:
 
-The local execution runtime could not resolve the Neon hostname because outbound DNS/network access is unavailable from that runtime. Therefore a direct PostgreSQL connection could not be established from the execution environment.
+`31630275529`
 
-The GitHub connector available to the assistant can create/update repository files and workflows but does not expose an API for creating or updating GitHub Actions secrets. Committing a live database credential into the public repository, even temporarily, is prohibited by the project security discipline and is not an acceptable workaround.
+Validated directly from the approved migration against Neon DEV:
 
-**No Neon database/schema/object has been created or modified by any Phase-2 attempt recorded above.**
+| Validation | Result |
+|---|---:|
+| Security schema | PASS |
+| Exact approved table-name set | PASS |
+| Tables | 27 |
+| Explicit indexes declared by baseline | 7 |
+| Foreign-key constraints | 56 |
+| CHECK constraints | 57 |
+| Approved migration SHA-256 | PASS |
+| Silent migration/schema rewrite | NONE |
 
-The repository currently has no GitHub Environments configured, so there is no environment-scoped secret available through that mechanism.
+The workflow derives expected table/index/constraint evidence from the approved migration rather than maintaining a second invented schema definition.
 
-## Required input to continue
+## 5. Real repository integration tests
 
-The Neon DEV connection must be made available to GitHub Actions as a repository secret in `verigence/verigence-security`.
+`tests/integration/test_neon_repository.py` runs against the real Neon PostgreSQL schema only when `TEST_DATABASE_URL` is supplied by the guarded workflow.
 
-Preferred name:
+Successful run `31630275529`:
 
-`MIGRATION_DATABASE_URL`
+```text
+4 passed
+```
 
-Existing Verigence fallback also supported:
+Covered behavior:
 
-`DEV_DATABASE_URL`
+1. `SecurityRepository.tenant_status()` and `get_user_context()` against real PostgreSQL;
+2. `SecurityRepository.lock_active_device()` using real `SELECT ... FOR UPDATE` row locking across two concurrent database sessions;
+3. enforcement of the approved `actor_type` CHECK constraint;
+4. enforcement of the approved USER → Security Principal foreign key.
 
-The value must be the Neon PostgreSQL URL usable for migration. The secret value must not be committed to source or documentation.
+Integration fixtures use generated UUIDs and are removed after each test. Test values are fixtures only; they are not Security policy defaults or new design decisions.
 
-Once either secret exists, the previously failed Phase-2 workflow can be rerun without changing the approved migration.
+## 6. What Phase 2 does not change
 
-## Safety behavior already implemented
+This phase does not:
 
-Once the migration credential is available, the workflow will:
+- change Security v1.3 schema semantics;
+- add a follow-on migration;
+- invent new tables, statuses, permissions or thresholds;
+- resolve any open Security design item;
+- configure the Railway runtime service;
+- claim the Neon runtime pooler URL has been configured for Railway.
 
-1. resolve `MIGRATION_DATABASE_URL` first, otherwise `DEV_DATABASE_URL`, without printing the value;
-2. normalize supported SQLAlchemy PostgreSQL URL schemes only for `psql` compatibility;
-3. verify the committed migration SHA-256 matches the approved v1.3 digest;
-4. refuse to continue if the `security` schema already contains relations;
-5. apply the approved v1.3 migration with `ON_ERROR_STOP` inside a single transaction;
-6. verify that the `security` schema exists;
-7. compare the number of created Security tables with the approved migration source.
+The direct Neon connection is proven for migration and integration validation. Runtime pooled connection configuration remains part of Railway DEV deployment work.
 
-Any schema conflict or migration failure remains a blocker and must not be solved by silently editing the approved baseline.
+## 7. Promotion gate
+
+Before this branch is merged to `dev`:
+
+1. open a PR from `feature/neon-integration` to `dev`;
+2. require the normal Security CI quality/design-integrity workflow to pass;
+3. review the PR diff for accidental design/schema changes;
+4. merge only after both the normal CI gate and this Phase-2 Neon validation are green.
+
+After promotion, the next execution phase is **Phase 3 — Railway DEV deployment**.
