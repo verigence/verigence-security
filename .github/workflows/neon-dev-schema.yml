@@ -19,27 +19,44 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      SECURITY_MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      SHARED_DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Require configured Neon migration secret
+      - name: Resolve configured Neon migration secret
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
-            echo "::error::MIGRATION_DATABASE_URL is not configured or is unavailable to this workflow."
+
+          if [ -n "${SECURITY_MIGRATION_DATABASE_URL:-}" ]; then
+            resolved="$SECURITY_MIGRATION_DATABASE_URL"
+            source_name="MIGRATION_DATABASE_URL"
+          elif [ -n "${SHARED_DEV_DATABASE_URL:-}" ]; then
+            resolved="$SHARED_DEV_DATABASE_URL"
+            source_name="DEV_DATABASE_URL"
+          else
+            echo "::error::Neither MIGRATION_DATABASE_URL nor DEV_DATABASE_URL is configured or available to this repository."
             exit 1
           fi
-          case "$MIGRATION_DATABASE_URL" in
+
+          # Existing Verigence DI uses an asyncpg-form URL. psql requires the standard PostgreSQL scheme.
+          case "$resolved" in
+            postgresql+asyncpg://*) resolved="postgresql://${resolved#postgresql+asyncpg://}" ;;
+            postgresql+psycopg://*) resolved="postgresql://${resolved#postgresql+psycopg://}" ;;
             postgresql://*|postgres://*) ;;
             *)
-              echo "::error::MIGRATION_DATABASE_URL must be a direct PostgreSQL URL usable by psql."
+              echo "::error::Configured DEV database secret is not a supported PostgreSQL URL."
               exit 1
               ;;
           esac
+
+          # Mask the resolved URL before exporting it for later steps.
+          echo "::add-mask::$resolved"
+          echo "MIGRATION_DATABASE_URL=$resolved" >> "$GITHUB_ENV"
+          echo "Using configured Neon DEV connection from secret: $source_name"
 
       - name: Ensure PostgreSQL client is available
         shell: bash
@@ -50,6 +67,18 @@ jobs:
             sudo apt-get install -y postgresql-client
           fi
           psql --version
+
+      - name: Verify approved migration digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d"
+          actual="$(sha256sum migrations/0001_security_baseline_v1.3.sql | awk '{print $1}')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Approved Security v1.3 migration digest mismatch. Refusing database change."
+            exit 1
+          fi
+          echo "Approved Security v1.3 migration digest verified."
 
       - name: Refuse to overwrite an existing non-empty Security schema
         shell: bash
