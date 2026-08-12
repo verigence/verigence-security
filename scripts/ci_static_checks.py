@@ -23,6 +23,7 @@ APPROVED_HASHES = {
 }
 
 SCAN_DIRS = (ROOT / "src", ROOT / "tests", ROOT / "scripts")
+RUNTIME_SOURCE_DIR = ROOT / "src"
 LEGACY_PERMISSION = re.compile(r"^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_-]*)+$")
 SECRET_MARKERS = (
     "-----BEGIN " + "PRIVATE KEY-----",
@@ -42,6 +43,12 @@ def iter_python_files() -> list[Path]:
         if directory.exists():
             files.extend(directory.rglob("*.py"))
     return sorted(files)
+
+
+def iter_runtime_python_files() -> list[Path]:
+    if not RUNTIME_SOURCE_DIR.exists():
+        return []
+    return sorted(RUNTIME_SOURCE_DIR.rglob("*.py"))
 
 
 def verify_approved_hashes(errors: list[str]) -> None:
@@ -119,10 +126,13 @@ def verify_request_authority(errors: list[str]) -> None:
 def main() -> int:
     errors: list[str] = []
     files = iter_python_files()
+    runtime_files = iter_runtime_python_files()
     verify_approved_hashes(errors)
     verify_python_line_length(files, errors)
     verify_no_embedded_secrets(files, errors)
-    verify_no_legacy_permission_literals(files, errors)
+    # Negative tests intentionally contain deprecated permission values to prove rejection.
+    # The no-legacy-permission gate therefore applies to runtime code, not test fixtures.
+    verify_no_legacy_permission_literals(runtime_files, errors)
     verify_request_authority(errors)
 
     if errors:
@@ -135,7 +145,7 @@ def main() -> int:
     print(f"- approved artifact hashes: {len(APPROVED_HASHES)}/{len(APPROVED_HASHES)}")
     print(f"- Python files checked: {len(files)}")
     print("- no embedded private-key/live-secret markers detected")
-    print("- no legacy colon-style permission literals detected")
+    print("- no legacy colon-style permission literals in runtime source")
     print("- request authority fields match the reviewed v0.1 contract")
     return 0
 
