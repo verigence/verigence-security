@@ -8,7 +8,9 @@
 **Last reviewed implementation commit:** `d11e63f810a3411f0da8dd90b99ea37f5c623582`  
 **Phase 1 merge commit:** `c6b73591534c333bdfe608a55deeef5f329d6be3`  
 **Phase 1 post-merge CI run:** `31627855570`  
-**Phase 2 Neon validation run:** `31630275529`  
+**Phase 2 merge commit:** `2085a05d656d7cf3a4a71d49f0594f9aca5ce0a0`  
+**Phase 2 Neon validation run:** `31630916955`  
+**Phase 2 post-merge CI run:** `31631092579`  
 **Last updated:** 2026-08-13
 
 ---
@@ -52,8 +54,8 @@ If this tracker conflicts with the approved design, the approved design wins.
 | Phase 2 — Neon DEV schema | DONE | Approved v1.3 schema created as `security` in Neon DEV |
 | Phase 2 — Neon structure validation | DONE | 27 tables, 7 explicit indexes, 56 FKs, 57 CHECK constraints validated |
 | Phase 2 — real PostgreSQL repository tests | DONE | 4/4 tests green, including real `FOR UPDATE` serialization |
-| Phase 2 promotion to `dev` | PENDING | Open PR and pass normal CI before merge |
-| Phase 3 — Railway DEV deployment | NOT STARTED | **NEXT after Phase-2 promotion** |
+| Phase 2 promotion to `dev` | DONE | PR #2 merged at `2085a05d...`; post-merge CI `31631092579` green |
+| Phase 3 — Railway DEV deployment | NOT STARTED | **NEXT execution phase** |
 | USER device/session lifecycle completeness | PARTIAL | Core access-session creation exists; enrollment/refresh/revoke pending |
 | Security administration APIs | PENDING | User/Tenant/RBAC/location/schedule/policy administration pending |
 | SYSTEM actor runtime | PENDING | Design exists; credential/token runtime pending |
@@ -136,7 +138,7 @@ Post-merge run `31627855570` completed successfully.
 
 ### Phase 2 — Neon DEV integration
 
-**Status: DONE technically — PENDING PR promotion to `dev`**
+**Status: DONE**
 
 Completed:
 
@@ -151,9 +153,13 @@ Completed:
 - added real PostgreSQL repository integration tests;
 - proved real `SELECT ... FOR UPDATE` serialization across concurrent sessions;
 - verified a representative approved CHECK constraint and USER→Principal FK are enforced;
-- kept database credentials out of source and logs.
+- kept database credentials out of source and logs;
+- promoted the reviewed Phase-2 change through PR #2 to `dev`;
+- confirmed the post-merge Security CI gate is green.
 
-Successful validation run: `31630275529`.
+Latest successful Neon validation run: `31630916955`.
+PR #2 merge commit: `2085a05d656d7cf3a4a71d49f0594f9aca5ce0a0`.
+Post-merge Security CI run: `31631092579`.
 
 Evidence:
 
@@ -174,14 +180,12 @@ Not claimed as complete in Phase 2:
 - Neon runtime pooler URL configuration for Railway;
 - any new Security schema beyond approved v1.3.
 
-**Promotion gate:** PR `feature/neon-integration` → `dev`, normal CI green, review diff, then merge.
-
 ---
 
 ### Phase 3 — Railway DEV deployment
 
 **Status: NOT STARTED**  
-**Priority: NEXT after Phase-2 promotion**
+**Priority: NEXT**
 
 Planned work:
 
@@ -339,7 +343,6 @@ feature/*
 
 Expected branches include:
 
-- `feature/neon-integration`
 - `feature/railway-dev`
 - `feature/device-session-lifecycle`
 - `feature/admin-apis`
@@ -379,20 +382,19 @@ Code existence alone is not sufficient for `DONE`.
 | 2026-08-12 | `bc7b3a5f0b5e30e56b41ab279ac87e38acb450ce` | Added progress tracker | DONE |
 | 2026-08-12 | PR #1 / `c6b73591534c333bdfe608a55deeef5f329d6be3` | Established CI/design-integrity gate and merged to `dev` | DONE — post-merge run `31627855570` green |
 | 2026-08-13 | rerun of `31628924267` | Applied approved Security v1.3 schema to Neon DEV | DONE — `security` schema / 27 tables |
-| 2026-08-13 | `31630275529` | Validated Neon structure and real repository behavior | DONE — 27 tables / 7 indexes / 56 FKs / 57 CHECKs / 4 tests |
+| 2026-08-13 | `31630916955` | Final Phase-2 Neon validation after PR cleanup | DONE — 27 tables / 7 indexes / 56 FKs / 57 CHECKs / 4 tests |
+| 2026-08-13 | PR #2 / `2085a05d656d7cf3a4a71d49f0594f9aca5ce0a0` | Promoted Phase 2 to `dev` | DONE — post-merge Security CI `31631092579` green |
 
 ---
 
 ## 9. Current execution pointer
 
-**NOW:** Promote Phase 2 from `feature/neon-integration` to `dev` through a reviewed PR and the normal CI gate.
-
-**NEXT after promotion:** Phase 3 — Railway DEV deployment.
+**NEXT: Phase 3 — Railway DEV deployment.**
 
 ```text
 Phase 1 CI                 DONE
       ↓
-Phase 2 Neon DEV           VALIDATED — PR PROMOTION NOW
+Phase 2 Neon DEV           DONE
       ↓
 Phase 3 Railway DEV        NEXT
       ↓
