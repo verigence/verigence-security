@@ -25,8 +25,6 @@ from verigence_security.repositories.security_repository import SecurityReposito
 from verigence_security.services.token_service import TokenService
 
 
-
-
 def correlation_header_parameter(
     value: str | None = Header(
         default=None,
@@ -39,6 +37,7 @@ def correlation_header_parameter(
     """OpenAPI declaration for the middleware-owned correlation header contract."""
 
     return value
+
 
 user_identity_bearer = HTTPBearer(
     auto_error=False,

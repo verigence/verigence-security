@@ -19,6 +19,7 @@ def resolve_correlation_id(value: str | None) -> str:
         return str(uuid4())
     if not _PATTERN.fullmatch(value):
         from verigence_security.core.errors import security_error
+
         raise security_error("CORRELATION_ID_INVALID")
     return value
 
@@ -37,7 +38,7 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
             # out in IMPLEMENTATION_STATUS as a v1.3 contract clarification to baseline.
             cid = str(uuid4())
             request.state.correlation_id = cid
-            response = JSONResponse(
+            error_response = JSONResponse(
                 status_code=400,
                 content={
                     "code": "CORRELATION_ID_INVALID",
@@ -48,8 +49,8 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
                 },
                 media_type="application/problem+json",
             )
-            response.headers[HEADER] = cid
-            return response
+            error_response.headers[HEADER] = cid
+            return error_response
 
         cid = supplied or str(uuid4())
         token = correlation_id_ctx.set(cid)

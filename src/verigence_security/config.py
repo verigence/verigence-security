@@ -49,7 +49,7 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def safety_rules(self) -> "Settings":
+    def safety_rules(self) -> Settings:
         protected = {AppEnvironment.UAT, AppEnvironment.PRODUCTION}
         if self.app_env in protected and self.dev_mock_auth_enabled:
             raise ValueError("DEV mock authentication is prohibited in UAT/production")

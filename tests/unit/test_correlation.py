@@ -1,4 +1,3 @@
-import re
 from uuid import UUID
 
 import pytest
