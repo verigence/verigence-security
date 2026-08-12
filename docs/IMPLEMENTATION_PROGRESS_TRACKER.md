@@ -2,28 +2,40 @@
 
 **Purpose:** Single operational view of what is complete, partially complete, pending, blocked, and next.  
 **Repository:** `verigence/verigence-security`  
-**Working branch:** `dev`  
+**Integration branch:** `dev`  
 **Approved design baseline:** Security Solution v1.3  
 **Current reviewed implementation baseline:** v0.1  
 **Last reviewed implementation commit:** `d11e63f810a3411f0da8dd90b99ea37f5c623582`  
 **Context-recovery plan commit:** `8809e1db68308f4b8b856b4a36d8b7fe8ecf54d0`  
+**Phase 1 PR:** #1 (`feature/security-ci` → `dev`)  
+**Phase 1 successful CI run:** `31627397195`  
 **Last updated:** 2026-08-12
 
 ---
 
-## 1. How to read this tracker
+## 1. Mandatory execution rule
 
-Status values are intentionally simple:
+This tracker does **not** replace Security Design v1.3.
 
-- **DONE** — implemented, reviewed against the approved design, and validation evidence exists.
-- **PARTIAL** — a valid implementation exists, but one or more approved contract elements are still incomplete.
+Implementation must follow `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`:
+
+- approved Security design/decision artifacts are the reference;
+- build on the approved design rather than reconstructing requirements from chat memory;
+- do not invent APIs, fields, permission names, error codes, statuses, DB objects, thresholds, provider behavior or security rules;
+- do not silently change a normative v1.3 artifact to make implementation easier;
+- if the design does not deterministically answer a question, record it as `BLOCKED`, `PARTIAL` or an open design decision before coding the missing behavior;
+- engineering choices may fill implementation details only where the design intentionally leaves the choice open;
+- a capability is not `DONE` until applicable design review and validation evidence exist.
+
+If this tracker conflicts with the approved design, the approved design wins.
+
+### Status values
+
+- **DONE** — implemented/reviewed and required validation evidence exists.
+- **PARTIAL** — valid implementation exists but approved scope is incomplete.
 - **PENDING** — approved scope not yet implemented.
-- **BLOCKED** — implementation must not proceed until a design decision, infrastructure dependency, or explicit input is resolved.
+- **BLOCKED** — must not be implemented until a decision/dependency/input is resolved.
 - **NOT STARTED** — planned execution phase has not begun.
-
-This tracker does **not** replace Security Design v1.3. If this tracker conflicts with the approved design, the approved design wins.
-
-No missing behavior may be filled by assumption. Unresolved items must remain `BLOCKED` or `PARTIAL` until explicitly closed.
 
 ---
 
@@ -31,102 +43,124 @@ No missing behavior may be filled by assumption. Unresolved items must remain `B
 
 | Area | Status | Current position |
 |---|---|---|
-| Approved Security v1.3 design alignment | DONE | v0.1 reviewed against approved source artifacts and checksums |
-| GitHub repository structure | DONE | `main` and `dev` exist; implementation resides on `dev` |
+| Approved Security v1.3 design alignment | DONE | v0.1 reviewed against approved artifacts/checksums |
+| GitHub repository structure | DONE | `main`, `dev`, feature-branch model established |
 | FastAPI service foundation | DONE | Railway-ready application foundation committed |
 | Core USER access-policy path | DONE | Identity → Tenant → device → geo → schedule → network → RBAC → JWT |
-| Automated unit/API baseline | DONE | 30 pytest tests passed at v0.1 review gate |
-| CI quality gate | NOT STARTED | Next execution phase |
-| Neon DEV migration/integration | NOT STARTED | Must follow CI setup |
-| Railway DEV deployment | NOT STARTED | Must follow successful Neon integration |
-| USER device/session lifecycle completeness | PARTIAL | Core access-session creation exists; enrollment/refresh/revoke pending |
+| Automated unit/API baseline | DONE | 30 tests pass |
+| CI quality gate | DONE | PR #1; green run `31627397195`; merge to `dev` is final Phase-1 promotion step |
+| Neon DEV migration/integration | NOT STARTED | **NEXT execution phase after PR #1 promotion** |
+| Railway DEV deployment | NOT STARTED | Follows successful Neon integration |
+| USER device/session lifecycle completeness | PARTIAL | Core session creation exists; enrollment/refresh/revoke pending |
 | Security administration APIs | PENDING | Employee, RBAC, location, schedule, policy administration pending |
-| SYSTEM actor runtime | PENDING | Design exists; runtime credential/token flow pending |
-| SERVICE_INTEGRATION runtime | PENDING | Design exists; runtime credential/token flow pending |
+| SYSTEM actor runtime | PENDING | Design exists; machine credential/token runtime pending |
+| SERVICE_INTEGRATION runtime | PENDING | Design exists; integration credential/token runtime pending |
 | Tenant operational lifecycle | PENDING | Activation-readiness, retention, offboarding execution pending |
-| Clerk live integration | PARTIAL | Adapter exists; live Clerk DEV/UAT integration not yet executed |
-| DI/WPM integration | PENDING | Must occur after Security runtime contracts are stable |
+| JWKS/key rotation hardening | PARTIAL | Single-key endpoint works; overlapping rotation pending |
+| Clerk live integration | PARTIAL | Adapter exists; live Clerk integration not yet proven |
+| DI/WPM integration | PENDING | Must follow stable Security runtime contracts |
 | Production readiness | NOT STARTED | No production deployment should occur yet |
 
 ---
 
-## 3. Completed implementation — v0.1
-
-The following items are considered **DONE for the implemented v0.1 scope**:
+## 3. Completed implementation — reviewed v0.1 scope
 
 | ID | Capability | Status | Evidence / note |
 |---|---|---|---|
-| SEC-IMP-001 | FastAPI service foundation | DONE | Railway-oriented service structure committed |
-| SEC-IMP-002 | Environment safety controls | DONE | DEV mock auth/network adapters prohibited in UAT/Production configuration |
-| SEC-IMP-003 | Correlation-ID middleware | DONE | Preserve/generate/reject/echo behavior; unexpected 500 remains traceable |
+| SEC-IMP-001 | FastAPI service foundation | DONE | Railway-oriented service structure |
+| SEC-IMP-002 | Environment safety controls | DONE | DEV mock auth/network prohibited in UAT/Production |
+| SEC-IMP-003 | Correlation-ID middleware | DONE | Preserve/generate/reject/echo; unexpected 500 traceable |
 | SEC-IMP-004 | Clerk USER identity adapter | DONE | Networkless JWT verification using configured public key |
-| SEC-IMP-005 | DEV mock identity flow | DONE | Mock identity token only; caller cannot inject Tenant roles/permissions |
-| SEC-IMP-006 | USER Security Principal validation | DONE | Principal actor type/status checked during identity mapping |
-| SEC-IMP-007 | Verigence Access JWT | DONE | RSA JWT issue/verify for current single-key baseline |
-| SEC-IMP-008 | JWKS endpoint | PARTIAL | Endpoint works; overlapping key rotation still pending |
-| SEC-IMP-009 | Canonical permission validation | DONE | Dot notation such as `di.document.upload` enforced before token issue |
-| SEC-IMP-010 | Geo freshness/accuracy/radius | DONE | No hidden design thresholds introduced |
-| SEC-IMP-011 | Geo-integrity stance | DONE | Explicit `SUSPECTED` signal denies access; unknown signal not treated as proof of spoofing |
+| SEC-IMP-005 | DEV mock identity flow | DONE | Caller cannot inject Tenant roles/permissions |
+| SEC-IMP-006 | USER Security Principal validation | DONE | Principal actor type/status checked |
+| SEC-IMP-007 | Verigence Access JWT | DONE | RSA issue/verify for current single-key baseline |
+| SEC-IMP-008 | JWKS endpoint | PARTIAL | Endpoint works; overlapping rotation pending |
+| SEC-IMP-009 | Canonical permission validation | DONE | Dot notation such as `di.document.upload` enforced |
+| SEC-IMP-010 | Geo freshness/accuracy/radius | DONE | No hidden thresholds introduced |
+| SEC-IMP-011 | Geo-integrity stance | DONE | Explicit `SUSPECTED` denies; `UNKNOWN` is not proof of spoofing |
 | SEC-IMP-012 | Access schedules | DONE | Normal and overnight windows supported |
 | SEC-IMP-013 | Provider-neutral network-risk adapter | DONE | Deterministic DEV mock implemented |
-| SEC-IMP-014 | Network-risk transaction ordering | DONE | External provider call kept outside DB/device-lock transaction |
+| SEC-IMP-014 | Network-risk transaction ordering | DONE | External call outside DB/device lock transaction |
 | SEC-IMP-015 | Neon/PostgreSQL repository foundation | DONE | Reused SQLAlchemy runtime engine/session factory |
 | SEC-IMP-016 | Tenant membership checks | DONE | ACTIVE/effective membership enforcement |
-| SEC-IMP-017 | Registered-device locking | DONE | Device row locking used for USER session creation |
-| SEC-IMP-018 | Employee-location assignment loading | DONE | Only explicitly assigned active locations considered |
-| SEC-IMP-019 | RBAC resolution | DONE | Effective role/permission resolution implemented |
-| SEC-IMP-020 | USER access-session creation | DONE | Core `POST /security/v1/access-sessions` path implemented |
+| SEC-IMP-017 | Registered-device locking | DONE | Device row locking used in USER session creation |
+| SEC-IMP-018 | Employee-location assignment loading | DONE | Only assigned active locations considered |
+| SEC-IMP-019 | RBAC resolution | DONE | Effective role/permission resolution |
+| SEC-IMP-020 | USER access-session creation | DONE | Core `POST /security/v1/access-sessions` |
 | SEC-IMP-021 | Same-context active-session reuse | DONE | Conflicting location context rejected |
-| SEC-IMP-022 | Session maximum cap preservation | DONE | Session reuse cannot reset configured maximum duration indefinitely |
-| SEC-IMP-023 | Access evidence persistence | PARTIAL | Successful access evidence persisted; denied-event persistence pending |
-| SEC-IMP-024 | Token/DB atomicity | DONE | Signing failure rolls back uncommitted session/evidence writes |
-| SEC-IMP-025 | Health endpoints | DONE | Liveness and fail-closed readiness implemented |
+| SEC-IMP-022 | Session maximum cap preservation | DONE | Reuse cannot extend max duration indefinitely |
+| SEC-IMP-023 | Access evidence persistence | PARTIAL | Success evidence exists; denied-event persistence pending |
+| SEC-IMP-024 | Token/DB atomicity | DONE | Signing failure rolls back uncommitted session/evidence |
+| SEC-IMP-025 | Health endpoints | DONE | Liveness + fail-closed readiness |
 | SEC-IMP-026 | PostgreSQL v1.3 migration source | DONE | Approved schema committed byte-identically |
-| SEC-IMP-027 | Error-catalogue alignment | DONE | 42/42 approved Security error codes/statuses matched |
-| SEC-IMP-028 | Secret/legacy-permission scans | DONE | Review gate passed |
-| SEC-IMP-029 | Unit/API baseline | DONE | 30 pytest tests passed |
+| SEC-IMP-027 | Error-catalogue alignment | DONE | 42/42 approved Security code/status pairs |
+| SEC-IMP-028 | Secret/legacy-permission scans | DONE | Review/static gates |
+| SEC-IMP-029 | Unit/API baseline | DONE | 30 tests pass |
 | SEC-IMP-030 | Design traceability review | DONE | `docs/DESIGN_TRACEABILITY_REVIEW_v0.1.md` |
+| SEC-IMP-031 | GitHub CI quality gate | DONE | `docs/PHASE_1_CI_VALIDATION.md` |
+| SEC-IMP-032 | Design-grounding execution policy | DONE | `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md` |
 
 ---
 
-## 4. Pending implementation backlog
+## 4. Execution roadmap and remaining backlog
 
 ### Phase 1 — CI quality gate
+
+**Status: DONE — pending only promotion of PR #1 into `dev`.**
+
+Implemented checks:
+
+- GitHub Actions workflow on PRs to `dev`/`main` and pushes to `dev`;
+- Python 3.12 environment;
+- development dependency installation;
+- approved v1.3 committed-artifact hash validation;
+- static design/safety gates;
+- Python compile validation;
+- Ruff;
+- strict Mypy;
+- Pytest;
+- package sdist/wheel build;
+- `pip check` dependency consistency.
+
+Successful validation evidence from run `31627397195`:
+
+- approved artifact hashes: **4/4 PASS**;
+- static/design checks: **PASS**;
+- compile: **PASS**;
+- Ruff: **PASS**;
+- Mypy: **PASS — 29 source files**;
+- Pytest: **30 passed**;
+- package build: **PASS**;
+- dependency consistency: **PASS**.
+
+Detailed evidence: `docs/PHASE_1_CI_VALIDATION.md`.
+
+The test run emitted one non-blocking third-party Starlette/FastAPI test-client deprecation warning. It is recorded as dependency-maintenance evidence and does not justify changing Security behavior.
+
+**Exit criterion:** achieved technically; promote PR #1 to `dev` and confirm the `dev` push run remains green.
+
+---
+
+### Phase 2 — Neon DEV integration
 
 **Status: NOT STARTED**  
 **Priority: NEXT**
 
 Tasks:
 
-- add GitHub Actions workflow;
-- run `pytest`;
-- run `ruff check src tests`;
-- run `mypy src`;
-- run Python compile/build checks;
-- validate package installation/build;
-- fail PR/push gate on any mandatory quality failure;
-- retain validation results in GitHub Actions.
-
-**Exit criterion:** `dev` has a reproducible green CI pipeline.
-
----
-
-### Phase 2 — Neon DEV integration
-
-**Status: NOT STARTED**
-
-Tasks:
-
-- provision/use Neon DEV PostgreSQL environment;
+- provision/use a Neon DEV PostgreSQL environment;
 - configure pooled runtime connection;
 - configure direct migration connection where required;
-- execute `0001_security_baseline_v1.3.sql` against real Neon PostgreSQL;
-- verify tables, indexes, FKs and constraints;
-- add repository integration tests against Neon;
-- prove transaction and row-lock behavior using actual PostgreSQL;
-- ensure no live DB credentials enter GitHub.
+- execute `migrations/0001_security_baseline_v1.3.sql` against an empty DEV database;
+- do not modify the approved v1.3 migration merely to make deployment pass;
+- verify schema objects, indexes, foreign keys and constraints;
+- add repository integration tests against real PostgreSQL;
+- prove transaction/row-lock behavior using actual PostgreSQL;
+- test concurrent access-session behavior only to the extent already defined by the approved design;
+- ensure no live DB credentials enter GitHub;
+- document any discovered schema/design gap before creating a follow-on migration.
 
-**Exit criterion:** approved migration executes successfully and repository integration tests pass against Neon DEV.
+**Exit criterion:** approved v1.3 migration executes successfully and implemented repository integration tests pass against Neon DEV with no silent schema drift.
 
 ---
 
@@ -137,15 +171,15 @@ Tasks:
 Tasks:
 
 - create/configure Railway DEV service;
-- attach Neon DEV variables;
+- attach Neon DEV variables through Railway secrets;
 - run with DEV mock identity adapter;
 - run with DEV mock network-risk adapter;
 - configure Security signing keys through Railway secrets;
 - verify `/health/live` and `/health/ready`;
-- verify correlation ID over deployed HTTPS;
-- execute end-to-end DEV access-session request.
+- verify `X-Correlation-ID` over deployed HTTPS;
+- execute end-to-end DEV USER access-session request.
 
-**Exit criterion:** deployed Security API is usable end-to-end without Clerk or other external authentication hooks.
+**Exit criterion:** deployed Security API works end-to-end without requiring Clerk or other external authentication hooks.
 
 ---
 
@@ -155,7 +189,7 @@ Tasks:
 
 Pending tasks:
 
-- persistent `Idempotency-Key` replay across stateless replicas;
+- persistent `Idempotency-Key` replay across stateless replicas — **BLOCKED pending approved persistence model**;
 - `POST /security/v1/device-enrollments` bootstrap flow;
 - device approval;
 - device block;
@@ -164,10 +198,10 @@ Pending tasks:
 - USER access-session refresh;
 - mandatory fresh geo on USER refresh;
 - USER session revoke;
-- concurrent same user + Tenant + device access-session semantics;
+- approved concurrent same USER + Tenant + device semantics;
 - complete denial-event persistence for these flows.
 
-**Exit criterion:** complete USER authentication/access lifecycle can be executed in DEV without manual DB manipulation.
+**Exit criterion:** complete approved USER access lifecycle executes in DEV without manual DB manipulation.
 
 ---
 
@@ -191,7 +225,9 @@ Pending areas:
 - activation-readiness reporting;
 - Tenant activation service.
 
-**Exit criterion:** a Security Administrator can configure a Tenant and user entirely through supported APIs.
+Exact endpoint-level `security.*` permission keys remain **BLOCKED** until approved; do not invent them.
+
+**Exit criterion:** Security administration can configure approved Tenant/user access through supported APIs.
 
 ---
 
@@ -201,17 +237,17 @@ Pending areas:
 
 Pending tasks:
 
-- system-principal registration/admin model;
+- SYSTEM-principal registration/admin model;
 - secure machine credential storage/rotation contract;
 - SYSTEM authentication;
 - Tenant-scoped SYSTEM permission grants;
 - short-lived machine access-token issuance;
-- SYSTEM token claims with `actor_type=SYSTEM`;
+- `actor_type=SYSTEM` token claims;
 - internal worker identities;
 - WhatsApp ingestion SYSTEM actor;
 - source/correlation propagation for background execution.
 
-**Exit criterion:** Verigence-owned non-human processes can obtain Tenant-scoped Security tokens without human/device/geo controls.
+**Exit criterion:** Verigence-owned non-human processes obtain least-privilege Tenant-scoped Security tokens without human device/geo controls.
 
 ---
 
@@ -222,15 +258,15 @@ Pending tasks:
 Pending tasks:
 
 - integration-principal registration/admin model;
-- integration credentials and rotation;
+- integration credentials/rotation;
 - Tenant assignment;
 - explicit integration permissions;
-- optional source-IP/CIDR restriction when configured;
+- optional source-IP/CIDR restriction when configured/approved;
 - integration token issuance;
-- `actor_type=SERVICE_INTEGRATION` token/evidence;
+- `actor_type=SERVICE_INTEGRATION` evidence/token claims;
 - rate/network policy hooks where approved.
 
-**Exit criterion:** an approved external application can authenticate and receive a least-privilege Tenant-scoped Security token.
+**Exit criterion:** approved external systems can authenticate and receive least-privilege Tenant-scoped Security tokens.
 
 ---
 
@@ -248,9 +284,9 @@ Pending tasks:
 - block new USER/SYSTEM/SERVICE_INTEGRATION access while offboarding;
 - revoke Security-managed active sessions/credentials;
 - preserve Security lineage according to retention policy;
-- keep DI/WPM data deletion outside Security boundary.
+- keep DI/WPM-owned data deletion outside the Security boundary.
 
-**Exit criterion:** Security supports controlled Tenant lifecycle from activation through offboarding.
+**Exit criterion:** Security supports the approved Tenant lifecycle from activation through offboarding.
 
 ---
 
@@ -260,23 +296,21 @@ Pending tasks:
 
 Pending tasks:
 
-- key ring supporting old + new public keys;
-- new `kid` generation and publication;
-- sign new tokens using new key only after JWKS exposure;
-- retain old public key until all old tokens + cache/skew period expire;
+- key ring containing old + new public keys;
+- unique new `kid` generation/publication;
+- new signing key activation after JWKS publication;
+- old public-key retention through old-token lifetime + cache/skew window;
 - verifier refresh on unknown `kid`;
-- remove old key only after safe transition;
-- document/test rotation runbook.
+- safe removal of old key;
+- rotation runbook/test.
 
-**Exit criterion:** key rotation occurs without legitimate token rejection.
+**Exit criterion:** approved key rotation occurs without rejecting legitimate in-flight tokens.
 
 ---
 
 ### Phase 10 — Clerk live integration
 
 **Status: PARTIAL**
-
-Current position: Clerk adapter exists; live integration is not yet proven.
 
 Pending tasks:
 
@@ -285,10 +319,10 @@ Pending tasks:
 - live Clerk JWT validation test;
 - Clerk subject ↔ Verigence user mapping integration test;
 - validate failure behavior when Clerk is unavailable;
-- retain DEV mock mode for deterministic no-external-hook E2E testing;
-- ensure UAT/Production mock prohibition remains enforced.
+- retain deterministic DEV mock mode;
+- confirm UAT/Production mock prohibition remains enforced.
 
-**Exit criterion:** USER login works with both deterministic DEV mock mode and real Clerk mode, with identical downstream Security authorization behavior.
+**Exit criterion:** USER identity works in both DEV mock and real Clerk modes with the same downstream Security authorization rules.
 
 ---
 
@@ -299,14 +333,14 @@ Pending tasks:
 Tasks:
 
 - Security JWKS validation in DI/WPM;
-- enforce canonical permission strings such as `di.document.upload`;
-- remove/deprecate legacy `document:upload` assumptions;
-- propagate `actor_type`, `sub`, `tenant_id`, correlation ID and relevant claims;
+- canonical permissions such as `di.document.upload`;
+- remove/deprecate legacy colon-style permission assumptions;
+- propagate `actor_type`, `sub`, `tenant_id`, correlation ID and applicable claims;
 - SYSTEM WhatsApp actor integration with DI upload;
-- validate Tenant isolation across module boundaries;
+- Tenant-isolation validation across module boundaries;
 - end-to-end USER and SYSTEM scenarios.
 
-**Exit criterion:** DI/WPM trust Security-issued tokens as the common access contract.
+**Exit criterion:** DI/WPM trust Security-issued tokens as the common approved access contract.
 
 ---
 
@@ -314,19 +348,19 @@ Tasks:
 
 **Status: NOT STARTED**
 
-Required before considering `main` production-ready:
+Required before `main` can represent a production-ready Security release:
 
-- all approved Security v1.3 implementation scope completed or explicitly deferred by approved decision;
-- CI fully green;
+- approved v1.3 implementation scope complete or explicitly deferred by approved decision;
+- CI green;
 - Neon integration tests green;
 - Railway DEV stable;
-- UAT environment established;
+- UAT established;
 - live Clerk integration verified;
 - production network-risk provider selected/validated if required;
-- secrets/key rotation runbook validated;
+- secrets/key-rotation runbook validated;
 - retention/offboarding tested;
-- security review performed;
-- OpenAPI runtime conformance validated;
+- security review completed;
+- runtime OpenAPI conformance validated;
 - no unresolved P1 implementation blockers;
 - production Clerk plan reassessed before go-live.
 
@@ -334,17 +368,15 @@ Required before considering `main` production-ready:
 
 ## 5. Open design clarifications — DO NOT IMPLEMENT BY ASSUMPTION
 
-These remain explicitly unresolved from the v0.1 review:
-
 | ID | Open point | Status | Rule until resolved |
 |---|---|---|---|
-| OPEN-001 | Persistent idempotency storage model | BLOCKED | Header required, but do not claim cross-replica replay until approved persistence design exists |
-| OPEN-002 | Invalid correlation-ID rejection response semantics | PARTIAL | Current implementation generates a server correlation ID only for the rejection response; invalid caller value is never propagated |
+| OPEN-001 | Persistent idempotency storage model | BLOCKED | Header required; do not claim cross-replica replay until persistence design is approved |
+| OPEN-002 | Invalid correlation-ID rejection response semantics | PARTIAL | Current implementation generates a server correlation ID only for rejection response; caller's invalid value is never propagated |
 | OPEN-003 | Exact endpoint-level `security.*` administrator permissions | BLOCKED | Do not invent permission keys |
 | OPEN-004 | Cross-module `session_idle_timeout` definition/enforcement | BLOCKED | Do not invent heartbeat/introspection behavior |
-| OPEN-005 | Generic malformed-request 400 vs FastAPI/Pydantic 422 contract | BLOCKED | Do not invent a new Security error code without design approval |
+| OPEN-005 | Generic malformed-request 400 vs FastAPI/Pydantic 422 contract | BLOCKED | Do not invent a new Security error code without approval |
 
-Any new design gap found during implementation must be appended here before code is written against an assumption.
+Any newly discovered design ambiguity must be added here (or to a successor decision register) before implementation proceeds against an assumption.
 
 ---
 
@@ -359,13 +391,13 @@ main
 dev
   integrated development baseline
 
-  ↑ tested feature merge
+  ↑ green CI + reviewed feature merge
 
 feature/*
   isolated implementation increments
 ```
 
-Recommended feature branches:
+Current/expected branches:
 
 - `feature/security-ci`
 - `feature/neon-integration`
@@ -384,19 +416,17 @@ Do not push unfinished feature work directly to `main`.
 
 ## 7. Progress update procedure
 
-This file must be updated as part of every meaningful implementation milestone.
+Update this tracker as part of every meaningful implementation milestone:
 
-For each milestone/feature merge:
-
-1. change relevant item status (`PENDING → PARTIAL → DONE`);
-2. add the implementing commit/PR reference;
+1. change relevant status (`PENDING → PARTIAL → DONE`);
+2. record implementing commit/PR/reference;
 3. record validation evidence;
-4. move the `NEXT` marker to the next task;
-5. add any newly discovered unresolved design point to Section 5;
-6. update `docs/IMPLEMENTATION_STATUS.md` when implementation scope changes materially;
-7. append one entry to the progress history below.
+4. move `NEXT` to the next task;
+5. record newly discovered design gaps before coding them;
+6. update `docs/IMPLEMENTATION_STATUS.md` when runtime scope changes materially;
+7. append a progress-history entry.
 
-A task is not `DONE` merely because code exists. It is `DONE` only after review and its required validation evidence passes.
+A task is not `DONE` merely because code exists.
 
 ---
 
@@ -404,56 +434,57 @@ A task is not `DONE` merely because code exists. It is `DONE` only after review 
 
 | Date | Commit / reference | Change | Result |
 |---|---|---|---|
-| 2026-08-12 | `6b4b604f590b918655f695ef315dab457e47d9d9` | Repository initialized; `main`/`dev` baseline established | DONE |
-| 2026-08-12 | `d11e63f810a3411f0da8dd90b99ea37f5c623582` | Reviewed Security implementation v0.1 committed to `dev` | DONE — 30 pytest tests, design/static review passed |
-| 2026-08-12 | `8809e1db68308f4b8b856b4a36d8b7fe8ecf54d0` | Added next-steps/context-recovery execution guide | DONE |
-| 2026-08-12 | this commit | Added formal implementation progress tracker | DONE |
+| 2026-08-12 | `6b4b604f590b918655f695ef315dab457e47d9d9` | Repository initialized; `main`/`dev` established | DONE |
+| 2026-08-12 | `d11e63f810a3411f0da8dd90b99ea37f5c623582` | Reviewed Security implementation v0.1 committed | DONE — 30 tests + design/static review |
+| 2026-08-12 | `8809e1db68308f4b8b856b4a36d8b7fe8ecf54d0` | Added next-steps/context-recovery guide | DONE |
+| 2026-08-12 | `bc7b3a5f0b5e30e56b41ab279ac87e38acb450ce` | Added formal progress tracker | DONE |
+| 2026-08-12 | PR #1 / `42a2faee4668b026de47ae2daf9a5d47d2b87a4d` | Established CI gate and design-grounding policy | DONE — green CI run `31627397195` |
 
 ---
 
 ## 9. Current execution pointer
 
-**NEXT: Phase 1 — GitHub CI quality gate.**
+**NEXT: Phase 2 — Neon DEV migration/integration, after PR #1 is promoted to `dev` and the `dev` push CI run is confirmed green.**
 
-Do not start new business/security functionality before establishing the reproducible CI baseline unless an explicit decision changes this sequence.
-
-After CI is green:
+Execution sequence:
 
 ```text
-CI
- ↓
-Neon DEV migration/integration
- ↓
-Railway DEV deployment
- ↓
-USER device/session lifecycle
- ↓
-Admin APIs
- ↓
-SYSTEM + SERVICE_INTEGRATION
- ↓
-Operational lifecycle
- ↓
-Clerk live integration
- ↓
-DI/WPM integration
- ↓
-UAT / production readiness
+Phase 1 CI                 DONE
+      ↓
+Phase 2 Neon DEV           NEXT
+      ↓
+Phase 3 Railway DEV
+      ↓
+Phase 4 USER lifecycle
+      ↓
+Phase 5 Admin APIs
+      ↓
+Phase 6/7 Machine actors
+      ↓
+Phase 8 Operational lifecycle
+      ↓
+Phase 9 JWKS hardening
+      ↓
+Phase 10 Clerk live integration
+      ↓
+Phase 11 DI/WPM integration
+      ↓
+Phase 12 UAT / production readiness
 ```
 
 ---
 
 ## 10. Context-reset recovery
 
-After a context reset, read in this order before doing implementation work:
+After a context reset, read in this order before changing implementation:
 
-1. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md` — current done/pending/blocked position.
-2. `docs/NEXT_STEPS_AND_CONTEXT_RECOVERY.md` — execution sequencing and source hierarchy.
-3. `docs/IMPLEMENTATION_STATUS.md` — exact implemented code scope.
-4. `docs/DESIGN_TRACEABILITY_REVIEW_v0.1.md` or its latest successor — code/design review evidence.
-5. `docs/APPROVED_SOURCE_REFERENCE.md` — normative artifact hashes.
-6. Applicable Security v1.3 decision/correlation/lifecycle documents.
+1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md` — mandatory no-assumption/design-reference rule.
+2. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md` — current done/pending/blocked/NEXT position.
+3. `docs/NEXT_STEPS_AND_CONTEXT_RECOVERY.md` — execution sequencing and source hierarchy.
+4. `docs/IMPLEMENTATION_STATUS.md` — exact implemented runtime scope.
+5. latest design-traceability review.
+6. `docs/APPROVED_SOURCE_REFERENCE.md` — approved normative hashes.
+7. applicable v1.3 decision/correlation/lifecycle documents and approved OpenAPI/schema source.
+8. inspect current `dev` HEAD, active feature branch and open PR/CI state.
 
-Then inspect the current `dev` branch and latest commits before making changes.
-
-This procedure is intended to prevent reconstruction from memory/chat history and reduce design drift or hallucination.
+Do not reconstruct Security behavior from memory or chat history when approved source documents exist.
