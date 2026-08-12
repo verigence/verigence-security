@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-import jwt
 from fastapi import Depends, Header, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import jwt
 
 from verigence_security.adapters.identity import (
     AuthenticatedIdentity,
@@ -25,8 +25,6 @@ from verigence_security.repositories.security_repository import SecurityReposito
 from verigence_security.services.token_service import TokenService
 
 
-
-
 def correlation_header_parameter(
     value: str | None = Header(
         default=None,
@@ -39,6 +37,7 @@ def correlation_header_parameter(
     """OpenAPI declaration for the middleware-owned correlation header contract."""
 
     return value
+
 
 user_identity_bearer = HTTPBearer(
     auto_error=False,
