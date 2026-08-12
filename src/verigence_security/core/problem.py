@@ -11,7 +11,12 @@ from verigence_security.core.errors import SecurityError
 logger = logging.getLogger(__name__)
 
 
-def security_error_handler(request: Request, exc: SecurityError) -> JSONResponse:
+def security_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Registered specifically for SecurityError in main.py. The broader Exception annotation
+    # matches Starlette's handler protocol; this guard prevents accidental misuse elsewhere.
+    if not isinstance(exc, SecurityError):
+        raise exc
+
     cid = getattr(request.state, "correlation_id", None)
     response = JSONResponse(
         status_code=exc.status_code,
