@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
+import jwt
 from fastapi import Depends, Header, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-import jwt
 
 from verigence_security.adapters.identity import (
     AuthenticatedIdentity,
