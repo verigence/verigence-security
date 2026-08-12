@@ -194,20 +194,19 @@ def test_actor_type_check_constraint_is_enforced(neon_fixture: tuple[object, Fix
     invalid_id = str(uuid4())
     now = datetime.now(UTC)
 
-    with pytest.raises(IntegrityError):
-        with engine.begin() as conn:  # type: ignore[union-attr]
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO security.security_principals
-                      (principal_id, actor_type, principal_name, status,
-                       created_at_utc, updated_at_utc)
-                    VALUES
-                      (:principal_id, 'INVALID_ACTOR', 'invalid fixture', 'ACTIVE', :now, :now)
-                    """
-                ),
-                {"principal_id": invalid_id, "now": now},
-            )
+    with pytest.raises(IntegrityError), engine.begin() as conn:  # type: ignore[union-attr]
+        conn.execute(
+            text(
+                """
+                INSERT INTO security.security_principals
+                  (principal_id, actor_type, principal_name, status,
+                   created_at_utc, updated_at_utc)
+                VALUES
+                  (:principal_id, 'INVALID_ACTOR', 'invalid fixture', 'ACTIVE', :now, :now)
+                """
+            ),
+            {"principal_id": invalid_id, "now": now},
+        )
 
 
 def test_user_principal_foreign_key_is_enforced(neon_fixture: tuple[object, FixtureIds]) -> None:
@@ -215,16 +214,15 @@ def test_user_principal_foreign_key_is_enforced(neon_fixture: tuple[object, Fixt
     missing_principal_id = str(uuid4())
     now = datetime.now(UTC)
 
-    with pytest.raises(IntegrityError):
-        with engine.begin() as conn:  # type: ignore[union-attr]
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO security.users
-                      (user_id, display_name, status, created_at_utc, updated_at_utc)
-                    VALUES
-                      (:user_id, 'missing principal fixture', 'ACTIVE', :now, :now)
-                    """
-                ),
-                {"user_id": missing_principal_id, "now": now},
-            )
+    with pytest.raises(IntegrityError), engine.begin() as conn:  # type: ignore[union-attr]
+        conn.execute(
+            text(
+                """
+                INSERT INTO security.users
+                  (user_id, display_name, status, created_at_utc, updated_at_utc)
+                VALUES
+                  (:user_id, 'missing principal fixture', 'ACTIVE', :now, :now)
+                """
+            ),
+            {"user_id": missing_principal_id, "now": now},
+        )
