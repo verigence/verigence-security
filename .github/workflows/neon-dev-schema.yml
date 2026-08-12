@@ -1,0 +1,106 @@
+name: Neon DEV Security Schema
+
+on:
+  push:
+    branches:
+      - feature/neon-integration
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neon-dev-security-schema
+  cancel-in-progress: false
+
+jobs:
+  apply-security-baseline:
+    name: Apply approved Security v1.3 schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Require configured Neon migration secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
+            echo "::error::MIGRATION_DATABASE_URL is not configured or is unavailable to this workflow."
+            exit 1
+          fi
+          case "$MIGRATION_DATABASE_URL" in
+            postgresql://*|postgres://*) ;;
+            *)
+              echo "::error::MIGRATION_DATABASE_URL must be a direct PostgreSQL URL usable by psql."
+              exit 1
+              ;;
+          esac
+
+      - name: Ensure PostgreSQL client is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          psql --version
+
+      - name: Refuse to overwrite an existing non-empty Security schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          object_count="$(psql "$MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'security'
+              AND c.relkind IN ('r','p','v','m','S','f');
+          ")"
+          if [ "$object_count" != "0" ]; then
+            echo "::error::The security schema already contains $object_count relation(s). Refusing to modify it without review."
+            exit 1
+          fi
+          echo "Security schema is absent or empty; approved baseline may be applied."
+
+      - name: Apply approved v1.3 migration transactionally
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$MIGRATION_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            --single-transaction \
+            -f migrations/0001_security_baseline_v1.3.sql
+
+      - name: Validate created Security schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_tables="$(grep -Ec '^CREATE TABLE security\.' migrations/0001_security_baseline_v1.3.sql)"
+          actual_tables="$(psql "$MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'security'
+              AND c.relkind IN ('r','p');
+          ")"
+          schema_exists="$(psql "$MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM pg_namespace WHERE nspname = 'security';
+          ")"
+
+          if [ "$schema_exists" != "1" ]; then
+            echo "::error::security schema was not created."
+            exit 1
+          fi
+          if [ "$actual_tables" != "$expected_tables" ]; then
+            echo "::error::Security table-count mismatch: expected $expected_tables, found $actual_tables."
+            exit 1
+          fi
+
+          echo "Neon DEV Security baseline validated: schema=security tables=$actual_tables."
