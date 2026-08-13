@@ -191,7 +191,8 @@ def test_refresh_repository_moves_active_session_to_new_approved_location() -> N
             row = conn.execute(
                 text(
                     """
-                    SELECT location_id,source_ip::text,authorization_version,status
+                    SELECT location_id,host(source_ip) AS source_ip,
+                           authorization_version,status
                     FROM security.access_sessions
                     WHERE access_session_id=:id
                     """
