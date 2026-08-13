@@ -3,7 +3,7 @@ name: Phase 4 Neon Device Session Lifecycle
 on:
   push:
     branches:
-      - feature/device-session-lifecycle
+      - feature/device-*
   workflow_dispatch:
 
 permissions:
