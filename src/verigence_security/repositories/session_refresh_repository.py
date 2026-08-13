@@ -113,6 +113,14 @@ class SessionRefreshRepository:
         ).first()
         return row is not None
 
+    def record_evaluation(self, payload: dict[str, Any]) -> None:
+        columns = ",".join(payload)
+        values = ",".join(f":{key}" for key in payload)
+        self.s.execute(
+            text(f"INSERT INTO security.access_context_evaluations ({columns}) VALUES ({values})"),
+            payload,
+        )
+
     def commit(self) -> None:
         self.s.commit()
 
