@@ -70,7 +70,12 @@ class Settings(BaseSettings):
             if self.dev_mock_token_ttl_minutes is None:
                 raise ValueError("DEV mock token TTL is required when mock auth is enabled")
         if self.platform_bootstrap_enabled:
-            if self.app_env not in {AppEnvironment.LOCAL, AppEnvironment.CI, AppEnvironment.DEV}:
+            allowed_bootstrap_envs = {
+                AppEnvironment.LOCAL,
+                AppEnvironment.CI,
+                AppEnvironment.DEV,
+            }
+            if self.app_env not in allowed_bootstrap_envs:
                 raise ValueError("Platform bootstrap is prohibited in UAT/production")
             if not self.platform_bootstrap_login.strip():
                 raise ValueError("Platform bootstrap login is required when bootstrap is enabled")
