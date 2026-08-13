@@ -3,14 +3,14 @@
 **Repository:** `verigence/verigence-security`  
 **Primary integration branch:** `dev`  
 **Approved baseline:** Security Solution v1.3 + explicit Phase 4 clarifications  
-**Current promoted DEV commit:** `2c43d87c4eb8e52ee50ba1ff60556640d7f4985f`  
+**Current promoted DEV commit:** `36d8618b61fca23b018e3f32f1a15ba06e85f43a`  
 **Last updated:** 2026-08-13
 
 ## 1. Governing rule
 
 Implementation is grounded in approved Security artifacts, not chat reconstruction.
 
-Priority order after a context reset:
+After a context reset, read in this order:
 
 1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`.
 2. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`.
@@ -19,28 +19,15 @@ Priority order after a context reset:
 5. `docs/SECURITY_DECISION_REGISTER_v1.3.md`.
 6. `docs/SECURITY_OPERATIONAL_LIFECYCLE_v1.3.md`.
 7. `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
-8. Phase evidence documents and current `dev` code.
-9. Current PR/CI/Railway state.
+8. `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
+9. `docs/PHASE_5_SECURITY_ADMINISTRATION.md`.
+10. Current `dev`, open PRs and CI/Railway state.
 
-Do not invent a missing API shape, permission, error code, status meaning, persistence model, event taxonomy or Security threshold.
+Do not invent a missing API shape, permission, error code, state transition, activation prerequisite, persistence model, event taxonomy, authorization-version rule or Security threshold.
 
-## 2. Approved-source integrity
+## 2. Current implementation position
 
-Approved v1.3 references include:
-
-| Artifact | Approved SHA-256 |
-|---|---|
-| `SECURITY_OPENAPI_v1.3.yaml` | `07f2be9acdf0638647a42d9536bb4575bfdbc72111d9d0b285af64162da98c37` |
-| `SECURITY_POSTGRESQL_SCHEMA_v1.3.sql` | `175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d` |
-| `SECURITY_DECISION_REGISTER_v1.3.md` | `a05b5e0f04cc63e5d76f54a3a120161aa8ce2172e7c810534c36445e85608070` |
-| `SECURITY_CORRELATION_STANDARD_v1.3.md` | `fa0f0886eaf6482e52c00ea612550d0674e5ed7b099bc6e9e2e71a84c1a1e1e0` |
-| `SECURITY_OPERATIONAL_LIFECYCLE_v1.3.md` | `0c7c83ae08d4488951ff90e8c95c34eff7220b55da17329dc65699f91288cceb` |
-
-The OpenAPI was never committed to this repository. Repository history contains no delete/change commit for it. Public lifecycle route contracts remain source-gated until the checksum-matching artifact is recovered or a replacement contract is explicitly approved/versioned.
-
-## 3. Current implementation position
-
-### Phase 1 — CI quality gate
+### Phase 1 — CI
 
 **DONE.** GitHub Actions enforce design/static integrity, compile, Ruff, strict Mypy, Pytest, package build and dependency consistency.
 
@@ -54,103 +41,102 @@ The OpenAPI was never committed to this repository. Repository history contains 
 
 ### Phase 4 — USER device/session lifecycle
 
-**PARTIAL — ACTIVE.** Internal lifecycle is substantially complete; public endpoint contracts remain blocked by the missing approved OpenAPI.
+**SUBSTANTIALLY COMPLETE INTERNALLY / CONTRACT BOUNDARY.**
 
-Completed Phase 4 behavior:
+Internal device/session persistence, device-limit concurrency, USER revoke, complete refresh re-evaluation, approved location movement, denial evidence and non-ACTIVE device gating are implemented and validated. Latest accumulated Phase 4 Neon suite `31675733002` is **12/12 PASS**.
 
-- PENDING device + enrollment-request persistence;
-- PENDING device approval persistence;
-- Tenant-configured active-device limit under concurrent approval;
-- one ACTIVE USER session per Tenant/user/device PostgreSQL invariant;
-- scoped transactional USER session revoke;
-- mandatory fresh geo on USER refresh;
-- complete internal USER refresh policy re-evaluation;
-- approved refresh context movement under `CLAR-004-001`:
-  - same approved location → refresh same session;
-  - different approved/assigned location → move same session after complete policy re-evaluation;
-  - unapproved geo → deny;
-- refreshed token/evidence assert the location that passed the current refresh;
-- original session maximum-duration cap preserved;
-- canonical refresh lock order: session discovery read → device lock → session row lock;
-- successful refresh access-context evidence;
-- refresh 4xx denial evidence using existing normative Security reason codes;
-- both registered-device `BLOCKED` and `REVOKED` states are proven non-ACTIVE and therefore block refresh/new issuance with `DEVICE_NOT_ACTIVE`.
+Remaining Phase 4 items depend on missing approved public contracts, persistent idempotency design, or the unfrozen business distinction between device `BLOCKED` and `REVOKED`.
 
-Latest device-gate validation:
+### Phase 5 — Security administration foundation
 
-- PR #29 Security CI `31675760014`: PASS;
-- Phase 4 Neon `31675733002`: **12/12 PASS**;
-- promoted commit `2c43d87c4eb8e52ee50ba1ff60556640d7f4985f`;
-- post-merge Security CI `31675854749`: PASS;
-- Railway `31675854751`: PASS through exact image deployment, readiness, liveness and correlation.
+**PARTIAL / CONTRACT BOUNDARY.** Deterministic internal administration is now substantially implemented and deployed.
 
-## 4. Current explicit clarifications / blockers
+Completed internal administration:
 
-### RESOLVED — USER refresh approved-location movement
+- Tenant Security Policy configuration;
+- Security Retention Policy configuration;
+- Tenant locations;
+- schedules and schedule windows;
+- Security-side USER onboarding records;
+- external identity provider-subject mapping;
+- Tenant membership;
+- employee-location/schedule assignment;
+- canonical permission catalogue entries supplied by approved configuration;
+- Tenant roles and role-permission grants;
+- user-role assignment;
+- SEC-032 activation-readiness foundation.
 
-`CLAR-004-001` in `docs/PHASE_4_APPROVED_CLARIFICATIONS.md` is authoritative for implementation:
+Latest accumulated Phase 5 Neon suite `31681385872`: **11/11 PASS**.
 
-- refresh geo is matched only against current effective approved/assigned locations;
-- another approved location may replace the session location only after full policy re-evaluation;
-- unapproved geo is rejected.
+Current promoted commit: `36d8618b61fca23b018e3f32f1a15ba06e85f43a`.  
+Post-merge Security CI `31681687084`: PASS.  
+Railway `31681687106`: PASS through exact-image deployment, readiness, liveness and correlation.
 
-### BLOCKED — persistent cross-replica idempotency
+## 3. Phase 5 readiness rule
 
-The approved behavior requires persistence across stateless replicas, but v1.3 contains no approved idempotency persistence model.
+SEC-032 readiness is deliberately fail-closed.
 
-### BLOCKED BY SOURCE — public lifecycle routes
+The active approved sources currently support these checks:
 
-Do not invent request/response/security shapes for enrollment, approval/block/revoke, USER refresh or USER revoke until the authoritative OpenAPI is recovered or explicitly replaced/versioned.
+- ACTIVE Tenant Security Policy / mandatory Tenant Security configuration (SEC-020);
+- ACTIVE Security retention policy explicitly required before activation (SEC-037).
 
-### OPEN — device `BLOCKED` versus `REVOKED` business semantics
+`TenantActivationReadinessService` reports PASS/FAIL for those known checks but returns:
 
-The schema permits both states and v1.3 requires an ACTIVE device for USER access. What is deterministic and already enforced is:
+- `prerequisite_catalogue_complete=false`;
+- `activation_allowed=false`.
 
-- `BLOCKED` → not ACTIVE → `DEVICE_NOT_ACTIVE`;
-- `REVOKED` → not ACTIVE → `DEVICE_NOT_ACTIVE`.
+Even when all currently-known checks pass, the Tenant remains `CONFIGURING`. Do not implement the `CONFIGURING → ACTIVE` mutation until the complete approved readiness prerequisite catalogue is recovered or explicitly versioned.
 
-Do **not** invent the administrative meaning, transition criteria, reversibility or automatic session-side effects that distinguish BLOCKED from REVOKED until approved source/clarification defines them.
+## 4. Current blockers / open points
 
-### OPEN — `security_events.event_type` taxonomy
-
-The schema accepts free text. Do not invent event names merely because the table permits them. Use `access_context_evaluations` for deterministic ALLOW/DENY policy evidence where appropriate.
-
-### BLOCKED — endpoint-level `security.*` administrator permissions
-
-Permission syntax is frozen; the exact permission key for each admin endpoint is not.
+- **OpenAPI unavailable:** approved `SECURITY_OPENAPI_v1.3.yaml` checksum is known, but the source is unavailable. Do not infer public route shapes.
+- **Admin permissions:** exact endpoint-level `security.*` permission keys are not frozen. Do not invent them.
+- **Activation catalogue:** SEC-032 requires a prerequisite list, but the complete list is not present in active approved sources. Keep activation disabled.
+- **Persistent idempotency:** approved cross-replica persistence model is missing.
+- **Authorization version:** do not invent automatic bump triggers; internal administration preserves the explicitly supplied approved value.
+- **Security event taxonomy:** do not invent free-text event names.
+- **Device BLOCKED vs REVOKED:** both are non-ACTIVE for access, but their separate business transition semantics remain unfrozen.
+- **Clerk live orchestration:** Security-side USER/external identity persistence exists; invitation/provider API orchestration remains the later Clerk integration phase.
 
 ## 5. Current execution pointer
 
-**NOW:** continue only deterministic Phase 4 internal behavior that does not require the missing OpenAPI, an unfrozen device-state distinction or an invented security-event taxonomy.
+**NOW:** Phase 5 deterministic internal administration foundation is complete enough to stop safely at its contract boundary.
 
-**NEXT CONTRACT DEPENDENCY:** recover/version `SECURITY_OPENAPI_v1.3.yaml` and then wire exact public lifecycle routes followed by deployed Railway lifecycle E2E.
+**DO NOT:** enable Tenant activation or expose public Security administration routes by assumption.
 
-Do not skip to a later phase merely to work around an unresolved earlier contract.
+**NEXT SAFE PARALLEL PHASE:** begin Phase 6 SYSTEM/SERVICE_INTEGRATION internals only from approved machine-principal schema/decisions. Do not use Phase 6 to bypass unresolved Phase 5 public/activation contracts.
+
+```text
+Phase 1 CI                              DONE
+Phase 2 Neon DEV                        DONE
+Phase 3 Railway DEV                     DONE
+Phase 4 internal USER lifecycle         SUBSTANTIALLY DONE / CONTRACT BOUNDARY
+Phase 5 policies/retention              DONE
+Phase 5 locations/schedules             DONE
+Phase 5 membership/RBAC                 DONE
+Phase 5 USER onboarding persistence     DONE
+Phase 5 readiness foundation            DONE / FAIL-CLOSED
+Phase 5 Tenant activation               BLOCKED — incomplete SEC-032 catalogue
+Phase 5 public admin APIs               BLOCKED — OpenAPI + admin permissions
+Phase 6 machine-actor internals          NEXT SAFE PARALLEL PHASE
+```
 
 ## 6. Promotion discipline
 
 ```text
 feature/*
-   ↓ real tests + Security CI
+   ↓ real Neon tests + Security CI
   dev
-   ↓ exact-commit Security CI gate
+   ↓ exact-commit Security CI
 immutable GHCR image
    ↓
 Railway DEV
    ↓ readiness + liveness + correlation
 ```
 
-For every meaningful increment:
-
-1. isolate it on a feature branch;
-2. run applicable real Neon tests;
-3. open a PR to `dev`;
-4. require Security CI green;
-5. merge only the validated head;
-6. verify the exact merge commit through Railway when runtime code changes;
-7. update the progress tracker/status/evidence;
-8. record any new ambiguity before coding around it.
+Every meaningful increment must preserve this promotion sequence and update the tracker/evidence before it is considered complete.
 
 ## 7. Context-reset warning
 
-The old v0.1 roadmap is historical only. **Do not restart from Phase 1.** Phases 1–3 are complete; current work is Phase 4 at the contract boundary described above.
+**Do not restart from Phase 1 or Phase 4 after a reset.** Phases 1–3 are complete. Phase 4 and Phase 5 have reached the explicit contract boundaries described above.
