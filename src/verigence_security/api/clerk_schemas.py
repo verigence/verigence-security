@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from pydantic import BaseModel, Field, model_validator
 
 from verigence_security.api.schemas import GeoContext
@@ -19,8 +21,8 @@ class ClerkCredentialRequest(BaseModel):
 
 
 class ClerkUserAccessLoginRequest(ClerkCredentialRequest):
-    tenantId: str = Field(min_length=1)
-    deviceId: str = Field(min_length=1)
+    tenantId: UUID
+    deviceId: UUID
     geo: GeoContext
 
 
