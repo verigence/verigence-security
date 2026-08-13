@@ -175,37 +175,9 @@ jobs:
           before_ids="$(printf '%s' "$response" | jq -c '[.data.deployments.edges[].node.id]')"
           echo "ids=$before_ids" >> "$GITHUB_OUTPUT"
 
-      - name: Install pinned Railway CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="5.30.1"
-          asset="railway-v${version}-x86_64-unknown-linux-gnu.tar.gz"
-          url="https://github.com/railwayapp/cli/releases/download/v${version}/${asset}"
-          expected_sha256="c6169e27e87d95d73fb7a30ec2c6b6c767c042f8a3ba9aa98c92deccda8db10c"
-
-          curl --fail --location --silent --show-error \
-            --retry 5 \
-            --retry-delay 2 \
-            --retry-all-errors \
-            --output "/tmp/${asset}" \
-            "$url"
-
-          echo "${expected_sha256}  /tmp/${asset}" | sha256sum --check -
-          binary_path="$(tar -tzf "/tmp/${asset}" | awk '/(^|\/)railway$/ {print; exit}')"
-          if [ -z "$binary_path" ]; then
-            echo "::error::Pinned Railway CLI archive does not contain the railway binary."
-            exit 1
-          fi
-          mkdir -p /tmp/railway-cli
-          tar -xzf "/tmp/${asset}" -C /tmp/railway-cli "$binary_path"
-          sudo install -m 0755 "/tmp/railway-cli/${binary_path}" /usr/local/bin/railway
-          railway --version | grep -F "5.30.1"
-
       - name: Connect exact immutable image to Railway DEV service
         shell: bash
         env:
-          RAILWAY_TOKEN: ""
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: |
           set -euo pipefail
@@ -214,12 +186,32 @@ jobs:
             exit 1
           fi
 
-          railway service source connect \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT_ID" \
-            --service "$RAILWAY_SERVICE_ID" \
-            --image "${{ steps.image.outputs.image_ref }}" \
-            --json
+          mutation='mutation ServiceConnect($id: String!, $input: ServiceConnectInput!) { serviceConnect(id: $id, input: $input) { id name } }'
+          variables="$(jq -cn \
+            --arg id "$RAILWAY_SERVICE_ID" \
+            --arg image "${{ steps.image.outputs.image_ref }}" \
+            '{id:$id,input:{image:$image}}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Railway ServiceConnect rejected the workspace/account API token or image-source update."
+            exit 1
+          fi
+
+          connected_service_id="$(printf '%s' "$response" | jq -r '.data.serviceConnect.id // empty')"
+          if [ "$connected_service_id" != "$RAILWAY_SERVICE_ID" ]; then
+            echo "::error::Railway ServiceConnect did not return the expected service ID."
+            exit 1
+          fi
+
+          echo "Railway service source now points to the exact immutable GHCR digest."
 
       - name: Wait for the new Railway deployment to succeed
         id: deployment
@@ -354,7 +346,7 @@ jobs:
             --dump-header /tmp/live.headers \
             --header "X-Correlation-ID: $correlation_id" \
             "$base_url/health/live" > /tmp/live.json
-          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\r", "", $2); print $2}' /tmp/live.headers | tail -n 1)"
+          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\\r", "", $2); print $2}' /tmp/live.headers | tail -n 1)"
           if [ "$returned" != "$correlation_id" ]; then
             echo "::error::Correlation ID mismatch. Expected $correlation_id, received ${returned:-<missing>}."
             exit 1
