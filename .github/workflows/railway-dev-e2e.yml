@@ -1,0 +1,310 @@
+name: Railway DEV End-to-End Access
+
+on:
+  push:
+    branches:
+      - feature/railway-dev-runtime-config
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-dev-e2e
+  cancel-in-progress: false
+
+env:
+  BASE_URL: https://verigence-security-dev.up.railway.app
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Prepare temporary fixture identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_ENV"
+          from datetime import datetime, timezone
+          from uuid import uuid4
+
+          names = [
+              "TENANT_ID", "USER_ID", "MEMBERSHIP_ID", "DEVICE_ID", "LOCATION_ID",
+              "SCHEDULE_ID", "SCHEDULE_WINDOW_ID", "ROLE_ID", "ROLE_ASSIGNMENT_ID",
+              "LOCATION_ASSIGNMENT_ID",
+          ]
+          for name in names:
+              print(f"{name}={uuid4()}")
+          now = datetime.now(timezone.utc)
+          print(f"ISO_DAY={now.isoweekday()}")
+          print(f"FIXTURE_SUFFIX={uuid4().hex[:12]}")
+          PY
+
+      - name: Ensure PostgreSQL client is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          [ "$(psql "$MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1;')" = "1" ]
+
+      - name: Seed disposable approved-schema access fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -v tenant_id="$TENANT_ID" \
+            -v user_id="$USER_ID" \
+            -v membership_id="$MEMBERSHIP_ID" \
+            -v device_id="$DEVICE_ID" \
+            -v location_id="$LOCATION_ID" \
+            -v schedule_id="$SCHEDULE_ID" \
+            -v schedule_window_id="$SCHEDULE_WINDOW_ID" \
+            -v role_id="$ROLE_ID" \
+            -v role_assignment_id="$ROLE_ASSIGNMENT_ID" \
+            -v location_assignment_id="$LOCATION_ASSIGNMENT_ID" \
+            -v iso_day="$ISO_DAY" \
+            -v suffix="$FIXTURE_SUFFIX" <<'SQL'
+          BEGIN;
+
+          INSERT INTO security.tenants
+            (tenant_id, tenant_code, tenant_name, status, created_at_utc, updated_at_utc)
+          VALUES
+            (:'tenant_id', 'phase3-' || :'suffix', 'Phase 3 Railway DEV E2E', 'ACTIVE', now(), now());
+
+          INSERT INTO security.security_principals
+            (principal_id, actor_type, principal_name, status, created_at_utc, updated_at_utc)
+          VALUES
+            (:'user_id', 'USER', 'Phase 3 Railway DEV E2E user', 'ACTIVE', now(), now());
+
+          INSERT INTO security.users
+            (user_id, display_name, status, created_at_utc, updated_at_utc)
+          VALUES
+            (:'user_id', 'Phase 3 Railway DEV E2E user', 'ACTIVE', now(), now());
+
+          INSERT INTO security.tenant_memberships
+            (membership_id, tenant_id, user_id, status, authorization_version, created_at_utc, updated_at_utc)
+          VALUES
+            (:'membership_id', :'tenant_id', :'user_id', 'ACTIVE', 1, now(), now());
+
+          INSERT INTO security.tenant_security_policies
+            (tenant_id, max_active_devices_per_user, max_geo_accuracy_meters,
+             max_geo_age_seconds, geo_revalidation_interval_seconds,
+             access_token_ttl_minutes, machine_token_ttl_minutes,
+             session_idle_timeout_minutes, session_max_duration_minutes,
+             vpn_detected_action, vpn_unknown_action, configuration_version,
+             status, updated_by_user_id, updated_at_utc)
+          VALUES
+            (:'tenant_id', 2, 50, 300, 3600, 60, 30, 30, 20,
+             'FLAG', 'FLAG', 1, 'ACTIVE', :'user_id', now());
+
+          INSERT INTO security.registered_devices
+            (device_id, tenant_id, user_id, device_type, platform, device_name,
+             status, registered_at_utc, approved_by_user_id, approved_at_utc)
+          VALUES
+            (:'device_id', :'tenant_id', :'user_id', 'WEB', 'LINUX',
+             'Phase 3 Railway DEV E2E device', 'ACTIVE', now(), :'user_id', now());
+
+          INSERT INTO security.tenant_locations
+            (location_id, tenant_id, location_code, location_name, location_type,
+             latitude, longitude, allowed_radius_meters, timezone_iana,
+             status, created_at_utc, updated_at_utc)
+          VALUES
+            (:'location_id', :'tenant_id', 'e2e-' || :'suffix', 'Phase 3 E2E location',
+             'DEALERSHIP', 28.459500, 77.026600, 100, 'UTC', 'ACTIVE', now(), now());
+
+          INSERT INTO security.access_schedules
+            (schedule_id, tenant_id, schedule_key, schedule_name, status, created_at_utc, updated_at_utc)
+          VALUES
+            (:'schedule_id', :'tenant_id', 'e2e-' || :'suffix', 'Phase 3 E2E schedule',
+             'ACTIVE', now(), now());
+
+          INSERT INTO security.access_schedule_windows
+            (schedule_window_id, tenant_id, schedule_id, iso_day_of_week,
+             start_local_time, end_local_time, crosses_midnight, status)
+          VALUES
+            (:'schedule_window_id', :'tenant_id', :'schedule_id', :iso_day,
+             '00:00:00', '00:00:00', true, 'ACTIVE');
+
+          INSERT INTO security.user_location_assignments
+            (assignment_id, tenant_id, user_id, location_id, schedule_id,
+             status, assigned_by_user_id, assigned_at_utc)
+          VALUES
+            (:'location_assignment_id', :'tenant_id', :'user_id', :'location_id', :'schedule_id',
+             'ACTIVE', :'user_id', now());
+
+          INSERT INTO security.permissions
+            (permission_key, module_key, resource_key, action_key, description, status)
+          VALUES
+            ('di.document.read', 'di', 'document', 'read',
+             'Temporary Phase 3 Railway DEV E2E fixture', 'ACTIVE')
+          ON CONFLICT (permission_key) DO NOTHING;
+
+          INSERT INTO security.roles
+            (role_id, tenant_id, role_key, role_name, status, created_at_utc, updated_at_utc)
+          VALUES
+            (:'role_id', :'tenant_id', 'PC_E2E_' || :'suffix', 'Phase 3 E2E Process Consultant',
+             'ACTIVE', now(), now());
+
+          INSERT INTO security.role_permissions
+            (tenant_id, role_id, permission_key, assigned_at_utc)
+          VALUES
+            (:'tenant_id', :'role_id', 'di.document.read', now());
+
+          INSERT INTO security.user_role_assignments
+            (assignment_id, tenant_id, user_id, role_id, status,
+             assigned_by_user_id, assigned_at_utc)
+          VALUES
+            (:'role_assignment_id', :'tenant_id', :'user_id', :'role_id', 'ACTIVE', :'user_id', now());
+
+          COMMIT;
+          SQL
+          echo "Disposable Neon E2E fixture created."
+
+      - name: Execute live DEV mock-auth to access-session flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          correlation_id="$(python -c 'import uuid; print(uuid.uuid4())')"
+          captured_at="$(python -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')"
+
+          mock_code="$(curl --silent --show-error \
+            --output /tmp/mock.json \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$(jq -cn --arg user "$USER_ID" '{userId:$user}')" \
+            "$BASE_URL/security/v1/dev/mock-auth/token")"
+          if [ "$mock_code" != "200" ]; then
+            echo "::error::DEV mock identity token request failed with HTTP $mock_code."
+            jq -c 'del(.mockIdentityToken)' /tmp/mock.json 2>/dev/null || true
+            exit 1
+          fi
+          mock_token="$(jq -r '.mockIdentityToken // empty' /tmp/mock.json)"
+          [ -n "$mock_token" ] || { echo "::error::Mock identity token missing."; exit 1; }
+          echo "::add-mask::$mock_token"
+
+          request_body="$(jq -cn \
+            --arg tenant "$TENANT_ID" \
+            --arg device "$DEVICE_ID" \
+            --arg captured "$captured_at" \
+            '{tenantId:$tenant,deviceId:$device,geo:{latitude:28.4595,longitude:77.0266,accuracyMeters:8,capturedAt:$captured,source:"BROWSER",integrityStatus:"NORMAL",integrityReason:null}}')"
+
+          access_code="$(curl --silent --show-error \
+            --output /tmp/access.json \
+            --dump-header /tmp/access.headers \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $mock_token" \
+            --header "Idempotency-Key: phase3-$FIXTURE_SUFFIX" \
+            --header "X-Correlation-ID: $correlation_id" \
+            --data "$request_body" \
+            "$BASE_URL/security/v1/access-sessions")"
+
+          if [ "$access_code" != "200" ]; then
+            echo "::error::DEV access-session request failed with HTTP $access_code."
+            jq -c 'del(.accessToken)' /tmp/access.json 2>/dev/null || cat /tmp/access.json
+            exit 1
+          fi
+
+          returned_correlation="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\r", "", $2); print $2}' /tmp/access.headers | tail -n 1)"
+          [ "$returned_correlation" = "$correlation_id" ] || {
+            echo "::error::Access-session correlation ID mismatch."
+            exit 1
+          }
+
+          jq -e \
+            --arg tenant "$TENANT_ID" \
+            --arg device "$DEVICE_ID" \
+            --arg location "$LOCATION_ID" \
+            '.actorType == "USER" and .tenantId == $tenant and .deviceId == $device and .locationId == $location and (.permissions | index("di.document.read") != null) and (.roles | length >= 1) and (.accessToken | type == "string" and length > 20)' \
+            /tmp/access.json >/dev/null
+
+          python - <<'PY'
+          import base64
+          import json
+          import os
+
+          response = json.load(open('/tmp/access.json', encoding='utf-8'))
+          token = response['accessToken']
+          header_part, payload_part, signature_part = token.split('.')
+
+          def decode(part: str):
+              padded = part + '=' * (-len(part) % 4)
+              return json.loads(base64.urlsafe_b64decode(padded.encode()))
+
+          header = decode(header_part)
+          claims = decode(payload_part)
+          assert header['alg'] == 'RS256'
+          assert header['kid'] == 'dev-sec-20260813-01'
+          assert claims['iss'] == 'verigence-security'
+          assert claims['aud'] == 'verigence-platform'
+          assert claims['actor_type'] == 'USER'
+          assert claims['tenant_id'] == os.environ['TENANT_ID']
+          assert claims['device_id'] == os.environ['DEVICE_ID']
+          assert claims['location_id'] == os.environ['LOCATION_ID']
+          assert 'di.document.read' in claims['permissions']
+          assert signature_part
+          print('Issued Security JWT header/claim contract validated without printing token material.')
+          PY
+
+          jwks_code="$(curl --silent --show-error --output /tmp/jwks.json --write-out '%{http_code}' "$BASE_URL/.well-known/jwks.json")"
+          if [ "$jwks_code" != "200" ]; then
+            jwks_code="$(curl --silent --show-error --output /tmp/jwks.json --write-out '%{http_code}' "$BASE_URL/security/v1/.well-known/jwks.json")"
+          fi
+          [ "$jwks_code" = "200" ] || { echo "::error::JWKS endpoint unavailable."; exit 1; }
+          jq -e '.keys[] | select(.kid == "dev-sec-20260813-01" and .kty == "RSA" and .alg == "RS256")' /tmp/jwks.json >/dev/null
+
+          echo "Live DEV E2E succeeded: mock identity -> Neon authorization -> access session -> RS256 Security JWT."
+          echo "Validated actorType=USER, Tenant/device/location binding, RBAC permission and correlation-ID propagation."
+
+      - name: Cleanup disposable Neon E2E fixture
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${TENANT_ID:-}" ] || [ -z "${USER_ID:-}" ]; then
+            echo "Fixture identifiers unavailable; nothing to clean."
+            exit 0
+          fi
+
+          psql "$MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -v tenant_id="$TENANT_ID" \
+            -v user_id="$USER_ID" \
+            -v membership_id="$MEMBERSHIP_ID" \
+            -v device_id="$DEVICE_ID" \
+            -v location_id="$LOCATION_ID" \
+            -v schedule_id="$SCHEDULE_ID" \
+            -v role_id="$ROLE_ID" <<'SQL'
+          BEGIN;
+          DELETE FROM security.access_context_evaluations WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.access_sessions WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.external_identities WHERE user_id=:'user_id';
+          DELETE FROM security.user_role_assignments WHERE tenant_id=:'tenant_id' AND user_id=:'user_id';
+          DELETE FROM security.role_permissions WHERE tenant_id=:'tenant_id' AND role_id=:'role_id';
+          DELETE FROM security.roles WHERE tenant_id=:'tenant_id' AND role_id=:'role_id';
+          DELETE FROM security.user_location_assignments WHERE tenant_id=:'tenant_id' AND user_id=:'user_id';
+          DELETE FROM security.access_schedule_overrides WHERE tenant_id=:'tenant_id' AND user_id=:'user_id';
+          DELETE FROM security.access_schedule_windows WHERE tenant_id=:'tenant_id' AND schedule_id=:'schedule_id';
+          DELETE FROM security.access_schedules WHERE tenant_id=:'tenant_id' AND schedule_id=:'schedule_id';
+          DELETE FROM security.registered_devices WHERE device_id=:'device_id';
+          DELETE FROM security.tenant_locations WHERE tenant_id=:'tenant_id' AND location_id=:'location_id';
+          DELETE FROM security.tenant_security_policies WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.tenant_memberships WHERE membership_id=:'membership_id';
+          DELETE FROM security.users WHERE user_id=:'user_id';
+          DELETE FROM security.security_principals WHERE principal_id=:'user_id';
+          DELETE FROM security.tenants WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.permissions
+            WHERE permission_key='di.document.read'
+              AND description='Temporary Phase 3 Railway DEV E2E fixture'
+              AND NOT EXISTS (
+                SELECT 1 FROM security.role_permissions WHERE permission_key='di.document.read'
+              );
+          COMMIT;
+          SQL
+          echo "Disposable Neon E2E fixture cleaned up."
