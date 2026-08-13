@@ -10,7 +10,8 @@
 **Phase 1 post-merge CI run:** `31627855570`  
 **Phase 2 Neon validation run:** `31630275529`  
 **Phase 2 promotion:** PR #2 merged to `dev`  
-**Phase 3 Railway deployment:** deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS` / runtime instance `RUNNING`  
+**Phase 3 Railway runtime validation:** `31668584825`  
+**Phase 3 deployed USER E2E validation:** `31668795264`  
 **Last updated:** 2026-08-13
 
 ---
@@ -55,8 +56,8 @@ If this tracker conflicts with the approved design, the approved design wins.
 | Phase 2 — Neon structure validation | DONE | 27 tables, 7 explicit indexes, 56 FKs, 57 CHECK constraints validated |
 | Phase 2 — real PostgreSQL repository tests | DONE | 4/4 tests green, including real `FOR UPDATE` serialization |
 | Phase 2 promotion to `dev` | DONE | PR #2 merged after normal Security CI gate |
-| Phase 3 — Railway DEV deployment | PARTIAL | **Railway deployment DONE**; NEXT = runtime variables, deployed health/correlation and DEV E2E validation |
-| USER device/session lifecycle completeness | PARTIAL | Core access-session creation exists; enrollment/refresh/revoke pending |
+| Phase 3 — Railway DEV deployment | DONE | Exact immutable image deployed; Railway+Neon readiness/liveness/correlation and deployed DEV USER E2E all green |
+| USER device/session lifecycle completeness | PARTIAL | **NEXT:** enrollment, approval/block/revoke, refresh/revoke, concurrency and denial evidence |
 | Security administration APIs | PENDING | User/Tenant/RBAC/location/schedule/policy administration pending |
 | SYSTEM actor runtime | PENDING | Design exists; credential/token runtime pending |
 | SERVICE_INTEGRATION runtime | PENDING | Design exists; credential/token runtime pending |
@@ -110,6 +111,8 @@ The following list describes implemented/reviewed capabilities. It does not crea
 | SEC-IMP-034 | Neon schema validation | DONE | 27 tables / 7 explicit indexes / 56 FKs / 57 CHECKs |
 | SEC-IMP-035 | Real PostgreSQL repository integration tests | DONE | 4/4 tests; repository read + row lock + CHECK + FK enforcement |
 | SEC-IMP-036 | Railway DEV immutable deployment | DONE | Exact GHCR digest attached to DEV service instance; deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS`, runtime instance `RUNNING` |
+| SEC-IMP-037 | Railway DEV runtime readiness | DONE | Run `31668584825`; runtime deployment `68729a4c-c323-412c-999d-326248bea34c`, database/signing readiness, liveness and HTTPS correlation checks PASS |
+| SEC-IMP-038 | Deployed DEV USER E2E | DONE | Run `31668795264`; DEV mock identity → Railway Security API → Neon policy/RBAC → Security access token; fixture cleanup PASS |
 
 ---
 
@@ -172,45 +175,54 @@ real Neon integration tests: 4 passed
 
 Detailed evidence: `docs/PHASE_2_NEON_INTEGRATION.md`.
 
-Not claimed as Phase 2 scope:
-
-- Railway runtime service configuration;
-- any new Security schema beyond approved v1.3.
-
 ---
 
 ### Phase 3 — Railway DEV deployment
 
-**Status: PARTIAL — RAILWAY DEPLOYMENT DONE; RUNTIME VALIDATION NEXT**
+**Status: DONE**
 
-Completed deployment milestone:
+Completed and verified:
 
-- Phase 3 deployment workflow introduced through PR #5 and iteratively hardened through subsequent Railway workflow PRs;
-- exact CI-validated DEV source is built to GHCR and represented by an immutable SHA-256 digest;
+- exact CI-validated DEV source is built in GitHub Actions and published to GHCR as an immutable SHA-256 image;
 - Railway DEV service instance exists in the configured DEV environment;
 - exact immutable GHCR digest is attached to the environment-specific Railway DEV service instance;
-- Railway deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS`;
-- deployed Railway runtime instance reached `RUNNING`;
-- Railway DEV variable diagnostic run `31667451217` proved the service currently has no configured service/shared runtime variables.
+- Railway deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS` with runtime instance `RUNNING`;
+- required DEV runtime configuration was applied without committing secret values;
+- runtime redeployment `68729a4c-c323-412c-999d-326248bea34c` reached `SUCCESS`;
+- `/health/ready` passed with database and signing-key readiness true;
+- `/health/live` passed;
+- exact `X-Correlation-ID` propagation over deployed HTTPS passed;
+- deployed DEV mock-auth endpoint issued a USER identity token;
+- deployed `POST /security/v1/access-sessions` executed against Neon and returned a Security USER access token with the expected Tenant/device/location/role/canonical permission context;
+- temporary Neon E2E fixture cleanup passed;
+- permanent DEV deployment workflow was corrected to use the proven environment-specific `source.image` update and `latestDeployment` status path rather than the earlier experimental global-service/redeploy path.
 
-Next work:
+Validation evidence:
 
-- configure the approved Neon pooled runtime connection for the Railway service without exposing credentials;
-- configure Security signing keys through Railway secrets;
-- enable the DEV mock identity adapter using an explicit DEV-only signing secret;
-- configure DEV mock network-risk mode;
-- preserve the approved trusted ingress-header setting;
-- verify `/health/live` and `/health/ready` over deployed HTTPS;
-- verify `X-Correlation-ID` over deployed HTTPS;
-- execute an end-to-end DEV USER access-session request without Clerk.
+```text
+Runtime configuration + health run: 31668584825
+Railway runtime deployment: 68729a4c-c323-412c-999d-326248bea34c
+Readiness: PASS
+Liveness: PASS
+X-Correlation-ID: PASS
 
-**Exit criterion:** Security API runs end-to-end in DEV on Railway against Neon without external authentication hooks.
+Deployed USER E2E run: 31668795264
+DEV mock auth: PASS
+Neon-backed USER access-session: PASS
+Security access token response: PASS
+Temporary fixture cleanup: PASS
+```
+
+Detailed evidence: `docs/PHASE_3_RAILWAY_DEV_VALIDATION.md`.
+
+**Exit criterion:** Security API runs end-to-end in DEV on Railway against Neon without external authentication hooks.  
+**Result: PASS.**
 
 ---
 
 ### Phase 4 — USER device and session lifecycle (v0.2)
 
-**Status: PARTIAL / PENDING**
+**Status: PARTIAL / NEXT**
 
 Pending:
 
@@ -223,6 +235,8 @@ Pending:
 - USER session revoke;
 - approved concurrent USER + Tenant + device semantics;
 - denial-event persistence for these flows.
+
+**Execution rule:** implement only lifecycle behavior deterministically defined by approved v1.3 artifacts; keep persistent idempotency blocked until its persistence design is approved.
 
 ---
 
@@ -393,30 +407,27 @@ Code existence alone is not sufficient for `DONE`.
 | 2026-08-13 | `31630275529` | Validated Neon structure and real repository behavior | DONE — 27 tables / 7 indexes / 56 FKs / 57 CHECKs / 4 tests |
 | 2026-08-13 | PR #2 | Promoted validated Phase 2 Neon integration to `dev` | DONE |
 | 2026-08-13 | Railway deployment `c7f10093-378a-46ab-825c-23656ef853cb` | Attached exact immutable GHCR digest to Railway DEV service instance and deployed | DONE — deployment `SUCCESS`, runtime instance `RUNNING` |
-| 2026-08-13 | `31667451217` | Inspected Railway DEV runtime variable names only | DONE — no service/shared runtime variables configured; runtime configuration is NEXT |
+| 2026-08-13 | `31667451217` | Inspected Railway DEV runtime variable names only | DONE — confirmed runtime configuration was still required |
+| 2026-08-13 | `31668584825` / deployment `68729a4c-c323-412c-999d-326248bea34c` | Configured Railway DEV runtime and verified deployed health | DONE — DB/signing readiness + liveness + correlation PASS |
+| 2026-08-13 | `31668795264` | Executed deployed DEV USER access-session against Neon using DEV mock auth | DONE — access token/context validation and fixture cleanup PASS |
+| 2026-08-13 | `200ccdeb9c086af4c792e6ad42efebeed64b743c` | Replaced experimental Railway deployment path with proven environment-specific exact-image deployment logic | READY FOR PR promotion |
 
 ---
 
 ## 9. Current execution pointer
 
-**NOW:** Configure required Railway DEV runtime variables from approved/existing GitHub secrets without exposing secret values, then validate the deployed HTTPS runtime.
+**NOW:** Promote the completed Phase 3 validation/deployment-workflow correction through the normal PR + Security CI gate, then begin Phase 4 on `feature/device-session-lifecycle`.
 
-**NEXT:** `/health/ready` → `/health/live` → `X-Correlation-ID` verification → DEV mock-auth USER access-session E2E against Neon.
+**NEXT implementation:** Phase 4 — start with approved USER device enrollment/approval/block/revoke behavior and active-device-limit concurrency semantics. Persistent idempotency remains BLOCKED and must not be invented.
 
 ```text
 Phase 1 CI                 DONE
       ↓
 Phase 2 Neon DEV           DONE
       ↓
-Phase 3 Railway DEV        PARTIAL — DEPLOYMENT DONE
+Phase 3 Railway DEV        DONE
       ↓
-Railway runtime config     NOW
-      ↓
-Health + correlation       NEXT
-      ↓
-DEV USER E2E               NEXT
-      ↓
-Phase 4 USER lifecycle
+Phase 4 USER lifecycle     NEXT
       ↓
 Phase 5 Admin APIs
       ↓
@@ -446,7 +457,7 @@ After a context reset, read in this order before changing implementation:
 5. latest design-traceability review.
 6. `docs/APPROVED_SOURCE_REFERENCE.md` — normative artifact hashes.
 7. applicable v1.3 decision/correlation/lifecycle documents and approved OpenAPI/schema source.
-8. phase-specific evidence document such as `docs/PHASE_2_NEON_INTEGRATION.md`.
+8. phase-specific evidence documents including `docs/PHASE_2_NEON_INTEGRATION.md` and `docs/PHASE_3_RAILWAY_DEV_VALIDATION.md`.
 9. inspect current `dev` HEAD, active feature branch, PR and CI status.
 
 Do not reconstruct Security behavior from memory or chat history when approved source documents exist.
