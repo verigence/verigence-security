@@ -12,7 +12,12 @@ from verigence_security.repositories.security_repository import SecurityReposito
 from verigence_security.repositories.session_refresh_repository import (
     SessionRefreshRepository,
 )
-from verigence_security.services.geo import GeoSample, LocationCandidate, match_location, validate_geo
+from verigence_security.services.geo import (
+    GeoSample,
+    LocationCandidate,
+    match_location,
+    validate_geo,
+)
 from verigence_security.services.permissions import validate_permissions
 from verigence_security.services.schedule import ScheduleDecision, evaluate_schedule
 from verigence_security.services.session_lifecycle import UserSessionLifecycleService
