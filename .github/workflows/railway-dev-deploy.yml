@@ -1,0 +1,216 @@
+name: Railway DEV Deployment
+
+on:
+  workflow_run:
+    workflows:
+      - Security CI
+    types:
+      - completed
+    branches:
+      - dev
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: railway-dev-deployment
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
+  RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+
+jobs:
+  build-image:
+    name: Build immutable Security image
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.image.outputs.image_ref }}
+      source_sha: ${{ steps.source.outputs.sha }}
+
+    steps:
+      - name: Resolve validated source commit
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out validated dev commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPOSITORY }}:sha-${{ steps.source.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      - name: Record immutable image reference
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE_REPOSITORY}@${{ steps.build.outputs.digest }}"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "Immutable image: $image_ref"
+
+      - name: Verify built image uses Python 3.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm "${{ steps.image.outputs.image_ref }}" python --version 2>&1 | grep -E '^Python 3\.12\.'
+
+  deploy-dev:
+    name: Deploy immutable image to Railway DEV
+    needs:
+      - build-image
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+    steps:
+      - name: Verify Railway token is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_TOKEN is not configured."
+            exit 1
+          fi
+
+      - name: Verify Railway can anonymously pull the GHCR image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          if ! docker manifest inspect "${{ needs.build-image.outputs.image_ref }}" >/dev/null 2>&1; then
+            echo "::error::The immutable GHCR image is not anonymously pullable. Railway has no registry credential in this deployment contract. Make the GHCR package public or explicitly approve/configure a Railway GHCR pull credential before rerunning."
+            exit 1
+          fi
+
+      - name: Install pinned Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @railway/cli@5.30.1
+          railway --version
+
+      - name: Link exact Railway DEV target
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_SERVICE_ID" \
+            --json
+
+      - name: Configure deployment health and restart policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway environment edit \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service-config "$RAILWAY_SERVICE_ID" healthcheckPath /health/ready \
+            --service-config "$RAILWAY_SERVICE_ID" healthcheckTimeout 20 \
+            --service-config "$RAILWAY_SERVICE_ID" restartPolicyType ON_FAILURE \
+            --service-config "$RAILWAY_SERVICE_ID" restartPolicyMaxRetries 5 \
+            --message "Configure Verigence Security DEV deployment policy" \
+            --json
+
+      - name: Deploy exact immutable image digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway service source connect \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_SERVICE_ID" \
+            --image "${{ needs.build-image.outputs.image_ref }}" \
+            --json
+
+      - name: Generate Railway DEV public domain
+        id: domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(railway domain --service "$RAILWAY_SERVICE_ID" --json)"
+          printf '%s\n' "$output"
+          domain="$(printf '%s' "$output" | jq -r '.. | strings | select(test("\\.up\\.railway\\.app$"))' | head -n 1)"
+          if [ -z "$domain" ]; then
+            echo "::error::Railway domain command did not return a Railway-provided domain."
+            exit 1
+          fi
+          echo "base_url=https://$domain" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deployed readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="${{ steps.domain.outputs.base_url }}"
+          for attempt in $(seq 1 60); do
+            code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$base_url/health/ready" || true)"
+            if [ "$code" = "200" ]; then
+              cat /tmp/ready.json
+              exit 0
+            fi
+            echo "Readiness attempt $attempt/60 returned HTTP ${code:-000}; waiting 5 seconds."
+            sleep 5
+          done
+          echo "::error::Railway DEV did not become ready within 5 minutes."
+          railway logs --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --latest --lines 100 || true
+          exit 1
+
+      - name: Verify liveness and correlation ID over deployed HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="${{ steps.domain.outputs.base_url }}"
+          correlation_id="$(python -c 'import uuid; print(uuid.uuid4())')"
+          curl --fail-with-body --silent --show-error \
+            --dump-header /tmp/live.headers \
+            --header "X-Correlation-ID: $correlation_id" \
+            "$base_url/health/live" > /tmp/live.json
+          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\\r", "", $2); print $2}' /tmp/live.headers | tail -n 1)"
+          if [ "$returned" != "$correlation_id" ]; then
+            echo "::error::Correlation ID mismatch. Expected $correlation_id, received ${returned:-<missing>}."
+            exit 1
+          fi
+          cat /tmp/live.json
+
+      - name: Record deployment evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source commit: ${{ needs.build-image.outputs.source_sha }}"
+          echo "Image: ${{ needs.build-image.outputs.image_ref }}"
+          echo "Railway project: $RAILWAY_PROJECT_ID"
+          echo "Railway environment: $RAILWAY_ENVIRONMENT_ID"
+          echo "Railway service: $RAILWAY_SERVICE_ID"
+          echo "Base URL: ${{ steps.domain.outputs.base_url }}"
