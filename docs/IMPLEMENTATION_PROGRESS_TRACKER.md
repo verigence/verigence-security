@@ -3,7 +3,7 @@
 **Repository:** `verigence/verigence-security`  
 **Integration branch:** `dev`  
 **Approved baseline:** Security Solution v1.3 + Phase 4 clarifications + Admin Control Plane v1.4  
-**Current promoted DEV commit:** `36d8618b61fca23b018e3f32f1a15ba06e85f43a`  
+**Current promoted DEV commit:** `b1c4d60267ccffae4a6a64a3ec87099c13e193e7`  
 **Last updated:** 2026-08-13
 
 ## 1. Governing rule
@@ -14,9 +14,11 @@ Implementation must not invent missing API shapes, permissions, errors, status s
 event taxonomies, thresholds, activation prerequisites or provider behavior. Explicit implementation decisions are
 recorded and versioned rather than silently changing v1.3.
 
-`docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md` is the implementation authority for the new Security Admin
-Control Plane, standard administrator roles, groups, module catalogue, module role templates, onboarding,
-privileged-access approval and cross-module authorization rules.
+The following are implementation authorities for the new control-plane scope:
+
+- `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`;
+- `docs/SECURITY_CONTROL_REGISTRY_DESIGN_v1.4.md`;
+- `docs/SECURITY_SELF_ONBOARDING_DESIGN_v1.4.md`.
 
 Status values: **DONE**, **PARTIAL**, **PENDING**, **BLOCKED**, **NOT STARTED**.
 
@@ -25,13 +27,13 @@ Status values: **DONE**, **PARTIAL**, **PENDING**, **BLOCKED**, **NOT STARTED**.
 | Area | Status | Current position |
 |---|---|---|
 | Security v1.3 design alignment | DONE | Protected by design/static integrity checks |
-| Security Admin Control Plane v1.4 | DESIGN READY | Versioned Admin/API/RBAC/module/group/onboarding design ready for implementation |
+| Security Admin Control Plane v1.4 | PARTIAL / ACTIVE | Increment A schema/catalogue foundation DONE; Increment B Platform Super Admin + Tenant APIs is next |
 | GitHub feature/PR/CI promotion model | DONE | Feature → PR → `dev`; Railway uses exact validated merge commit |
 | Phase 1 — CI quality gate | DONE | Design/static, compile, Ruff, Mypy, Pytest, build, dependency consistency |
 | Phase 2 — Neon DEV | DONE | Approved schema + real PostgreSQL behavior validated |
 | Phase 3 — Railway DEV | DONE | Immutable deployment + readiness/liveness/correlation + deployed USER E2E |
 | Phase 4 — USER device/session lifecycle | PARTIAL / CONTRACT BOUNDARY | Internal lifecycle substantially complete; old v1.3 public routes/idempotency remain source-gated |
-| Phase 5 — Security administration foundation | PARTIAL / ACTIVE | Internal foundation complete; v1.4 Admin Control Plane is the current implementation phase |
+| Phase 5 — Security administration foundation | PARTIAL / ACTIVE | Internal foundation complete; Admin Control Plane v1.4 implementation in progress |
 | Tenant Security Policy administration | DONE | Explicit configuration only; runtime consumes administered ACTIVE values |
 | Security Retention Policy administration | DONE | Exact Tenant retention days; ACTIVE policy visible to readiness |
 | Tenant location administration | DONE | Geo/radius/timezone/address/status persisted and runtime-compatible |
@@ -42,12 +44,15 @@ Status values: **DONE**, **PARTIAL**, **PENDING**, **BLOCKED**, **NOT STARTED**.
 | Tenant RBAC administration | DONE | Canonical permissions, roles, grants and user-role assignments |
 | SEC-032 activation-readiness foundation | PARTIAL / FAIL-CLOSED | Known prerequisites reported PASS/FAIL; full catalogue incomplete, activation disabled |
 | Tenant activation mutation | BLOCKED | Complete approved readiness prerequisite catalogue unavailable |
-| Public Security administration APIs | DESIGN READY / PENDING | v1.4 freezes Admin API surface and endpoint-level `security.*` permission catalogue |
-| Groups | DESIGN READY / PENDING | Tenant-scoped, no nested groups, Group → Tenant Role only |
-| Module catalogue + role templates | DESIGN READY / PENDING | Module publishes capabilities/templates; Security remains authorization authority |
-| Platform Super Admin bootstrap | DESIGN READY / PENDING | Local DEV bootstrap secret + Argon2id + dedicated Platform Admin JWT |
-| Team-member invitation/acceptance | DESIGN READY / PENDING | Human acceptance required before membership becomes effective |
-| Privileged-access maker-checker | DESIGN READY / PENDING | Privileged role grants require a different authorized approver |
+| Admin Control Plane v1.4 persistence | DONE | Migration `0002`, 19 new tables, 44 Admin permissions, Platform roles and 24 control definitions promoted/deployed |
+| Security Control Registry persistence | DONE | Definitions, Platform settings and Tenant override persistence exist; runtime evaluation/API remains pending |
+| Public Security administration APIs | PARTIAL / ACTIVE | Contract frozen; Platform Super Admin/Tenant APIs are Increment B |
+| Groups | PARTIAL | Persistence and Tenant-safe constraints DONE; HTTP APIs/effective Group RBAC pending |
+| Module catalogue + role templates | PARTIAL | Persistence DONE; catalogue API + DI synchronization pending |
+| Platform Super Admin bootstrap | NEXT | Increment A storage/role catalogue DONE; bootstrap/login/JWT APIs are Increment B |
+| Self-onboarding | PARTIAL | Hash-only Tenant token/request persistence DONE; submission/admin approval APIs pending |
+| Team-member invitation/acceptance | PARTIAL | Invitation persistence DONE; runtime acceptance APIs pending |
+| Privileged-access maker-checker | PARTIAL | Request persistence/constraints DONE; execution APIs pending |
 | DI authorization alignment | DESIGN READY / PENDING | Security-JWT model fits; specific DI corrections recorded in v1.4 |
 | Persistent cross-replica idempotency | BLOCKED | Approved persistence model unavailable |
 | SYSTEM/SERVICE_INTEGRATION runtime | PENDING | Machine credentials/tokens pending after Admin Control Plane priority |
@@ -211,31 +216,57 @@ Evidence:
 
 Detailed Phase 5 evidence: `docs/PHASE_5_SECURITY_ADMINISTRATION.md`.
 
-## 5. Admin Control Plane v1.4 design decisions
+## 5. Security Admin Control Plane v1.4 implementation
 
-`docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md` resolves the design blockers that prevented practical
-Security administration.
+### Increment A — schema and standard catalogues
 
-It freezes:
+**DONE — PR #39**
 
-- Platform and Tenant administrator role catalogue;
-- endpoint-level `security.*` Admin permission catalogue;
-- Platform Super Admin bootstrap model;
-- direct Platform Admin Tenant creation (`CONFIGURING` state);
-- Tenant Groups and inheritance rules;
-- module catalogue and module role-template model;
-- permission namespace ownership;
-- Tenant role/template materialization rules;
-- human acceptance for team-member onboarding;
-- maker-checker for privileged Tenant administration roles;
-- RBAC `authorization_version` mutation semantics;
-- Admin API route plan;
-- v1.4 database extension plan;
-- DI integration/alignment work;
-- required deployed Security → DI E2E.
+Implemented and promoted:
 
-The literal temporary DEV bootstrap password is deliberately not stored in Git/documentation. It remains an
-operator-managed deployment secret.
+- additive `migrations/0002_security_admin_control_plane_v1.4.sql`;
+- 19 new control-plane persistence tables;
+- exact 44-key `security.*` Admin permission catalogue;
+- four Platform roles and exact permission bundles;
+- drift-safe eight-role Tenant Admin seeding;
+- module and role-template persistence;
+- Groups and Group-role persistence with cross-Tenant FK protection;
+- invitation and privileged-access request persistence;
+- structured Admin change/audit persistence;
+- Security Control Registry definitions, Platform settings and Tenant overrides;
+- 12 configurable controls and 12 non-disableable core controls;
+- hash-only Tenant self-onboarding token settings;
+- self-onboarding request persistence and duplicate-open/effective protection.
+
+Evidence:
+
+```text
+Initial real-Neon validation:    31690567354 — 15/15 PASS
+Final-head real-Neon validation: 31691819076 — PASS
+PR Security CI:                  31691822076 — PASS
+Promoted DEV commit:             b1c4d60267ccffae4a6a64a3ec87099c13e193e7
+Post-merge Security CI:          31691980302 — PASS
+Railway DEV deployment/smoke:    31691980334 — PASS
+```
+
+The Neon workflow verifies the immutable v1.3 migration digest before applying `0002` with
+`ON_ERROR_STOP=1`.
+
+Detailed evidence: `docs/ADMIN_CONTROL_PLANE_INCREMENT_A_VALIDATION.md`.
+
+### Remaining Admin Control Plane increments
+
+```text
+Increment B  Platform Super Admin bootstrap/login + direct Tenant creation
+Increment C  Module catalogue API + initial DI synchronization
+Increment D  Groups + effective RBAC
+Increment E  Tenant role Admin APIs
+Increment F  Team-member invitation + human acceptance + self-onboarding approval
+Increment G  Privileged maker-checker
+Increment H  Security Control Registry runtime/API + policy/location/schedule/device Admin APIs
+Increment I  DI authorization alignment
+Increment J  Deployed Security -> DI E2E
+```
 
 ## 6. Current blockers / open points
 
@@ -246,49 +277,50 @@ operator-managed deployment secret.
 | OPEN-003 | Exact endpoint-level Admin permissions | RESOLVED BY v1.4 | Use the `security.*` catalogue in `SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md` |
 | OPEN-004 | Cross-module session idle semantics | BLOCKED | Do not invent heartbeat/introspection |
 | OPEN-005 | Generic malformed-request normalization | BLOCKED | Do not invent a Security error code |
-| OPEN-006 | Authoritative v1.3 OpenAPI unavailable | PARTIAL BLOCKER | Still blocks old v1.3 lifecycle routes; no longer blocks the new versioned v1.4 Admin Control Plane |
+| OPEN-006 | Authoritative v1.3 OpenAPI unavailable | PARTIAL BLOCKER | Still blocks old v1.3 lifecycle routes; does not block the new v1.4 Admin Control Plane |
 | OPEN-007 | Refresh approved-location movement | RESOLVED | `CLAR-004-001` |
-| OPEN-008 | `security_events.event_type` taxonomy | OPEN | v1.4 Admin mutations use a structured Admin change record rather than inventing free-text event names |
+| OPEN-008 | `security_events.event_type` taxonomy | OPEN | v1.4 Admin mutations use structured `admin_change_records` instead of inventing free-text event names |
 | OPEN-009 | Device `BLOCKED` vs `REVOKED` business semantics | OPEN | Both non-ACTIVE; mutation distinction remains unfrozen |
 | OPEN-010 | Complete SEC-032 activation prerequisite catalogue | BLOCKED / CLARIFY | Readiness remains fail-closed and activation disabled |
-| OPEN-011 | RBAC `authorization_version` mutation policy | RESOLVED BY v1.4 | Increment on changes that affect effective RBAC permissions as specified by v1.4 |
+| OPEN-011 | RBAC `authorization_version` mutation policy | RESOLVED BY v1.4 | Increment on changes affecting effective RBAC permissions as specified by v1.4 |
 
 Approved legacy v1.3 OpenAPI SHA-256 remains:
 
 `07f2be9acdf0638647a42d9536bb4575bfdbc72111d9d0b285af64162da98c37`
 
-Repository history confirms the v1.3 OpenAPI file was never committed here; it was not deleted or modified in
-this repository.
-
 ## 7. Current execution pointer
 
-**NOW:** implement Security Admin Control Plane v1.4 in the sequence defined by
-`docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`.
+**NOW:** Admin Control Plane v1.4 **Increment B**.
 
-The next implementation increment is:
-
-```text
-v1.4 Increment A
-  -> migration 0002_security_admin_control_plane_v1.4.sql
-  -> standard security.* permission catalogue
-  -> standard Platform/Tenant Admin roles
-  -> module/group/invitation/approval/admin-audit persistence
-  -> real Neon validation
-```
-
-Then continue:
+Implement from promoted `dev@b1c4d60267ccffae4a6a64a3ec87099c13e193e7`:
 
 ```text
-Increment B  Platform Super Admin bootstrap/login + direct Tenant creation
-Increment C  Module catalogue API + initial DI synchronization
-Increment D  Groups + effective RBAC
-Increment E  Tenant role Admin APIs
-Increment F  Team-member invitation + human acceptance
-Increment G  Privileged maker-checker
-Increment H  Expose existing policy/location/schedule/device Admin services
-Increment I  DI authorization alignment
-Increment J  Deployed Security -> DI E2E
+Platform Super Admin startup bootstrap
+  -> bootstrap login identifier from deployment configuration
+  -> bootstrap password from deployment secret only
+  -> Argon2id hash-only credential persistence
+  -> idempotent no-password-reset restart behavior
+  -> must_change_password=true
+
+Platform Admin authentication
+  -> POST /security/v1/platform/auth/login
+  -> dedicated audience verigence-security-admin
+  -> password-change enforcement
+  -> POST /security/v1/platform/auth/change-password
+  -> GET /security/v1/platform/me
+
+Direct Tenant administration
+  -> POST /security/v1/platform/tenants
+  -> GET list/get
+  -> PATCH metadata only
+  -> status CONFIGURING on creation
+  -> seed eight reserved Tenant Admin roles in same provisioning transaction
 ```
+
+First Tenant Owner invitation remains part of the approved onboarding path but may be implemented in the
+onboarding increment if not needed to prove Increment B Tenant creation itself.
+
+**NEXT after Increment B:** Increment C — Module Catalogue API + initial DI synchronization.
 
 Do **not** move to Phase 6 as the primary workstream until the practical Admin Control Plane is implemented and
 validated.
@@ -299,8 +331,9 @@ Phase 2 Neon DEV                        DONE
 Phase 3 Railway DEV                     DONE
 Phase 4 internal USER lifecycle         SUBSTANTIALLY DONE / LEGACY CONTRACT BOUNDARY
 Phase 5 internal admin foundation       DONE / DEPLOYED
-Admin Control Plane v1.4 design         READY
-Admin Control Plane v1.4 implementation NOW
+Admin Control Plane v1.4 design         DONE / VERSIONED
+Admin Control Plane Increment A         DONE / DEPLOYED
+Admin Control Plane Increment B         NOW
 Tenant activation                       BLOCKED BY OPEN-010
 Phase 6 machine actors                  AFTER ADMIN CONTROL PLANE PRIORITY
 UAT/Production                          NOT STARTED
@@ -312,14 +345,17 @@ Read in this order:
 
 1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`.
 2. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`.
-3. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`.
-4. `docs/IMPLEMENTATION_STATUS.md`.
-5. `docs/NEXT_STEPS_AND_CONTEXT_RECOVERY.md`.
-6. `docs/APPROVED_SOURCE_REFERENCE.md`.
-7. v1.3 decision/correlation/lifecycle documents.
-8. `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
-9. `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
-10. `docs/PHASE_5_SECURITY_ADMINISTRATION.md`.
-11. Current Security `dev`, current DI `dev`, open PRs and CI/Railway runs.
+3. `docs/SECURITY_CONTROL_REGISTRY_DESIGN_v1.4.md`.
+4. `docs/SECURITY_SELF_ONBOARDING_DESIGN_v1.4.md`.
+5. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`.
+6. `docs/ADMIN_CONTROL_PLANE_INCREMENT_A_VALIDATION.md`.
+7. `docs/IMPLEMENTATION_STATUS.md`.
+8. `docs/NEXT_STEPS_AND_CONTEXT_RECOVERY.md`.
+9. `docs/APPROVED_SOURCE_REFERENCE.md`.
+10. v1.3 decision/correlation/lifecycle documents.
+11. `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
+12. `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
+13. `docs/PHASE_5_SECURITY_ADMINISTRATION.md`.
+14. Current Security `dev`, current DI `dev`, open PRs and CI/Railway runs.
 
-Do not reconstruct the Admin Control Plane from chat history after v1.4 is merged.
+Do not reconstruct Security behavior from chat history when the repository contains the approved/recovery source.
