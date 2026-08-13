@@ -187,8 +187,6 @@ class ModuleCatalogRepository:
                           WHERE gra.tenant_id=r.tenant_id
                             AND gra.role_id=r.role_id
                             AND gra.status='ACTIVE'
-                            AND (gra.valid_from_utc IS NULL OR gra.valid_from_utc <= now())
-                            AND (gra.valid_to_utc IS NULL OR gra.valid_to_utc > now())
                             AND (gm.valid_from_utc IS NULL OR gm.valid_from_utc <= now())
                             AND (gm.valid_to_utc IS NULL OR gm.valid_to_utc > now())
                         )
