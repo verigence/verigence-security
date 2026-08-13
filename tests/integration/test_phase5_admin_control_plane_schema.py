@@ -192,10 +192,18 @@ def test_v14_schema_and_seed_catalogues_match_approved_design() -> None:
                     )
                 ).mappings()
             }
-            assert frozenset(controls) == EXPECTED_CONFIGURABLE_CONTROLS | EXPECTED_CORE_CONTROLS
-            assert all(bool(controls[key]["configurable"]) for key in EXPECTED_CONFIGURABLE_CONTROLS)
-            assert all(not bool(controls[key]["configurable"]) for key in EXPECTED_CORE_CONTROLS)
-            assert all(bool(controls[key]["default_enabled"]) for key in EXPECTED_CORE_CONTROLS)
+            expected_controls = EXPECTED_CONFIGURABLE_CONTROLS | EXPECTED_CORE_CONTROLS
+            assert frozenset(controls) == expected_controls
+            assert all(
+                bool(controls[key]["configurable"])
+                for key in EXPECTED_CONFIGURABLE_CONTROLS
+            )
+            assert all(
+                not bool(controls[key]["configurable"]) for key in EXPECTED_CORE_CONTROLS
+            )
+            assert all(
+                bool(controls[key]["default_enabled"]) for key in EXPECTED_CORE_CONTROLS
+            )
             assert not bool(controls["admin.self_onboarding"]["default_enabled"])
     finally:
         engine.dispose()
@@ -343,12 +351,18 @@ def test_group_relationships_reject_cross_tenant_references() -> None:
             )
     finally:
         with engine.begin() as conn:
-            conn.execute(text("DELETE FROM security.groups WHERE group_id=:id"), {"id": group_id})
+            conn.execute(
+                text("DELETE FROM security.groups WHERE group_id=:id"),
+                {"id": group_id},
+            )
             conn.execute(
                 text("DELETE FROM security.tenants WHERE tenant_id IN (:a,:b)"),
                 {"a": tenant_a, "b": tenant_b},
             )
-            conn.execute(text("DELETE FROM security.users WHERE user_id=:id"), {"id": user_id})
+            conn.execute(
+                text("DELETE FROM security.users WHERE user_id=:id"),
+                {"id": user_id},
+            )
             conn.execute(
                 text("DELETE FROM security.security_principals WHERE principal_id=:id"),
                 {"id": user_id},
@@ -467,7 +481,10 @@ def test_self_onboarding_schema_is_hash_only_and_duplicate_safe() -> None:
                 text("DELETE FROM security.external_identities WHERE user_id=:id"),
                 {"id": user_id},
             )
-            conn.execute(text("DELETE FROM security.users WHERE user_id=:id"), {"id": user_id})
+            conn.execute(
+                text("DELETE FROM security.users WHERE user_id=:id"),
+                {"id": user_id},
+            )
             conn.execute(
                 text("DELETE FROM security.security_principals WHERE principal_id=:id"),
                 {"id": user_id},
