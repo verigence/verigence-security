@@ -12,7 +12,8 @@
 **Phase 3 deployed USER E2E:** `31668795264`  
 **Phase 4 increment 1 Neon validation:** `31671140316`  
 **Phase 4 increment 2 Neon validation:** `31671542390`  
-**Current `dev` implementation commit:** `8aaa74b589be618b741507420c6255dda75fa10a`  
+**Phase 4 increment 3 Neon validation:** `31672322586`  
+**Current `dev` implementation commit:** `26d0a951dfd1c4bd575b1d7c39c538496dc6a9c4`  
 **Last updated:** 2026-08-13
 
 ---
@@ -54,8 +55,9 @@ If this tracker conflicts with the approved design, the approved design wins.
 | Phase 1 — CI quality gate | DONE | PR #1 merged; post-merge run `31627855570` green |
 | Phase 2 — Neon DEV integration | DONE | Approved v1.3 schema and real PostgreSQL repository validation complete |
 | Phase 3 — Railway DEV | DONE | Immutable deploy + runtime configuration + health/correlation + deployed USER E2E green |
-| Phase 4 — USER device/session lifecycle | PARTIAL | PENDING enrollment persistence, approval persistence, session-revoke persistence primitive and concurrent active-device-limit enforcement implemented/validated |
-| Phase 4 public lifecycle API wiring | PARTIAL / BLOCKED BY SOURCE | Exact approved OpenAPI artifact is referenced by checksum but is not currently available in repo/File Library/context; do not invent request/response/security shapes |
+| Phase 4 — USER device/session lifecycle | PARTIAL | Increments 1–3 promoted: enrollment/approval persistence, concurrent active-device-limit enforcement, mandatory refresh-geo guard, transactional scoped USER-session revoke |
+| Phase 4 full USER refresh | PARTIAL / BLOCKED | Fresh geo requirement is implemented; complete refresh re-evaluation/token behavior still needs exact approved contract, including different-location refresh semantics |
+| Phase 4 public lifecycle API wiring | BLOCKED BY SOURCE | Exact approved OpenAPI artifact is referenced by checksum but is not available in repo, Verigence GitHub code search, File Library or recoverable context; do not invent request/response/security shapes |
 | Persistent cross-replica idempotency | BLOCKED | Approved persistence model is still required |
 | Security administration APIs | PENDING | User/Tenant/RBAC/location/schedule/policy administration pending |
 | SYSTEM actor runtime | PENDING | Credential/token runtime pending |
@@ -118,6 +120,8 @@ The following list describes implemented/reviewed capabilities. It does not crea
 | SEC-IMP-042 | One ACTIVE USER session DB invariant | DONE | PostgreSQL partial unique index rejects duplicate ACTIVE Tenant/user/device session |
 | SEC-IMP-043 | Active-device-limit serialization | DONE | Tenant/user membership row lock serializes concurrent approval decisions |
 | SEC-IMP-044 | Tenant-configured active-device-limit enforcement | DONE | `31671542390`; two simultaneous approvals at limit 1 result in one approval + one `DEVICE_LIMIT_REACHED` |
+| SEC-IMP-045 | USER refresh mandatory-geo boundary | DONE | SEC-029 guard implemented; missing refresh geo raises normative `GEO_REQUIRED` |
+| SEC-IMP-046 | USER session revoke service | DONE | `31672322586`; scoped session lock + transactional ACTIVE→REVOKED service behavior validated on Neon |
 
 ---
 
@@ -212,28 +216,47 @@ Post-merge `dev` commit: `8aaa74b589be618b741507420c6255dda75fa10a`.
 Post-merge Security CI: `31671820069` — PASS.  
 Post-merge Railway deployment: `31671820060` — PASS through readiness/liveness/correlation.
 
+#### Completed Increment 3 — deterministic refresh/revoke boundaries
+
+Promoted through PR #22 and deployed to Railway DEV.
+
+Implemented/validated:
+
+- USER refresh service boundary requires a new geo sample;
+- absent refresh geo raises normative `GEO_REQUIRED` exactly as SEC-029 requires;
+- USER session revoke locks the scoped session and persists `ACTIVE → REVOKED` transactionally;
+- absent/non-ACTIVE scoped sessions are not mutated;
+- revocation does not attempt to invalidate already-issued local JWTs before `exp`, matching SEC-033;
+- full refresh is not falsely claimed complete where the available v1.3 source does not determine the transition.
+
+Real-Neon validation: `31672322586` — **8/8 PASS**.  
+PR Security CI: `31672417249` — PASS.  
+Post-merge `dev` commit: `26d0a951dfd1c4bd575b1d7c39c538496dc6a9c4`.  
+Post-merge Security CI: `31672476255` — PASS.  
+Post-merge Railway deployment: `31672476267` — PASS through exact image deploy, readiness, liveness and correlation.
+
 Detailed evidence: `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
 
 #### Remaining Phase 4 work
 
 - public device-enrollment request/response model + route wiring;
 - public/admin device approval/block/revoke route wiring;
-- USER session refresh service and route;
-- mandatory fresh geo on refresh;
-- USER session revoke route;
+- complete USER access-session refresh policy re-evaluation, expiry calculation, evidence and token issuance;
+- resolve the approved transition when fresh refresh geo maps to a different assigned location than the ACTIVE session context;
+- USER access-session refresh/revoke public route wiring;
 - complete refresh/revoke concurrency semantics;
-- denial-event persistence for these flows;
+- denial-event persistence for lifecycle denials;
 - deployed Railway lifecycle E2E;
 - persistent cross-replica `Idempotency-Key` replay — **BLOCKED pending approved persistence design**.
 
 #### Source-availability gate
 
-The approved source reference records `SECURITY_OPENAPI_v1.3.yaml` by SHA-256, but the exact artifact is not currently present in this repository, the available File Library, or recoverable prior context. Therefore exact public request/response/security shapes for Phase 4 lifecycle endpoints must **not** be inferred.
+The approved source reference records `SECURITY_OPENAPI_v1.3.yaml` with SHA-256 `07f2be9acdf0638647a42d9536bb4575bfdbc72111d9d0b285af64162da98c37`, but the exact artifact is not currently present in this repository, the available File Library, recoverable prior context, or wider Verigence GitHub code search. Exact public request/response/security shapes for Phase 4 lifecycle endpoints therefore must **not** be inferred.
 
-This does not block deterministic repository/service implementation from the committed v1.3 decisions/schema; it does block public route contract invention.
+This does not block deterministic repository/service implementation from committed v1.3 decisions/schema; it does block public route contract invention.
 
-**NOW:** continue deterministic USER refresh/revoke session lifecycle internals.  
-**NEXT after authoritative OpenAPI recovery:** wire the approved public lifecycle routes exactly as specified and run deployed Railway E2E.
+**NOW:** recover/freeze the remaining approved refresh contract and authoritative OpenAPI source.  
+**NEXT after recovery:** implement complete USER refresh + exact public lifecycle routes, then execute deployed Railway lifecycle E2E.
 
 ---
 
@@ -324,6 +347,7 @@ Required before `main` is production-ready:
 | OPEN-004 | Cross-module `session_idle_timeout` definition/enforcement | BLOCKED | Do not invent heartbeat/introspection behavior |
 | OPEN-005 | Generic malformed-request 400 vs FastAPI/Pydantic 422 contract | BLOCKED | Do not invent a new Security error code without approval |
 | OPEN-006 | Authoritative Security v1.3 OpenAPI artifact unavailable in active sources | BLOCKED BY SOURCE | Do not infer public lifecycle request/response/security shapes; recover exact approved artifact/checksum match before route wiring |
+| OPEN-007 | USER refresh location-context transition | BLOCKED / CLARIFY | Available committed v1.3 sources require fresh geo but do not deterministically state the transition when valid refresh geo maps to a different assigned location than the ACTIVE session; do not choose reuse, conflict, revoke/recreate or context switch by assumption |
 
 Any new ambiguity discovered during implementation must be recorded before code is written against an assumption.
 
@@ -350,7 +374,8 @@ Recent Phase 4 branches:
 
 - `feature/device-session-lifecycle` — Increment 1, merged PR #19;
 - `feature/device-limit-enforcement` — Increment 2, merged PR #20;
-- `feature/phase4-progress-tracker` — operational tracker update.
+- `feature/session-refresh-revoke` — Increment 3, merged PR #22;
+- `feature/phase4-progress-tracker` / `feature/phase4-increment3-tracker` — operational tracker updates.
 
 Do not push unfinished feature work directly to `main`.
 
@@ -385,14 +410,16 @@ Code existence alone is not sufficient for `DONE`.
 | 2026-08-13 | PR #18 / `dca1c7f06222a2b43c754379d52347b1da6fdfe6` | Phase 3 validation and permanent immutable Railway path promoted | DONE |
 | 2026-08-13 | `31671140316` / PR #19 / `7846bb7965fc109ae2570e13b3ef215777388783` | Phase 4 Increment 1 persistence/locking foundations | DONE — Neon + Security CI + Railway smoke green |
 | 2026-08-13 | `31671542390` / PR #20 / `8aaa74b589be618b741507420c6255dda75fa10a` | Phase 4 Increment 2 concurrent active-device-limit enforcement | DONE — 7/7 Neon tests + post-merge Security CI/Railway green |
+| 2026-08-13 | PR #21 / `8f958065359281046df04096db66214b307a34b3` | Updated operational tracker through Phase 4 Increment 2 | DONE |
+| 2026-08-13 | `31672322586` / PR #22 / `26d0a951dfd1c4bd575b1d7c39c538496dc6a9c4` | Phase 4 Increment 3 mandatory refresh-geo boundary + transactional USER session revoke service | DONE — 8/8 Neon tests + Security CI + Railway smoke green |
 
 ---
 
 ## 9. Current execution pointer
 
-**NOW:** Phase 4 USER lifecycle — implement deterministic USER refresh/revoke session internals from approved v1.3 decisions and existing policy components.
+**NOW:** Phase 4 contract recovery/clarification — recover checksum-matching `SECURITY_OPENAPI_v1.3.yaml` and resolve OPEN-007 before implementing the ambiguous portion of USER refresh.
 
-**NEXT:** recover the checksum-matching authoritative `SECURITY_OPENAPI_v1.3.yaml`, then wire exact approved device-enrollment/approval/refresh/revoke public contracts and execute deployed lifecycle E2E.
+**NEXT:** complete USER refresh policy re-evaluation/token issuance and wire the exact approved enrollment/approval/block/revoke/refresh/revoke public contracts, then execute deployed lifecycle E2E.
 
 ```text
 Phase 1 CI                    DONE
@@ -405,9 +432,13 @@ Phase 4 Increment 1           DONE — persistence/locking
       ↓
 Phase 4 Increment 2           DONE — active-device-limit concurrency
       ↓
-Phase 4 refresh/revoke        NOW
+Phase 4 Increment 3           DONE — refresh geo guard + revoke service
+      ↓
+Phase 4 full refresh          PARTIAL / OPEN-007
       ↓
 Phase 4 public route wiring   BLOCKED BY OPENAPI SOURCE
+      ↓
+Phase 4 deployed E2E
       ↓
 Phase 5 Admin APIs
       ↓
