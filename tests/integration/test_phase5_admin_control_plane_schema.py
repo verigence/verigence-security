@@ -279,9 +279,11 @@ def test_standard_tenant_admin_roles_seed_exactly_and_detect_drift() -> None:
                 {"tenant_id": tenant_id, "role_id": auditor_role_id, "now": now},
             )
 
-        with Session(engine) as session:  # type: ignore[arg-type]
-            with pytest.raises(RuntimeError, match="Reserved Tenant Admin role drift"):
-                StandardTenantAdminRoleSeeder(session).seed(tenant_id=tenant_id, now=now)
+        with (
+            Session(engine) as session,  # type: ignore[arg-type]
+            pytest.raises(RuntimeError, match="Reserved Tenant Admin role drift"),
+        ):
+            StandardTenantAdminRoleSeeder(session).seed(tenant_id=tenant_id, now=now)
     finally:
         with engine.begin() as conn:
             conn.execute(
