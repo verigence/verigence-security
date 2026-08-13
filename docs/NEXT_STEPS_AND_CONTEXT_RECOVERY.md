@@ -2,127 +2,166 @@
 
 **Repository:** `verigence/verigence-security`  
 **Primary integration branch:** `dev`  
-**Approved baseline:** Security Solution v1.3 + explicit Phase 4 clarifications  
-**Current promoted DEV commit:** `36d8618b61fca23b018e3f32f1a15ba06e85f43a`  
+**Approved baseline:** Security v1.3 + Phase 4 clarifications + Admin Control Plane v1.4  
 **Last updated:** 2026-08-13
 
 ## 1. Governing rule
 
-Implementation is grounded in approved Security artifacts, not chat reconstruction.
+Implementation is grounded in approved/versioned Security artifacts, not chat reconstruction.
 
 After a context reset, read in this order:
 
 1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`.
-2. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`.
-3. `docs/IMPLEMENTATION_STATUS.md`.
-4. `docs/APPROVED_SOURCE_REFERENCE.md`.
-5. `docs/SECURITY_DECISION_REGISTER_v1.3.md`.
-6. `docs/SECURITY_OPERATIONAL_LIFECYCLE_v1.3.md`.
-7. `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
-8. `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
-9. `docs/PHASE_5_SECURITY_ADMINISTRATION.md`.
-10. Current `dev`, open PRs and CI/Railway state.
+2. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`.
+3. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`.
+4. `docs/IMPLEMENTATION_STATUS.md`.
+5. `docs/APPROVED_SOURCE_REFERENCE.md`.
+6. `docs/SECURITY_DECISION_REGISTER_v1.3.md`.
+7. `docs/SECURITY_OPERATIONAL_LIFECYCLE_v1.3.md`.
+8. `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
+9. `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
+10. `docs/PHASE_5_SECURITY_ADMINISTRATION.md`.
+11. Current Security `dev`, current DI `dev`, open PRs and CI/Railway state.
 
-Do not invent a missing API shape, permission, error code, state transition, activation prerequisite, persistence model, event taxonomy, authorization-version rule or Security threshold.
+Do not invent behavior where v1.3/v1.4 still records an explicit blocker.
 
 ## 2. Current implementation position
 
 ### Phase 1 — CI
 
-**DONE.** GitHub Actions enforce design/static integrity, compile, Ruff, strict Mypy, Pytest, package build and dependency consistency.
+**DONE.**
 
 ### Phase 2 — Neon DEV
 
-**DONE.** Approved v1.3 schema is deployed and real PostgreSQL behavior is validated.
+**DONE.**
 
 ### Phase 3 — Railway DEV
 
-**DONE.** Build-once immutable deployment, runtime readiness/liveness/correlation and deployed DEV USER E2E are validated.
+**DONE.**
 
 ### Phase 4 — USER device/session lifecycle
 
-**SUBSTANTIALLY COMPLETE INTERNALLY / CONTRACT BOUNDARY.**
+**SUBSTANTIALLY COMPLETE INTERNALLY / LEGACY CONTRACT BOUNDARY.**
 
-Internal device/session persistence, device-limit concurrency, USER revoke, complete refresh re-evaluation, approved location movement, denial evidence and non-ACTIVE device gating are implemented and validated. Latest accumulated Phase 4 Neon suite `31675733002` is **12/12 PASS**.
+Internal device/session persistence, device-limit concurrency, USER revoke, complete refresh re-evaluation,
+approved location movement, denial evidence and non-ACTIVE device gating are implemented and validated.
 
-Remaining Phase 4 items depend on missing approved public contracts, persistent idempotency design, or the unfrozen business distinction between device `BLOCKED` and `REVOKED`.
+Remaining old lifecycle public routes still depend on the unavailable v1.3 OpenAPI. Persistent idempotency and the
+business distinction between device `BLOCKED` and `REVOKED` also remain unresolved.
 
 ### Phase 5 — Security administration foundation
 
-**PARTIAL / CONTRACT BOUNDARY.** Deterministic internal administration is now substantially implemented and deployed.
+**INTERNAL FOUNDATION DONE / ADMIN CONTROL PLANE IMPLEMENTATION NOW.**
 
-Completed internal administration:
+Already implemented and deployed internally:
 
 - Tenant Security Policy configuration;
 - Security Retention Policy configuration;
 - Tenant locations;
-- schedules and schedule windows;
+- schedules/windows;
 - Security-side USER onboarding records;
-- external identity provider-subject mapping;
+- external identity mapping;
 - Tenant membership;
 - employee-location/schedule assignment;
-- canonical permission catalogue entries supplied by approved configuration;
-- Tenant roles and role-permission grants;
-- user-role assignment;
-- SEC-032 activation-readiness foundation.
+- canonical permissions;
+- Tenant roles/role-permission grants;
+- direct user-role assignment;
+- fail-closed activation-readiness foundation.
 
-Latest accumulated Phase 5 Neon suite `31681385872`: **11/11 PASS**.
+The new versioned Admin Control Plane design removes the former Admin API/permission design blocker.
 
-Current promoted commit: `36d8618b61fca23b018e3f32f1a15ba06e85f43a`.  
-Post-merge Security CI `31681687084`: PASS.  
-Railway `31681687106`: PASS through exact-image deployment, readiness, liveness and correlation.
+## 3. Admin Control Plane v1.4 authority
 
-## 3. Phase 5 readiness rule
+`docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md` is the implementation authority for:
 
-SEC-032 readiness is deliberately fail-closed.
+- Platform Super Admin bootstrap/login;
+- direct Platform Admin Tenant creation;
+- standard Platform/Tenant administrator roles;
+- exact `security.*` Admin permission catalogue;
+- Tenant Groups;
+- module catalogue and module role templates;
+- module permission namespace ownership;
+- Tenant role/template behavior;
+- RBAC authorization-version increments;
+- team-member invitation and human acceptance;
+- privileged-access maker-checker;
+- Admin API surface;
+- v1.4 schema extension plan;
+- DI authorization alignment;
+- deployed Security -> DI E2E.
 
-The active approved sources currently support these checks:
+The old unavailable `SECURITY_OPENAPI_v1.3.yaml` still gates the older v1.3 lifecycle routes, but it no longer
+blocks the new v1.4 Admin Control Plane because v1.4 explicitly versions that new contract.
 
-- ACTIVE Tenant Security Policy / mandatory Tenant Security configuration (SEC-020);
-- ACTIVE Security retention policy explicitly required before activation (SEC-037).
+## 4. Current blockers that still remain
 
-`TenantActivationReadinessService` reports PASS/FAIL for those known checks but returns:
+- **Tenant activation:** complete SEC-032 prerequisite catalogue remains incomplete. Keep activation disabled.
+- **Persistent idempotency:** approved cross-replica persistence model remains missing.
+- **Device BLOCKED vs REVOKED:** both are non-ACTIVE, but their separate mutation semantics remain unfrozen.
+- **Legacy lifecycle routes:** still require the unavailable v1.3 OpenAPI.
+- **Clerk live orchestration:** Security-side onboarding state exists; live provider API orchestration is later.
+- **SYSTEM/SERVICE_INTEGRATION issuance:** remains Phase 6 after the Admin Control Plane priority.
 
-- `prerequisite_catalogue_complete=false`;
-- `activation_allowed=false`.
-
-Even when all currently-known checks pass, the Tenant remains `CONFIGURING`. Do not implement the `CONFIGURING → ACTIVE` mutation until the complete approved readiness prerequisite catalogue is recovered or explicitly versioned.
-
-## 4. Current blockers / open points
-
-- **OpenAPI unavailable:** approved `SECURITY_OPENAPI_v1.3.yaml` checksum is known, but the source is unavailable. Do not infer public route shapes.
-- **Admin permissions:** exact endpoint-level `security.*` permission keys are not frozen. Do not invent them.
-- **Activation catalogue:** SEC-032 requires a prerequisite list, but the complete list is not present in active approved sources. Keep activation disabled.
-- **Persistent idempotency:** approved cross-replica persistence model is missing.
-- **Authorization version:** do not invent automatic bump triggers; internal administration preserves the explicitly supplied approved value.
-- **Security event taxonomy:** do not invent free-text event names.
-- **Device BLOCKED vs REVOKED:** both are non-ACTIVE for access, but their separate business transition semantics remain unfrozen.
-- **Clerk live orchestration:** Security-side USER/external identity persistence exists; invitation/provider API orchestration remains the later Clerk integration phase.
+The old Admin permission and RBAC `authorization_version` blockers are resolved by v1.4 and MUST NOT be treated
+as open after reset.
 
 ## 5. Current execution pointer
 
-**NOW:** Phase 5 deterministic internal administration foundation is complete enough to stop safely at its contract boundary.
+**NOW:** implement Admin Control Plane v1.4.
 
-**DO NOT:** enable Tenant activation or expose public Security administration routes by assumption.
-
-**NEXT SAFE PARALLEL PHASE:** begin Phase 6 SYSTEM/SERVICE_INTEGRATION internals only from approved machine-principal schema/decisions. Do not use Phase 6 to bypass unresolved Phase 5 public/activation contracts.
+Start with:
 
 ```text
-Phase 1 CI                              DONE
-Phase 2 Neon DEV                        DONE
-Phase 3 Railway DEV                     DONE
-Phase 4 internal USER lifecycle         SUBSTANTIALLY DONE / CONTRACT BOUNDARY
-Phase 5 policies/retention              DONE
-Phase 5 locations/schedules             DONE
-Phase 5 membership/RBAC                 DONE
-Phase 5 USER onboarding persistence     DONE
-Phase 5 readiness foundation            DONE / FAIL-CLOSED
-Phase 5 Tenant activation               BLOCKED — incomplete SEC-032 catalogue
-Phase 5 public admin APIs               BLOCKED — OpenAPI + admin permissions
-Phase 6 machine-actor internals          NEXT SAFE PARALLEL PHASE
+Increment A
+  migration 0002_security_admin_control_plane_v1.4.sql
+      ↓
+  security.* permission catalogue
+      ↓
+  standard Platform/Tenant Admin roles
+      ↓
+  module/group/invitation/approval/admin-audit persistence
+      ↓
+  real Neon validation
 ```
 
-## 6. Promotion discipline
+Then:
+
+```text
+Increment B  Platform Super Admin bootstrap/login + direct Tenant creation
+Increment C  Module catalogue API + DI permission/template synchronization
+Increment D  Groups + effective RBAC
+Increment E  Tenant role Admin APIs
+Increment F  Team-member invitation + human acceptance
+Increment G  Privileged maker-checker
+Increment H  Existing policy/location/schedule/device Admin APIs
+Increment I  DI authorization alignment
+Increment J  Deployed Security -> DI E2E
+```
+
+Do **not** switch the primary workstream to Phase 6 until this practical Admin Control Plane is implemented and
+validated.
+
+## 6. DI recovery for cross-module work
+
+Before DI alignment work, inspect current DI `dev` and read:
+
+1. `DI_MASTER_REFERENCE.md`;
+2. `backend/src/verigence/di/auth/permissions.py`;
+3. `backend/src/verigence/di/auth/verifier.py`;
+4. `backend/src/verigence/di/auth/dependencies.py`;
+5. applicable DI OpenAPI/RBAC source when available.
+
+Important current findings already captured in v1.4:
+
+- DI already verifies Security JWT/JWKS;
+- DI already treats `permissions[]` as authoritative;
+- DI currently defines 28 canonical `di.*` permissions;
+- DI actor type `SERVICE` must align to Security `SERVICE_INTEGRATION`;
+- DI must fail closed on unknown actor types;
+- Tenant-scoped SYSTEM handling must align with Security;
+- DI Tenant path naming/permission coverage must be normalized and tested.
+
+## 7. Promotion discipline
 
 ```text
 feature/*
@@ -135,8 +174,11 @@ Railway DEV
    ↓ readiness + liveness + correlation
 ```
 
-Every meaningful increment must preserve this promotion sequence and update the tracker/evidence before it is considered complete.
+Cross-repository DI changes follow DI's own feature/PR/CI discipline and must be validated before deployed E2E.
 
-## 7. Context-reset warning
+## 8. Context-reset warning
 
-**Do not restart from Phase 1 or Phase 4 after a reset.** Phases 1–3 are complete. Phase 4 and Phase 5 have reached the explicit contract boundaries described above.
+Do not restart from Phase 1, Phase 4, or Phase 6 after a reset.
+
+The primary execution position is **Security Admin Control Plane v1.4, Increment A** until the tracker says
+otherwise.
