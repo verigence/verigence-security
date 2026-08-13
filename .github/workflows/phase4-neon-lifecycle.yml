@@ -5,6 +5,7 @@ on:
     branches:
       - feature/device-*
       - feature/session-*
+      - feature/refresh-*
   workflow_dispatch:
 
 permissions:
