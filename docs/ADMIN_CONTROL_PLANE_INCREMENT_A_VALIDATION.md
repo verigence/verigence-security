@@ -1,10 +1,11 @@
 # Security Admin Control Plane v1.4 — Increment A Validation
 
-**Status:** VALIDATED ON NEON DEV — AWAITING PR PROMOTION  
+**Status:** DONE — PROMOTED TO DEV AND DEPLOYED  
 **Date:** 2026-08-13  
 **Feature branch:** `feature/phase5-admin-control-plane-schema`  
-**Validated head:** `3d4f6e10d5efdbc01a475a2f440fb84bc86c68ca`  
-**Neon validation run:** `31690567354`
+**PR:** `#39`  
+**Final PR head:** `73af6c9c3390434b8b2fb819563243c4f2930554`  
+**Promoted DEV commit:** `b1c4d60267ccffae4a6a64a3ec87099c13e193e7`
 
 ## Scope validated
 
@@ -31,18 +32,28 @@ No v1.3 normative artifact or immutable baseline migration was modified.
 
 ## Real Neon evidence
 
-Workflow `Phase 5 Neon Security Administration`, run `31690567354`, completed successfully.
+Initial functional migration/test run:
 
-The workflow first verified the immutable v1.3 baseline migration SHA-256:
+```text
+31690567354 — SUCCESS — 15/15 accumulated Phase 5 PostgreSQL tests PASS
+```
+
+Authoritative final PR-head migration/test run:
+
+```text
+31691819076 — SUCCESS
+```
+
+Both runs verified the immutable v1.3 baseline migration SHA-256 before applying `0002`:
 
 ```text
 175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d
 ```
 
-It then applied `0002_security_admin_control_plane_v1.4.sql` directly to Neon DEV with
-`ON_ERROR_STOP=1` and a successful `COMMIT`.
+The final-head workflow applied `0002_security_admin_control_plane_v1.4.sql` directly to Neon DEV with
+`ON_ERROR_STOP=1`, then completed the accumulated Phase 5 PostgreSQL administration suite successfully.
 
-Observed seed evidence from the migration run:
+Observed catalogue values from the migration:
 
 ```text
 Security Admin permissions:       44
@@ -54,11 +65,23 @@ Platform Auditor:                  6
 Security Control definitions:     24
 ```
 
-The accumulated Phase 5 PostgreSQL suite then completed:
+## PR and deployment evidence
 
 ```text
-15/15 PASS
+PR #39 final-head Security CI: 31691822076 — PASS
+Promoted DEV commit:            b1c4d60267ccffae4a6a64a3ec87099c13e193e7
+Post-merge Security CI:         31691980302 — PASS
+Post-merge Railway DEV:         31691980334 — PASS
 ```
+
+The Railway run passed:
+
+- exact-commit CI gate;
+- immutable GHCR image build and validation;
+- exact Railway DEV image attachment/deployment;
+- `/health/ready`;
+- `/health/live`;
+- deployed `X-Correlation-ID` preservation.
 
 ## Behaviors proven by Increment A tests
 
@@ -103,9 +126,9 @@ Increment A does **not** claim any of the following are implemented yet:
 
 Those remain later increments in the approved implementation sequence.
 
-## Next increment after promotion
+## Next increment
 
 **Increment B — Platform Super Admin bootstrap, Platform Admin authentication and direct Tenant creation.**
 
-Increment B must consume the persistence/catalogue foundation from this increment and must not hard-code or
-commit the temporary bootstrap password.
+Increment B consumes the promoted Increment A persistence/catalogue foundation and must not hard-code, commit,
+return or log the temporary bootstrap password.
