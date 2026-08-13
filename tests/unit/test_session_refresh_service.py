@@ -23,7 +23,6 @@ from verigence_security.services.token_service import AccessTokenClaims
 class FakeSecurityRepository:
     locations: list[LocationCandidate]
     lock_events: list[str]
-    evaluations: list[dict[str, Any]] = field(default_factory=list)
 
     def tenant_status(self, tenant_id: str) -> str:
         _ = tenant_id
@@ -105,15 +104,13 @@ class FakeSecurityRepository:
         _ = (tenant_id, user_id, now)
         return ["PROCESS_CONSULTANT"], ["di.document.upload"]
 
-    def record_evaluation(self, payload: dict[str, Any]) -> None:
-        self.evaluations.append(payload)
-
 
 @dataclass
 class FakeRefreshRepository:
     session: dict[str, Any]
     lock_events: list[str]
     updates: list[dict[str, Any]] = field(default_factory=list)
+    evaluations: list[dict[str, Any]] = field(default_factory=list)
     commits: int = 0
     rollbacks: int = 0
 
@@ -142,6 +139,9 @@ class FakeRefreshRepository:
     def update_active_session_context(self, **kwargs: Any) -> bool:
         self.updates.append(kwargs)
         return True
+
+    def record_evaluation(self, payload: dict[str, Any]) -> None:
+        self.evaluations.append(payload)
 
     def commit(self) -> None:
         self.commits += 1
@@ -228,7 +228,7 @@ def _service(
 
 
 def test_refresh_moves_context_to_different_approved_location() -> None:
-    service, refresh, security, network, tokens, lock_events = _service(
+    service, refresh, _, network, tokens, lock_events = _service(
         locations=[
             _location("location-a", 28.6139, 77.2090),
             _location("location-b", 28.7041, 77.1025),
@@ -248,7 +248,8 @@ def test_refresh_moves_context_to_different_approved_location() -> None:
     assert result.location_id == "location-b"
     assert refresh.updates[0]["location_id"] == "location-b"
     assert tokens.claims[0].location_id == "location-b"
-    assert security.evaluations[0]["matched_location_id"] == "location-b"
+    assert refresh.evaluations[0]["decision"] == "ALLOW"
+    assert refresh.evaluations[0]["matched_location_id"] == "location-b"
     assert refresh.commits == 1
     assert refresh.rollbacks == 0
     assert network.calls == 1
@@ -272,10 +273,11 @@ def test_refresh_keeps_context_when_same_approved_location_matches() -> None:
     assert result.location_id == "location-a"
     assert refresh.updates[0]["location_id"] == "location-a"
     assert tokens.claims[0].location_id == "location-a"
+    assert refresh.evaluations[0]["decision"] == "ALLOW"
 
 
-def test_refresh_rejects_geo_outside_all_approved_locations() -> None:
-    service, refresh, security, _, tokens, _ = _service(
+def test_refresh_rejects_unapproved_geo_and_persists_denial_evidence() -> None:
+    service, refresh, _, _, tokens, _ = _service(
         locations=[_location("location-a", 28.6139, 77.2090)]
     )
 
@@ -291,7 +293,43 @@ def test_refresh_rejects_geo_outside_all_approved_locations() -> None:
 
     assert exc_info.value.code == "LOCATION_NOT_ALLOWED"
     assert refresh.updates == []
-    assert security.evaluations == []
     assert tokens.claims == []
-    assert refresh.commits == 0
+    assert len(refresh.evaluations) == 1
+    denial = refresh.evaluations[0]
+    assert denial["decision"] == "DENY"
+    assert denial["decision_reason_code"] == "LOCATION_NOT_ALLOWED"
+    assert denial["access_session_id"] == "session-1"
+    assert denial["correlation_id"] == "phase4-refresh-deny"
+    assert "matched_location_id" not in denial
+    # Failed refresh transaction is rolled back first; denial evidence is then committed in a
+    # separate transaction and therefore survives the rejected refresh.
     assert refresh.rollbacks == 1
+    assert refresh.commits == 1
+
+
+def test_missing_refresh_geo_persists_geo_required_denial_without_session_fk() -> None:
+    service, refresh, _, network, tokens, _ = _service(
+        locations=[_location("location-a", 28.6139, 77.2090)]
+    )
+
+    with pytest.raises(SecurityError) as exc_info:
+        service.refresh(
+            user_id="user-1",
+            tenant_id="tenant-1",
+            access_session_id="session-1",
+            geo=None,
+            source_ip="203.0.113.10",
+            correlation_id="phase4-refresh-geo-required",
+        )
+
+    assert exc_info.value.code == "GEO_REQUIRED"
+    assert network.calls == 0
+    assert tokens.claims == []
+    assert len(refresh.evaluations) == 1
+    denial = refresh.evaluations[0]
+    assert denial["decision"] == "DENY"
+    assert denial["decision_reason_code"] == "GEO_REQUIRED"
+    assert "access_session_id" not in denial
+    assert "supplied_latitude" not in denial
+    assert refresh.rollbacks == 1
+    assert refresh.commits == 1
