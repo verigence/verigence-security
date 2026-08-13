@@ -1,0 +1,62 @@
+name: Phase 4 Neon Device Session Lifecycle
+
+on:
+  push:
+    branches:
+      - feature/device-session-lifecycle
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase4-neon-device-session-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  phase4-neon:
+    name: Validate Phase 4 repository lifecycle on Neon DEV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and test tooling
+        run: python -m pip install -e '.[dev]'
+
+      - name: Resolve Neon DEV test connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${DEV_DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
+          if [ -z "$raw" ]; then
+            echo "::error::Neither DEV_DATABASE_URL nor MIGRATION_DATABASE_URL is configured."
+            exit 1
+          fi
+          case "$raw" in
+            postgresql+psycopg://*) resolved="$raw" ;;
+            postgresql+asyncpg://*)
+              resolved="postgresql+psycopg://${raw#postgresql+asyncpg://}"
+              ;;
+            postgresql://*) resolved="postgresql+psycopg://${raw#postgresql://}" ;;
+            postgres://*) resolved="postgresql+psycopg://${raw#postgres://}" ;;
+            *)
+              echo "::error::Configured DEV database secret is not a PostgreSQL URL."
+              exit 1
+              ;;
+          esac
+          echo "::add-mask::$resolved"
+          echo "TEST_DATABASE_URL=$resolved" >> "$GITHUB_ENV"
+
+      - name: Run Phase 4 PostgreSQL lifecycle tests
+        run: pytest -q tests/integration/test_phase4_*.py
