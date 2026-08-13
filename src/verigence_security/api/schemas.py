@@ -42,3 +42,50 @@ class AccessTokenResponse(BaseModel):
 
 class DevMockTokenRequest(BaseModel):
     userId: UUID
+
+
+class PlatformAdminBootstrapRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=120, pattern=r"^[a-zA-Z0-9._-]+$")
+    displayName: str = Field(min_length=1, max_length=240)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PlatformAdminBootstrapResponse(BaseModel):
+    adminId: UUID
+    username: str
+    displayName: str
+    role: str = "SUPER_ADMIN"
+    mustChangePassword: bool
+
+
+class PlatformAdminLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=120)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PlatformAdminTokenResponse(BaseModel):
+    accessToken: str
+    tokenType: str = "Bearer"
+    expiresAtUtc: datetime
+    adminId: UUID
+    username: str
+    role: str
+    mustChangePassword: bool
+
+
+class TenantCreateRequest(BaseModel):
+    tenantCode: str = Field(
+        min_length=2,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+    )
+    tenantName: str = Field(min_length=1, max_length=240)
+
+
+class TenantAdminResponse(BaseModel):
+    tenantId: UUID
+    tenantCode: str
+    tenantName: str
+    status: str
+    createdAtUtc: datetime | None = None
+    updatedAtUtc: datetime | None = None
