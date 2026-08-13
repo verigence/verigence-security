@@ -15,13 +15,18 @@ jobs:
   health:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify DEV readiness
+      - name: Capture DEV readiness evidence
+        id: ready
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail-with-body --silent --show-error \
+          code="$(curl --silent --show-error \
             --dump-header /tmp/ready.headers \
-            "$BASE_URL/health/ready" > /tmp/ready.json
+            --output /tmp/ready.json \
+            --write-out '%{http_code}' \
+            "$BASE_URL/health/ready" || true)"
+          echo "http_code=$code" >> "$GITHUB_OUTPUT"
+          echo "Readiness HTTP: $code"
           echo "Readiness response:"
           cat /tmp/ready.json
 
@@ -42,3 +47,12 @@ jobs:
           echo "Liveness response:"
           cat /tmp/live.json
           echo "Correlation ID echoed correctly: $returned"
+
+      - name: Enforce DEV readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.ready.outputs.http_code }}" != "200" ]; then
+            echo "::error::DEV readiness is not healthy."
+            exit 1
+          fi
