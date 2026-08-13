@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/phase5-*
+      - feature/admin-control-plane-*
   workflow_dispatch:
 
 permissions:
