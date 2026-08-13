@@ -134,7 +134,8 @@ def test_external_identity_cannot_be_rebound_to_another_user() -> None:
             )
 
         with Session(engine) as session:  # type: ignore[arg-type]
-            assert SecurityRepository(session).resolve_identity_user("CLERK", subject) == first_user_id
+            runtime = SecurityRepository(session)
+            assert runtime.resolve_identity_user("CLERK", subject) == first_user_id
     finally:
         with engine.begin() as conn:
             conn.execute(
