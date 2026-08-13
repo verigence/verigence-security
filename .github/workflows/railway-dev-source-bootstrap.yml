@@ -1,9 +1,7 @@
 name: Railway DEV Exact Image Source Bootstrap
 
 on:
-  push:
-    branches:
-      - feature/railway-bootstrap-dev-service-instance
+  workflow_dispatch:
 
 permissions:
   contents: read
