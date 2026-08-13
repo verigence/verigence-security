@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Header, Request
 
 from verigence_security.adapters.network_risk import NetworkRiskAdapter
@@ -16,9 +18,20 @@ from verigence_security.config import Settings, get_settings
 from verigence_security.repositories.security_repository import SecurityRepository
 from verigence_security.services.access_service import UserAccessService
 from verigence_security.services.geo import GeoSample
+from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.token_service import TokenService
 
 router = APIRouter(prefix="/security/v1", tags=["Runtime Access"])
+
+
+class GroupAwareSecurityRepository(SecurityRepository):
+    def effective_user_permissions(
+        self,
+        tenant_id: str,
+        user_id: str,
+        now: datetime,
+    ) -> tuple[list[str], list[str]]:
+        return effective_user_permissions(self.s, tenant_id, user_id, now)
 
 
 @router.post("/access-sessions", response_model=AccessTokenResponse)
@@ -47,7 +60,8 @@ def create_access_session(
         integrity_status=body.geo.integrityStatus,
         integrity_reason=body.geo.integrityReason,
     )
-    return UserAccessService(repo, network, tokens).create_or_reuse(
+    runtime_repo = GroupAwareSecurityRepository(repo.s)
+    return UserAccessService(runtime_repo, network, tokens).create_or_reuse(
         identity=identity,
         tenant_id=str(body.tenantId),
         device_id=str(body.deviceId),
