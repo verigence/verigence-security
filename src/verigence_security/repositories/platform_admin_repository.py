@@ -10,8 +10,16 @@ from sqlalchemy.orm import Session
 class PlatformAdminRepository:
     """Persistence primitives for the platform-level Security control plane."""
 
+    BOOTSTRAP_LOCK_ID = 908_172_635
+
     def __init__(self, session: Session) -> None:
         self.s = session
+
+    def lock_bootstrap(self) -> None:
+        self.s.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": self.BOOTSTRAP_LOCK_ID},
+        )
 
     def admin_count(self) -> int:
         value = self.s.execute(text("SELECT count(*) FROM security.platform_admins")).scalar_one()
