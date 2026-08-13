@@ -1,0 +1,45 @@
+name: Railway DEV Exact Image Source Bootstrap
+
+on:
+  push:
+    branches:
+      - feature/railway-bootstrap-dev-service-instance
+
+permissions:
+  contents: read
+
+env:
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+  IMAGE_REF: ghcr.io/verigence/verigence-security@sha256:267175536efc759be519da26a77409f31c0753f0936296d18ce7e8d373993dfe
+
+jobs:
+  bootstrap-source:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Set exact immutable image on DEV service instance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mutation='mutation EnvironmentPatchCommit($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }'
+          patch="$(jq -cn --arg service "$RAILWAY_SERVICE_ID" --arg image "$IMAGE_REF" '{services:{($service):{source:{image:$image}}}}')"
+          variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg message 'Attach exact immutable GHCR digest to verigence-security DEV instance' \
+            --argjson patch "$patch" \
+            '{environmentId:$environment,patch:$patch,commitMessage:$message}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+          echo "Railway accepted the DEV exact-image source configuration."
