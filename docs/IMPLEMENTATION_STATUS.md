@@ -1,121 +1,146 @@
-# Verigence Security Implementation Status — v0.1 Baseline + Promoted Increments
+# Verigence Security Implementation Status — Reviewed Baseline + Promoted Increments
 
-This implementation is grounded in **Security Design Source v1.3** plus explicitly recorded implementation clarifications. It does not silently supersede or rewrite the original v1.3 normative artifacts.
+This implementation is grounded in **Security Design Source v1.3** plus explicitly recorded implementation clarifications. It does not silently supersede the original v1.3 normative artifacts.
 
-Detailed execution/evidence is maintained in `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`. The initial code-to-design review remains in `docs/DESIGN_TRACEABILITY_REVIEW_v0.1.md`.
+Detailed execution/evidence is maintained in `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`. Initial code-to-design review remains in `docs/DESIGN_TRACEABILITY_REVIEW_v0.1.md`.
 
-## Reviewed baseline capabilities
+## Core baseline
 
-The v0.1 baseline provides:
+The promoted implementation includes:
 
 - FastAPI/Railway service foundation;
-- environment safety for DEV mock authentication/network adapters;
-- `X-Correlation-ID` handling for normal, Security-error and unexpected-500 responses;
+- DEV/UAT/Production environment safety controls;
+- correlation-ID middleware;
 - Clerk USER JWT verification adapter and DEV mock identity boundary;
 - Security Principal USER validation;
-- Security RSA Access JWT issue/verify and single-key JWKS;
-- canonical permission validation;
-- geo freshness/accuracy/integrity/radius checks;
-- access schedule/time evaluation including overnight windows;
-- provider-neutral network-risk evaluation outside the DB row-lock window;
+- Security Access JWT/JWKS baseline;
+- canonical permissions;
+- USER geo/time/network/RBAC evaluation;
 - Neon/PostgreSQL repository/session foundation;
-- Tenant membership, ACTIVE device, location assignment, schedule and RBAC resolution;
-- core USER access-session create/reuse with same-context reuse and conflict handling;
-- session maximum-duration preservation;
-- successful access-context evidence;
-- token/DB atomicity;
-- DEV mock-auth bootstrap;
-- health/live and fail-closed health/ready;
-- exact approved v1.3 PostgreSQL migration source;
-- exact 42-code/status Security error catalogue.
+- USER access-session creation/reuse;
+- evidence persistence and token/DB atomicity;
+- health/live and fail-closed readiness;
+- exact approved v1.3 PostgreSQL migration source and error catalogue.
 
-## Validated milestones after v0.1
+## Validated phase milestones
 
-- **Phase 1 CI — DONE:** design/static integrity, compile, Ruff, strict Mypy, Pytest, package build and dependency consistency.
-- **Phase 2 Neon DEV — DONE:** approved Security schema deployed/validated; real PostgreSQL locking and constraints exercised.
-- **Phase 3 Railway DEV — DONE:** build-once immutable deployment, runtime configuration, readiness/liveness/correlation and deployed DEV USER E2E.
-- **Phase 4 Increment 1 — DONE:** PENDING device/enrollment persistence, approval persistence, device-limit serialization primitives, scoped session-revoke persistence and one-ACTIVE-session PostgreSQL invariant.
-- **Phase 4 Increment 2 — DONE:** Tenant-configured `max_active_devices_per_user` enforced under concurrent approvals.
-- **Phase 4 Increment 3 — DONE:** missing USER refresh geo returns normative `GEO_REQUIRED`; scoped USER session revoke is transactional and preserves existing JWT validity only until its existing `exp`.
-- **Phase 4 Increment 4 — DONE internally:** full USER refresh policy re-evaluation and approved location-context movement are implemented under `CLAR-004-001`.
-- **Phase 4 refresh concurrency hardening — DONE:** refresh uses canonical device→session row-lock order consistent with create/reuse.
-- **Phase 4 Increment 5 — DONE:** USER refresh 4xx denials persist deterministic access-context evidence using existing normative Security reason codes without inventing `security_events` event names.
+- **Phase 1 CI — DONE.**
+- **Phase 2 Neon DEV — DONE.**
+- **Phase 3 Railway DEV — DONE.**
+- **Phase 4 internal USER device/session lifecycle — substantially DONE; public contracts remain source-gated.**
+- **Phase 5 deterministic internal Security administration — substantially DONE; public APIs and Tenant activation remain contract-gated.**
 
-### Phase 4 refresh behavior now implemented
+## Phase 4 internal runtime status
 
-For an existing ACTIVE USER access session:
+Implemented/validated:
 
-1. a new geo sample is mandatory;
-2. Tenant, membership and device must remain valid/ACTIVE;
-3. geo freshness, accuracy and integrity are re-evaluated;
-4. geo is matched only against currently ACTIVE/effective assigned Tenant locations;
-5. the matched location's schedule/time/override is re-evaluated;
-6. network policy and effective RBAC are re-evaluated;
-7. token/session expiry remains bounded by token TTL, geo revalidation interval, matched schedule and the original session maximum-duration end;
-8. same approved location refreshes the same session;
-9. a different approved/assigned location moves the same ACTIVE session context to that new location after all checks pass;
-10. geo outside all approved/assigned locations is denied without mutating session context;
-11. successful evidence and refreshed JWT use the newly matched approved location;
-12. refresh lock ordering is discovery read → ACTIVE device lock → scoped session `FOR UPDATE` → revalidation;
-13. 4xx refresh denials are rolled back first and then recorded in a separate `access_context_evaluations` DENY transaction;
-14. the existing normative Security error code is used as the denial `decision_reason_code`;
-15. missing geo records `GEO_REQUIRED` without fabricating session/location/geo values;
-16. unapproved geo records `LOCATION_NOT_ALLOWED` without session update or token issuance;
-17. 5xx infrastructure/service failures are not mislabeled as access-policy denials;
-18. evidence-storage failure cannot mask the original Security denial.
+- PENDING device enrollment persistence and approval transition;
+- concurrent Tenant active-device-limit enforcement;
+- one ACTIVE USER session invariant;
+- scoped USER session revoke;
+- mandatory fresh geo on refresh;
+- complete USER refresh policy re-evaluation;
+- approved refresh location movement (`CLAR-004-001`);
+- original session maximum-duration preservation;
+- canonical device→session lock order;
+- successful and denied access-context evidence;
+- non-ACTIVE device refresh/new-issuance rejection.
 
-Approved clarification source: `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
+Latest accumulated Phase 4 Neon suite: `31675733002` — **12/12 PASS**.  
+Promoted Phase 4 runtime evidence: Security CI `31675854749`, Railway `31675854751` — PASS.
 
-## Latest Phase 4 evidence
+## Phase 5 Security administration status
 
-- Increment 4 real Neon `31673792244`: **9/9 PASS**.
-- PR #24 Security CI `31673953419`: PASS.
-- Increment 4 post-merge Security CI `31674014588`: PASS.
-- Increment 4 Railway `31674014592`: PASS.
-- Lock-order hardening Neon `31674228808`: PASS.
-- PR #25 Security CI `31674296848`: PASS.
-- Lock-order post-merge Security CI `31674380079`: PASS.
-- Lock-order Railway `31674380089`: PASS.
-- Increment 5 final-head Neon `31675178770`: PASS.
-- PR #27 Security CI `31675181857`: PASS.
-- Current promoted `dev` commit `c4c00614af41f83fc13225b676b445366d2d5bbd`.
-- Current post-merge Security CI `31675264715`: PASS.
-- Current Railway immutable deploy/readiness/liveness/correlation `31675264724`: PASS.
+### Tenant policy and retention administration — DONE
 
-## Not yet implemented / not yet complete
+Internal administration exists for:
 
-The following remain intentional implementation gaps rather than removed scope:
+- `tenant_security_policies`;
+- `security_retention_policies`.
 
-- persistent idempotency storage/replay across stateless replicas;
-- exact public device enrollment/approval/block/revoke route contracts and wiring;
-- exact public USER session refresh/revoke route contracts and wiring;
-- deployed Phase 4 lifecycle E2E through those public routes;
-- device BLOCKED/REVOKED transition semantics and their active-session side effects until approved source/clarification is deterministic;
-- denial evidence for remaining device/admin lifecycle flows after their transitions are frozen;
-- any `security_events.event_type` taxonomy that has not been explicitly frozen;
-- machine-principal credentials and machine access-token endpoint;
-- SYSTEM/SERVICE_INTEGRATION administration/runtime;
-- Tenant activation-readiness application service;
-- retention purge execution;
-- Tenant offboarding application service/endpoints;
-- complete Security administration APIs;
-- endpoint-level `security.*` administrator permission catalogue;
-- overlapping JWKS key rotation;
-- production network-risk provider adapter;
-- Clerk invitation/onboarding calls and live Clerk integration test.
+Security thresholds/TTLs and retention days remain explicit Tenant configuration; no hidden numeric defaults are introduced. Existing runtime policy readers consume administered ACTIVE values directly.
 
-## Open / resolved design and source points
+### Tenant location and schedule administration — DONE
 
-1. **Persistent idempotency — BLOCKED:** v1.3 requires stateless-replica replay semantics but has no approved persistent idempotency model.
-2. **Invalid correlation-header response — PARTIAL:** invalid caller value is never propagated; a server correlation UUID is used for traceable rejection.
-3. **Administration permission catalogue — BLOCKED:** permission syntax is frozen; exact endpoint-level `security.*` keys are not.
-4. **Session idle timeout — BLOCKED:** no unapproved cross-module heartbeat/introspection mechanism will be introduced.
-5. **Generic malformed-request normalization — BLOCKED:** do not invent a Security error merely to replace framework validation behavior.
-6. **Authoritative OpenAPI availability — BLOCKED BY SOURCE:** approved `SECURITY_OPENAPI_v1.3.yaml` SHA-256 is `07f2be9acdf0638647a42d9536bb4575bfdbc72111d9d0b285af64162da98c37`, but the checksum-matching source is unavailable in the repository, wider Verigence GitHub search, File Library or recoverable context. Public lifecycle shapes must not be inferred.
-7. **USER refresh location-context transition — RESOLVED:** `CLAR-004-001` permits moving the same ACTIVE session to another currently approved/assigned location only after complete policy re-evaluation; unapproved geo denies.
-8. **Security-event taxonomy — OPEN:** `security.security_events.event_type` is free text in the approved schema. Do not invent event names solely because persistence permits them.
-9. **Device BLOCKED vs REVOKED semantics — OPEN:** do not choose transition meaning or automatic session side-effects until approved source or explicit clarification defines them.
+Internal administration exists for:
+
+- `tenant_locations`;
+- `access_schedules`;
+- `access_schedule_windows`.
+
+Normal and overnight schedule definitions written by administration are consumed by the existing runtime schedule reader.
+
+### Tenant membership, employee-location and RBAC administration — DONE
+
+Internal administration exists for:
+
+- `tenant_memberships`;
+- `permissions` for explicitly supplied canonical permission keys;
+- `roles`;
+- `role_permissions`;
+- `user_role_assignments`;
+- `user_location_assignments`.
+
+Existing runtime authorization readers directly resolve administered membership, assigned location/schedule, role and permission records. The validation uses the already-approved example permission `di.document.upload`; no new production permission key is invented.
+
+Automatic `authorization_version` bump triggers are not invented; administration preserves the explicitly supplied approved value.
+
+### Security-side USER onboarding — DONE internally
+
+Implemented:
+
+- USER `security_principals` persistence;
+- `security.users` persistence;
+- `external_identities` provider-subject mapping;
+- runtime resolution of administered `CLERK` subjects;
+- protection against external-identity rebinding to a second USER;
+- protection against converting an existing machine principal to USER.
+
+Live Clerk invitation/provider API orchestration is **not** part of this Phase 5 internal foundation and remains a later provider-integration milestone.
+
+### SEC-032 Tenant activation readiness — PARTIAL / FAIL-CLOSED
+
+Implemented internal readiness foundation reports the currently defensible prerequisites:
+
+- ACTIVE Tenant Security Policy / mandatory Security configuration (SEC-020);
+- ACTIVE Security retention policy (SEC-037).
+
+The result also states:
+
+- `prerequisite_catalogue_complete=false`;
+- `activation_allowed=false`.
+
+A Tenant remains `CONFIGURING` even when all currently-known readiness checks pass. The `CONFIGURING → ACTIVE` mutation is intentionally not implemented until the complete SEC-032 prerequisite catalogue is approved.
+
+## Latest Phase 5 evidence
+
+- Increment 1 PR #31; Railway `31678834647` — PASS.
+- Increment 2 PR #32; Railway `31679593399` — PASS.
+- Increment 3 PR #33; Railway `31680433590` — PASS.
+- Increment 4 PR #34; final-head Neon `31681097935` — 10/10 PASS; Security CI `31681103229` — PASS; promoted `44abea318c3fab5b4ac54c66887e2be1b28cad9c`; Railway `31681204041` — PASS.
+- Increment 5 PR #35; final-head Neon `31681528246` — PASS; Security CI `31681577749` — PASS; promoted `36d8618b61fca23b018e3f32f1a15ba06e85f43a`; post-merge Security CI `31681687084` — PASS; Railway `31681687106` — PASS.
+- Latest accumulated Phase 5 Neon suite `31681385872` — **11/11 PASS**.
+
+## Intentional remaining gaps / blockers
+
+- authoritative public OpenAPI source is unavailable;
+- public Phase 4 lifecycle route wiring therefore remains blocked;
+- public Phase 5 administration/readiness/activation route wiring remains blocked;
+- exact endpoint-level `security.*` administrator permission catalogue is incomplete;
+- complete SEC-032 activation prerequisite catalogue is unavailable;
+- Tenant activation mutation remains disabled;
+- persistent cross-replica idempotency persistence model is unavailable;
+- automatic `authorization_version` mutation rules are not frozen;
+- device `BLOCKED` versus `REVOKED` business transition distinction remains unfrozen;
+- `security_events.event_type` taxonomy remains unfrozen;
+- SYSTEM/SERVICE_INTEGRATION credentials/tokens remain pending;
+- retention purge/offboarding execution remains pending;
+- overlapping JWKS rotation remains pending;
+- live Clerk invitation/onboarding integration remains pending;
+- DI/WPM integration and UAT/Production readiness remain pending.
 
 ## Current execution direction
 
-Continue Phase 4 only where lifecycle behavior is deterministic from approved artifacts/clarifications. Public lifecycle route wiring remains source-gated. The next internal decision point is the exact meaning and side-effects of device `BLOCKED` versus `REVOKED`.
+Phase 5 deterministic internal administration has reached its safe contract boundary. Do **not** enable Tenant activation or invent public Security administration routes/permissions.
+
+The next safe parallel implementation phase is SYSTEM/SERVICE_INTEGRATION internals, provided it is grounded only in approved machine-principal schema/decisions and is not used to bypass unresolved Phase 5 contracts.
