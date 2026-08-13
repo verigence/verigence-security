@@ -52,7 +52,8 @@ def test_group_and_direct_role_changes_drive_effective_rbac_and_versions() -> No
                 ),
                 {"id": tenant_id, "code": f"rbac-{tenant_id}", "now": now},
             )
-            for user_id, name in ((actor_id, "RBAC actor"), (member_id, "RBAC member")):
+            test_users = ((actor_id, "RBAC actor"), (member_id, "RBAC member"))
+            for user_id, name in test_users:
                 conn.execute(
                     text(
                         """
@@ -268,7 +269,10 @@ def test_group_and_direct_role_changes_drive_effective_rbac_and_versions() -> No
                 ),
                 {"actor_id": actor_id, "member_id": member_id},
             )
-            conn.execute(text("DELETE FROM security.tenants WHERE tenant_id=:id"), {"id": tenant_id})
+            conn.execute(
+                text("DELETE FROM security.tenants WHERE tenant_id=:id"),
+                {"id": tenant_id},
+            )
             conn.execute(
                 text("DELETE FROM security.permissions WHERE permission_key=:key"),
                 {"key": permission_key},
