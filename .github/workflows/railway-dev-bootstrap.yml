@@ -1,0 +1,136 @@
+name: Railway DEV Service Instance Bootstrap
+
+on:
+  push:
+    branches:
+      - feature/railway-bootstrap-dev-service-instance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-dev-bootstrap
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+
+jobs:
+  bootstrap:
+    name: Ensure verigence-security exists in Railway DEV
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+    steps:
+      - name: Validate project token scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_TOKEN is not configured."
+            exit 1
+          fi
+
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"query":"query { projectToken { projectId environmentId } }"}')"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::RAILWAY_TOKEN could not be validated."
+            exit 1
+          fi
+
+          [ "$(printf '%s' "$response" | jq -r '.data.projectToken.projectId')" = "$RAILWAY_PROJECT_ID" ] || {
+            echo "::error::RAILWAY_TOKEN project scope mismatch."
+            exit 1
+          }
+          [ "$(printf '%s' "$response" | jq -r '.data.projectToken.environmentId')" = "$RAILWAY_ENVIRONMENT_ID" ] || {
+            echo "::error::RAILWAY_TOKEN environment scope mismatch."
+            exit 1
+          }
+
+      - name: Ensure DEV service instance exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { id serviceId environmentId } } } } }'
+          query_variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg project "$RAILWAY_PROJECT_ID" \
+            '{environmentId:$environment,projectId:$project}')"
+          query_body="$(jq -cn --arg query "$query" --argjson variables "$query_variables" '{query:$query,variables:$variables}')"
+
+          fetch_instances() {
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Project-Access-Token: $RAILWAY_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$query_body"
+          }
+
+          response="$(fetch_instances)"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Unable to query Railway DEV service instances."
+            exit 1
+          fi
+
+          instance_id="$(printf '%s' "$response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '.data.environment.serviceInstances.edges[]?.node | select(.serviceId == $service) | .id' | head -n 1)"
+          if [ -n "$instance_id" ]; then
+            echo "Railway DEV service instance already exists: $instance_id"
+            exit 0
+          fi
+
+          echo "Railway DEV service instance is absent; creating only the existing verigence-security service in DEV."
+
+          mutation='mutation EnvironmentPatchCommit($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }'
+          patch="$(jq -cn --arg service "$RAILWAY_SERVICE_ID" '{services:{($service):{isCreated:true}}}')"
+          mutation_variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg message 'Bootstrap verigence-security service instance in DEV' \
+            --argjson patch "$patch" \
+            '{environmentId:$environment,patch:$patch,commitMessage:$message}')"
+          mutation_body="$(jq -cn --arg query "$mutation" --argjson variables "$mutation_variables" '{query:$query,variables:$variables}')"
+
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$mutation_body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Railway rejected the DEV service-instance bootstrap."
+            exit 1
+          fi
+
+          for attempt in $(seq 1 30); do
+            response="$(fetch_instances)"
+            if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+              printf '%s\n' "$response" | jq -c '.errors'
+              echo "::error::Unable to verify Railway DEV service instance."
+              exit 1
+            fi
+
+            instance_id="$(printf '%s' "$response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '.data.environment.serviceInstances.edges[]?.node | select(.serviceId == $service) | .id' | head -n 1)"
+            if [ -n "$instance_id" ]; then
+              echo "Railway DEV service instance created: $instance_id"
+              exit 0
+            fi
+
+            echo "Service instance not visible yet; waiting 2 seconds."
+            sleep 2
+          done
+
+          echo "::error::Railway accepted the bootstrap patch but the DEV service instance did not become visible."
+          exit 1
