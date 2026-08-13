@@ -205,7 +205,6 @@ jobs:
       - name: Connect exact immutable image to Railway DEV service
         shell: bash
         env:
-          RAILWAY_TOKEN: ""
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: |
           set -euo pipefail
@@ -214,7 +213,7 @@ jobs:
             exit 1
           fi
 
-          railway service source connect \
+          env -u RAILWAY_TOKEN railway service source connect \
             --project "$RAILWAY_PROJECT_ID" \
             --environment "$RAILWAY_ENVIRONMENT_ID" \
             --service "$RAILWAY_SERVICE_ID" \
