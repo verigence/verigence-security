@@ -157,15 +157,35 @@ jobs:
           npm install --global @railway/cli@5.30.1
           railway --version
 
-      - name: Link exact Railway DEV target
+      - name: Verify Railway project token scope
         shell: bash
         run: |
           set -euo pipefail
-          railway link \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT_ID" \
-            --service "$RAILWAY_SERVICE_ID" \
-            --json
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"query":"query { projectToken { projectId environmentId } }"}')"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            echo "::error::RAILWAY_TOKEN could not be validated as a Railway Project Token."
+            exit 1
+          fi
+
+          token_project_id="$(printf '%s' "$response" | jq -r '.data.projectToken.projectId // empty')"
+          token_environment_id="$(printf '%s' "$response" | jq -r '.data.projectToken.environmentId // empty')"
+
+          if [ "$token_project_id" != "$RAILWAY_PROJECT_ID" ]; then
+            echo "::error::RAILWAY_TOKEN is scoped to a different Railway project."
+            exit 1
+          fi
+          if [ "$token_environment_id" != "$RAILWAY_ENVIRONMENT_ID" ]; then
+            echo "::error::RAILWAY_TOKEN is scoped to a different Railway environment."
+            exit 1
+          fi
+
+          echo "Railway Project Token scope matches the configured DEV project and environment."
 
       - name: Configure deployment health and restart policy
         shell: bash
