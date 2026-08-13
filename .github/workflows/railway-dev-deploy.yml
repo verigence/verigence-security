@@ -220,6 +220,18 @@ jobs:
             --image "${{ steps.image.outputs.image_ref }}" \
             --json
 
+      - name: Trigger Railway deployment from exact configured image
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway service redeploy \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_SERVICE_ID" \
+            --from-source \
+            --yes \
+            --json
+
       - name: Wait for the new Railway deployment to succeed
         id: deployment
         shell: bash
