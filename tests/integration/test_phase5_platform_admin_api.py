@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import jwt
 import pytest
-from argon2 import PasswordHasher
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session
 
 from verigence_security.api.dependencies import get_settings as dependency_settings
 from verigence_security.config import Settings, get_settings
 from verigence_security.main import app
-from verigence_security.repositories.platform_admin_repository import PlatformAdminRepository
 from verigence_security.services.admin_control_plane_catalog import STANDARD_TENANT_ADMIN_ROLES
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
@@ -23,6 +21,10 @@ pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL,
     reason="TEST_DATABASE_URL is required for Neon/PostgreSQL integration tests",
 )
+
+CLERK_ISSUER = "https://clerk.integration.test"
+CLERK_AZP = "https://security-integration.test"
+CLERK_SUPER_ADMIN_SUBJECT = "user_clerk_platform_super_admin_test"
 
 
 def _sqlalchemy_url(url: str) -> str:
@@ -37,7 +39,7 @@ def _sqlalchemy_url(url: str) -> str:
     raise ValueError("TEST_DATABASE_URL must be a PostgreSQL URL")
 
 
-def _test_settings(database_url: str) -> Settings:
+def _rsa_pems() -> tuple[str, str]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -48,80 +50,105 @@ def _test_settings(database_url: str) -> Settings:
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode()
+    return private_pem, public_pem
+
+
+def _test_settings(database_url: str, clerk_public_pem: str) -> Settings:
+    security_private_pem, security_public_pem = _rsa_pems()
     return Settings(
         app_env="ci",
         database_url=database_url,
+        clerk_issuer=CLERK_ISSUER,
+        clerk_jwt_key=clerk_public_pem,
+        clerk_authorized_parties=CLERK_AZP,
+        security_bootstrap_enabled=True,
+        security_bootstrap_super_admin_clerk_user_id=CLERK_SUPER_ADMIN_SUBJECT,
         security_key_id="platform-test-key",
-        security_private_key_pem=private_pem,
-        security_public_key_pem=public_pem,
+        security_private_key_pem=security_private_pem,
+        security_public_key_pem=security_public_pem,
         platform_admin_token_ttl_minutes=10,
         network_risk_mode="disabled",
     )
 
 
-def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
+def _clerk_token(private_pem: str, subject: str) -> str:
+    now = datetime.now(UTC)
+    return jwt.encode(
+        {
+            "iss": CLERK_ISSUER,
+            "sub": subject,
+            "sid": f"sess_{uuid4()}",
+            "azp": CLERK_AZP,
+            "iat": now,
+            "exp": now + timedelta(minutes=10),
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+
+
+def test_clerk_bootstrap_platform_login_and_direct_tenant_api() -> None:
     assert TEST_DATABASE_URL is not None
     database_url = _sqlalchemy_url(TEST_DATABASE_URL)
     engine = create_engine(database_url, pool_pre_ping=True)
-    settings = _test_settings(database_url)
-    login_name = f"platform-test-{uuid4()}"
-    initial_password = f"initial-{uuid4()}"
-    replacement_password = f"replacement-{uuid4()}"
+    clerk_private_pem, clerk_public_pem = _rsa_pems()
+    settings = _test_settings(database_url, clerk_public_pem)
+    clerk_token = _clerk_token(clerk_private_pem, CLERK_SUPER_ADMIN_SUBJECT)
+    wrong_clerk_token = _clerk_token(clerk_private_pem, "user_wrong_bootstrap_subject")
     onboarding_token = f"onboarding-{uuid4()}"
     tenant_code = f"API-{uuid4()}"[:80]
     admin_user_id: str | None = None
     tenant_id: str | None = None
 
     try:
-        with Session(engine) as session:  # type: ignore[arg-type]
-            repository = PlatformAdminRepository(session)
-            admin_user_id = repository.create_bootstrap_super_admin(
-                login_name=login_name,
-                password_hash=PasswordHasher().hash(initial_password),
-                now=datetime.now(UTC),
-            )
-            repository.commit()
-
         app.dependency_overrides[get_settings] = lambda: settings
         app.dependency_overrides[dependency_settings] = lambda: settings
         with TestClient(app) as client:
+            local_password_login = client.post(
+                "/security/v1/platform/auth/login",
+                json={"loginName": "legacy-user", "password": "legacy-password"},
+            )
+            assert local_password_login.status_code == 401
+            assert local_password_login.json()["code"] == "AUTH_TOKEN_INVALID"
+
+            wrong_claim = client.post(
+                "/security/v1/platform/bootstrap/claim",
+                headers={"Authorization": f"Bearer {wrong_clerk_token}"},
+            )
+            assert wrong_claim.status_code == 403
+            assert wrong_claim.json()["code"] == "PERMISSION_DENIED"
+
+            claim = client.post(
+                "/security/v1/platform/bootstrap/claim",
+                headers={"Authorization": f"Bearer {clerk_token}"},
+            )
+            assert claim.status_code == 200
+            claimed = claim.json()
+            admin_user_id = claimed["userId"]
+            assert claimed["mustChangePassword"] is False
+            assert claimed["roles"] == ["platform.super_admin"]
+            assert "security.tenant.create" in claimed["permissions"]
+
+            second_claim = client.post(
+                "/security/v1/platform/bootstrap/claim",
+                headers={"Authorization": f"Bearer {clerk_token}"},
+            )
+            assert second_claim.status_code == 403
+            assert second_claim.json()["code"] == "PERMISSION_DENIED"
+
             login = client.post(
                 "/security/v1/platform/auth/login",
-                json={"loginName": login_name, "password": initial_password},
+                headers={"Authorization": f"Bearer {clerk_token}"},
             )
             assert login.status_code == 200
-            initial = login.json()
-            assert initial["mustChangePassword"] is True
-            assert initial["roles"] == ["platform.super_admin"]
-            assert "security.tenant.create" in initial["permissions"]
-
-            blocked_create = client.post(
-                "/security/v1/platform/tenants",
-                headers={"Authorization": f"Bearer {initial['accessToken']}"},
-                json={"tenantCode": tenant_code, "tenantName": "Blocked before password change"},
-            )
-            assert blocked_create.status_code == 403
-            assert blocked_create.json()["code"] == "PERMISSION_DENIED"
-
-            changed = client.post(
-                "/security/v1/platform/auth/change-password",
-                headers={"Authorization": f"Bearer {initial['accessToken']}"},
-                json={"newPassword": replacement_password},
-            )
-            assert changed.status_code == 204
-
-            relogin = client.post(
-                "/security/v1/platform/auth/login",
-                json={"loginName": login_name, "password": replacement_password},
-            )
-            assert relogin.status_code == 200
-            current = relogin.json()
+            current = login.json()
+            assert current["userId"] == admin_user_id
             assert current["mustChangePassword"] is False
-            token = current["accessToken"]
+            platform_token = current["accessToken"]
 
             me = client.get(
                 "/security/v1/platform/me",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {platform_token}"},
             )
             assert me.status_code == 200
             assert me.json()["userId"] == admin_user_id
@@ -129,7 +156,7 @@ def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
 
             created = client.post(
                 "/security/v1/platform/tenants",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {platform_token}"},
                 json={
                     "tenantCode": tenant_code,
                     "tenantName": "Platform API Tenant",
@@ -143,38 +170,58 @@ def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
 
             fetched = client.get(
                 f"/security/v1/platform/tenants/{tenant_id}",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {platform_token}"},
             )
             assert fetched.status_code == 200
             assert fetched.json()["tenantCode"] == tenant_code
 
             listed = client.get(
                 "/security/v1/platform/tenants",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {platform_token}"},
             )
             assert listed.status_code == 200
             assert any(row["tenantId"] == tenant_id for row in listed.json())
 
             updated = client.patch(
                 f"/security/v1/platform/tenants/{tenant_id}",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {platform_token}"},
                 json={"tenantName": "Renamed Platform API Tenant"},
             )
             assert updated.status_code == 200
             assert updated.json()["tenantName"] == "Renamed Platform API Tenant"
-            assert updated.json()["status"] == "CONFIGURING"
 
+        assert admin_user_id is not None
         assert tenant_id is not None
         with engine.connect() as conn:
+            identity = conn.execute(
+                text(
+                    """
+                    SELECT provider,provider_subject,status
+                    FROM security.external_identities
+                    WHERE user_id=:user_id
+                    """
+                ),
+                {"user_id": admin_user_id},
+            ).mappings().one()
+            assert identity["provider"] == "CLERK"
+            assert identity["provider_subject"] == CLERK_SUPER_ADMIN_SUBJECT
+            assert identity["status"] == "ACTIVE"
+
+            local_credential = conn.execute(
+                text(
+                    """
+                    SELECT 1 FROM security.local_user_credentials
+                    WHERE user_id=:user_id
+                    """
+                ),
+                {"user_id": admin_user_id},
+            ).first()
+            assert local_credential is None
+
             roles = frozenset(
                 str(value)
                 for value in conn.execute(
-                    text(
-                        """
-                        SELECT role_key FROM security.roles
-                        WHERE tenant_id=:tenant_id
-                        """
-                    ),
+                    text("SELECT role_key FROM security.roles WHERE tenant_id=:tenant_id"),
                     {"tenant_id": tenant_id},
                 ).scalars()
             )
@@ -193,7 +240,6 @@ def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
             assert onboarding["status"] == "ACTIVE"
             assert onboarding["token_version"] == 1
             assert onboarding["token_hash"] != onboarding_token
-            assert PasswordHasher().verify(str(onboarding["token_hash"]), onboarding_token)
 
             operations = frozenset(
                 str(value)
@@ -208,7 +254,7 @@ def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
                 ).scalars()
             )
             assert {
-                "platform.auth.change_password",
+                "platform.super_admin.clerk_bootstrap",
                 "platform.tenant.create",
                 "platform.tenant.update",
             }.issubset(operations)
@@ -223,8 +269,10 @@ def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
                 if tenant_id is not None:
                     conn.execute(
                         text(
-                            "DELETE FROM security.tenant_self_onboarding_settings "
-                            "WHERE tenant_id=:id"
+                            """
+                            DELETE FROM security.tenant_self_onboarding_settings
+                            WHERE tenant_id=:id
+                            """
                         ),
                         {"id": tenant_id},
                     )
@@ -242,9 +290,15 @@ def test_platform_admin_login_password_change_and_direct_tenant_api() -> None:
                     )
                 conn.execute(
                     text(
-                        "DELETE FROM security.platform_user_role_assignments "
-                        "WHERE user_id=:id"
+                        """
+                        DELETE FROM security.platform_user_role_assignments
+                        WHERE user_id=:id
+                        """
                     ),
+                    {"id": admin_user_id},
+                )
+                conn.execute(
+                    text("DELETE FROM security.external_identities WHERE user_id=:id"),
                     {"id": admin_user_id},
                 )
                 conn.execute(
