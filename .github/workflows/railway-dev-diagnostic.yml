@@ -1,0 +1,41 @@
+name: Railway DEV Deployment Diagnostic
+
+on:
+  push:
+    branches:
+      - feature/railway-bootstrap-dev-service-instance
+
+permissions:
+  contents: read
+
+env:
+  RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Read current DEV deployment state
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 10) { edges { node { id status createdAt } } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{projectId:$project,serviceId:$service}}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+
+          printf '%s\n' "$response" | jq -c '[.data.deployments.edges[].node | {id,status,createdAt}]'
