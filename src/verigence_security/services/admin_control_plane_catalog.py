@@ -7,7 +7,6 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-
 SECURITY_ADMIN_PERMISSION_KEYS: frozenset[str] = frozenset(
     {
         "security.platform_admin.read",
