@@ -9,6 +9,8 @@
 **Phase 1 merge commit:** `c6b73591534c333bdfe608a55deeef5f329d6be3`  
 **Phase 1 post-merge CI run:** `31627855570`  
 **Phase 2 Neon validation run:** `31630275529`  
+**Phase 2 promotion:** PR #2 merged to `dev`  
+**Phase 3 Railway deployment:** deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS` / runtime instance `RUNNING`  
 **Last updated:** 2026-08-13
 
 ---
@@ -52,8 +54,8 @@ If this tracker conflicts with the approved design, the approved design wins.
 | Phase 2 — Neon DEV schema | DONE | Approved v1.3 schema created as `security` in Neon DEV |
 | Phase 2 — Neon structure validation | DONE | 27 tables, 7 explicit indexes, 56 FKs, 57 CHECK constraints validated |
 | Phase 2 — real PostgreSQL repository tests | DONE | 4/4 tests green, including real `FOR UPDATE` serialization |
-| Phase 2 promotion to `dev` | PENDING | Open PR and pass normal CI before merge |
-| Phase 3 — Railway DEV deployment | NOT STARTED | **NEXT after Phase-2 promotion** |
+| Phase 2 promotion to `dev` | DONE | PR #2 merged after normal Security CI gate |
+| Phase 3 — Railway DEV deployment | PARTIAL | **Railway deployment DONE**; NEXT = runtime variables, deployed health/correlation and DEV E2E validation |
 | USER device/session lifecycle completeness | PARTIAL | Core access-session creation exists; enrollment/refresh/revoke pending |
 | Security administration APIs | PENDING | User/Tenant/RBAC/location/schedule/policy administration pending |
 | SYSTEM actor runtime | PENDING | Design exists; credential/token runtime pending |
@@ -107,6 +109,7 @@ The following list describes implemented/reviewed capabilities. It does not crea
 | SEC-IMP-033 | Neon DEV Security schema | DONE | Approved v1.3 migration applied transactionally |
 | SEC-IMP-034 | Neon schema validation | DONE | 27 tables / 7 explicit indexes / 56 FKs / 57 CHECKs |
 | SEC-IMP-035 | Real PostgreSQL repository integration tests | DONE | 4/4 tests; repository read + row lock + CHECK + FK enforcement |
+| SEC-IMP-036 | Railway DEV immutable deployment | DONE | Exact GHCR digest attached to DEV service instance; deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS`, runtime instance `RUNNING` |
 
 ---
 
@@ -136,7 +139,7 @@ Post-merge run `31627855570` completed successfully.
 
 ### Phase 2 — Neon DEV integration
 
-**Status: DONE technically — PENDING PR promotion to `dev`**
+**Status: DONE**
 
 Completed:
 
@@ -151,7 +154,8 @@ Completed:
 - added real PostgreSQL repository integration tests;
 - proved real `SELECT ... FOR UPDATE` serialization across concurrent sessions;
 - verified a representative approved CHECK constraint and USER→Principal FK are enforced;
-- kept database credentials out of source and logs.
+- kept database credentials out of source and logs;
+- promoted Phase 2 through PR #2 to `dev`.
 
 Successful validation run: `31630275529`.
 
@@ -168,29 +172,35 @@ real Neon integration tests: 4 passed
 
 Detailed evidence: `docs/PHASE_2_NEON_INTEGRATION.md`.
 
-Not claimed as complete in Phase 2:
+Not claimed as Phase 2 scope:
 
 - Railway runtime service configuration;
-- Neon runtime pooler URL configuration for Railway;
 - any new Security schema beyond approved v1.3.
-
-**Promotion gate:** PR `feature/neon-integration` → `dev`, normal CI green, review diff, then merge.
 
 ---
 
 ### Phase 3 — Railway DEV deployment
 
-**Status: NOT STARTED**  
-**Priority: NEXT after Phase-2 promotion**
+**Status: PARTIAL — RAILWAY DEPLOYMENT DONE; RUNTIME VALIDATION NEXT**
 
-Planned work:
+Completed deployment milestone:
 
-- create/configure Railway DEV service;
-- configure the approved Neon pooled runtime connection for the service;
+- Phase 3 deployment workflow introduced through PR #5 and iteratively hardened through subsequent Railway workflow PRs;
+- exact CI-validated DEV source is built to GHCR and represented by an immutable SHA-256 digest;
+- Railway DEV service instance exists in the configured DEV environment;
+- exact immutable GHCR digest is attached to the environment-specific Railway DEV service instance;
+- Railway deployment `c7f10093-378a-46ab-825c-23656ef853cb` reached `SUCCESS`;
+- deployed Railway runtime instance reached `RUNNING`;
+- Railway DEV variable diagnostic run `31667451217` proved the service currently has no configured service/shared runtime variables.
+
+Next work:
+
+- configure the approved Neon pooled runtime connection for the Railway service without exposing credentials;
 - configure Security signing keys through Railway secrets;
-- run with DEV mock identity adapter;
-- run with DEV mock network-risk adapter;
-- verify `/health/live` and `/health/ready`;
+- enable the DEV mock identity adapter using an explicit DEV-only signing secret;
+- configure DEV mock network-risk mode;
+- preserve the approved trusted ingress-header setting;
+- verify `/health/live` and `/health/ready` over deployed HTTPS;
 - verify `X-Correlation-ID` over deployed HTTPS;
 - execute an end-to-end DEV USER access-session request without Clerk.
 
@@ -341,6 +351,7 @@ Expected branches include:
 
 - `feature/neon-integration`
 - `feature/railway-dev`
+- `feature/phase3-runtime-validation`
 - `feature/device-session-lifecycle`
 - `feature/admin-apis`
 - `feature/system-principals`
@@ -380,21 +391,30 @@ Code existence alone is not sufficient for `DONE`.
 | 2026-08-12 | PR #1 / `c6b73591534c333bdfe608a55deeef5f329d6be3` | Established CI/design-integrity gate and merged to `dev` | DONE — post-merge run `31627855570` green |
 | 2026-08-13 | rerun of `31628924267` | Applied approved Security v1.3 schema to Neon DEV | DONE — `security` schema / 27 tables |
 | 2026-08-13 | `31630275529` | Validated Neon structure and real repository behavior | DONE — 27 tables / 7 indexes / 56 FKs / 57 CHECKs / 4 tests |
+| 2026-08-13 | PR #2 | Promoted validated Phase 2 Neon integration to `dev` | DONE |
+| 2026-08-13 | Railway deployment `c7f10093-378a-46ab-825c-23656ef853cb` | Attached exact immutable GHCR digest to Railway DEV service instance and deployed | DONE — deployment `SUCCESS`, runtime instance `RUNNING` |
+| 2026-08-13 | `31667451217` | Inspected Railway DEV runtime variable names only | DONE — no service/shared runtime variables configured; runtime configuration is NEXT |
 
 ---
 
 ## 9. Current execution pointer
 
-**NOW:** Promote Phase 2 from `feature/neon-integration` to `dev` through a reviewed PR and the normal CI gate.
+**NOW:** Configure required Railway DEV runtime variables from approved/existing GitHub secrets without exposing secret values, then validate the deployed HTTPS runtime.
 
-**NEXT after promotion:** Phase 3 — Railway DEV deployment.
+**NEXT:** `/health/ready` → `/health/live` → `X-Correlation-ID` verification → DEV mock-auth USER access-session E2E against Neon.
 
 ```text
 Phase 1 CI                 DONE
       ↓
-Phase 2 Neon DEV           VALIDATED — PR PROMOTION NOW
+Phase 2 Neon DEV           DONE
       ↓
-Phase 3 Railway DEV        NEXT
+Phase 3 Railway DEV        PARTIAL — DEPLOYMENT DONE
+      ↓
+Railway runtime config     NOW
+      ↓
+Health + correlation       NEXT
+      ↓
+DEV USER E2E               NEXT
       ↓
 Phase 4 USER lifecycle
       ↓
