@@ -3,8 +3,8 @@
 Security implementation remains grounded in the approved Security v1.3 artifacts. The v1.3 OpenAPI is
 referenced by its verified digest rather than silently regenerated or altered during code check-in.
 
-The Security Admin Control Plane is a new, explicitly versioned v1.4 extension. It does not replace or rewrite
-v1.3 lifecycle contracts.
+The Security Admin Control Plane and its explicit v1.4 extensions are new, versioned design authorities. They do
+not replace or rewrite v1.3 lifecycle contracts.
 
 ## Security v1.3 source artifacts
 
@@ -44,10 +44,47 @@ It governs only the new v1.4 administration/control-plane scope, including:
 - DI authorization-alignment plan;
 - deployed Security-to-DI E2E acceptance criteria.
 
-Where v1.4 explicitly resolves a former Phase 5 implementation ambiguity, implementation follows v1.4 for that
-new Admin Control Plane scope.
+## Security Control Registry v1.4
+
+The implementation authority for configurable Security enforcement switches is:
+
+```text
+docs/SECURITY_CONTROL_REGISTRY_DESIGN_v1.4.md
+```
+
+It governs:
+
+- Platform/Tenant effective Security-control resolution;
+- configurable device/geo/schedule/network/refresh/admin checks;
+- non-disableable core Security invariants;
+- control hierarchy and override precedence;
+- normalized control-registry persistence;
+- Platform control-management APIs and audit requirements.
+
+## Security Self-Onboarding v1.4
+
+The implementation authority for token-gated self-onboarding is:
+
+```text
+docs/SECURITY_SELF_ONBOARDING_DESIGN_v1.4.md
+```
+
+It governs:
+
+- Tenant-scoped onboarding secret configuration by Platform Super Admin;
+- Argon2id-only token persistence;
+- `admin.self_onboarding` enable/disable control;
+- authenticated USER self-registration using the Tenant token;
+- PENDING-only membership/request creation;
+- mandatory Tenant Admin approval before membership becomes ACTIVE;
+- coexistence with invitation-led onboarding;
+- privileged-role maker-checker retention;
+- token rotation, duplicate handling, audit and deployed E2E acceptance criteria.
+
+Where v1.4 explicitly resolves a former implementation ambiguity, implementation follows the applicable v1.4
+design authority for that new scope.
 
 Where v1.4 explicitly defers an issue, the issue remains blocked and must not be inferred.
 
-The unavailable v1.3 OpenAPI continues to govern the older v1.3 lifecycle routes and is not superseded by this
-v1.4 Admin design.
+The unavailable v1.3 OpenAPI continues to govern the older v1.3 lifecycle routes and is not superseded by these
+v1.4 Admin extensions.
