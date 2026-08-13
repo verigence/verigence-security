@@ -72,6 +72,23 @@ class UserSessionRefreshService:
 
             context = self.security.get_user_context(user_id, tenant_id, now)
             policy = self.security.get_tenant_policy(tenant_id)
+
+            # Read only enough session context to discover the canonical device lock target.
+            # Do not lock the session row yet: create/reuse already uses device→session ordering,
+            # so refresh must use the same order to avoid a device↔session deadlock cycle.
+            observed_session = self.refresh_repo.user_session(
+                access_session_id=access_session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            if observed_session is None or observed_session["status"] != "ACTIVE":
+                raise security_error("SESSION_REVOKED")
+
+            device_id = str(observed_session["device_id"])
+            self.security.lock_active_device(user_id, tenant_id, device_id)
+
+            # Re-read under the session row lock after the device lock. A concurrent revoke or
+            # session transition between the initial read and this lock must be observed here.
             session = self.refresh_repo.user_session_for_update(
                 access_session_id=access_session_id,
                 tenant_id=tenant_id,
@@ -79,15 +96,16 @@ class UserSessionRefreshService:
             )
             if session is None or session["status"] != "ACTIVE":
                 raise security_error("SESSION_REVOKED")
+            if str(session["device_id"]) != device_id:
+                # Device identity is not expected to move between sessions. Fail closed if the
+                # persisted context changed between the discovery read and the locked re-read.
+                raise security_error("SESSION_REVOKED")
 
             current_expiry = session["expires_at_utc"]
             if current_expiry.tzinfo is None:
                 current_expiry = current_expiry.replace(tzinfo=UTC)
             if current_expiry.astimezone(UTC) <= now:
                 raise security_error("AUTH_TOKEN_EXPIRED")
-
-            device_id = str(session["device_id"])
-            self.security.lock_active_device(user_id, tenant_id, device_id)
 
             validate_geo(
                 geo,

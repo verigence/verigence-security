@@ -22,6 +22,7 @@ from verigence_security.services.token_service import AccessTokenClaims
 @dataclass
 class FakeSecurityRepository:
     locations: list[LocationCandidate]
+    lock_events: list[str]
     evaluations: list[dict[str, Any]] = field(default_factory=list)
 
     def tenant_status(self, tenant_id: str) -> str:
@@ -66,6 +67,7 @@ class FakeSecurityRepository:
         device_id: str,
     ) -> dict[str, Any]:
         _ = (user_id, tenant_id)
+        self.lock_events.append("device-lock")
         return {"device_id": device_id, "status": "ACTIVE"}
 
     def assigned_locations(
@@ -110,9 +112,21 @@ class FakeSecurityRepository:
 @dataclass
 class FakeRefreshRepository:
     session: dict[str, Any]
+    lock_events: list[str]
     updates: list[dict[str, Any]] = field(default_factory=list)
     commits: int = 0
     rollbacks: int = 0
+
+    def user_session(
+        self,
+        *,
+        access_session_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        _ = (access_session_id, tenant_id, user_id)
+        self.lock_events.append("session-read")
+        return self.session
 
     def user_session_for_update(
         self,
@@ -122,6 +136,7 @@ class FakeRefreshRepository:
         user_id: str,
     ) -> dict[str, Any]:
         _ = (access_session_id, tenant_id, user_id)
+        self.lock_events.append("session-lock")
         return self.session
 
     def update_active_session_context(self, **kwargs: Any) -> bool:
@@ -185,9 +200,11 @@ def _service(
     FakeSecurityRepository,
     FakeNetwork,
     FakeTokens,
+    list[str],
 ]:
     now = datetime.now(UTC)
-    security = FakeSecurityRepository(locations=locations)
+    lock_events: list[str] = []
+    security = FakeSecurityRepository(locations=locations, lock_events=lock_events)
     refresh = FakeRefreshRepository(
         session={
             "access_session_id": "session-1",
@@ -196,7 +213,8 @@ def _service(
             "location_id": "location-a",
             "started_at_utc": now - timedelta(minutes=5),
             "expires_at_utc": now + timedelta(minutes=5),
-        }
+        },
+        lock_events=lock_events,
     )
     network = FakeNetwork()
     tokens = FakeTokens()
@@ -206,11 +224,11 @@ def _service(
         network=network,
         tokens=tokens,  # type: ignore[arg-type]
     )
-    return service, refresh, security, network, tokens
+    return service, refresh, security, network, tokens, lock_events
 
 
 def test_refresh_moves_context_to_different_approved_location() -> None:
-    service, refresh, security, network, tokens = _service(
+    service, refresh, security, network, tokens, lock_events = _service(
         locations=[
             _location("location-a", 28.6139, 77.2090),
             _location("location-b", 28.7041, 77.1025),
@@ -234,10 +252,11 @@ def test_refresh_moves_context_to_different_approved_location() -> None:
     assert refresh.commits == 1
     assert refresh.rollbacks == 0
     assert network.calls == 1
+    assert lock_events == ["session-read", "device-lock", "session-lock"]
 
 
 def test_refresh_keeps_context_when_same_approved_location_matches() -> None:
-    service, refresh, _, _, tokens = _service(
+    service, refresh, _, _, tokens, _ = _service(
         locations=[_location("location-a", 28.6139, 77.2090)]
     )
 
@@ -256,7 +275,7 @@ def test_refresh_keeps_context_when_same_approved_location_matches() -> None:
 
 
 def test_refresh_rejects_geo_outside_all_approved_locations() -> None:
-    service, refresh, security, _, tokens = _service(
+    service, refresh, security, _, tokens, _ = _service(
         locations=[_location("location-a", 28.6139, 77.2090)]
     )
 
