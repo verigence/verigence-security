@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy.orm import Session
 
 from verigence_security.adapters.network_risk import NetworkRiskAdapter
 from verigence_security.api.dependencies import (
@@ -13,6 +15,10 @@ from verigence_security.api.dependencies import (
     repository,
     source_ip,
     token_service,
+)
+from verigence_security.api.platform_dependencies import (
+    platform_session,
+    require_platform_permission,
 )
 from verigence_security.api.schemas import AccessSessionRequest, AccessTokenResponse
 from verigence_security.config import Settings, get_settings
@@ -54,6 +60,28 @@ class InvitationCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_invitation(self) -> InvitationCreateRequest:
+        self.displayName = self.displayName.strip()
+        self.email = self.email.strip() if self.email else None
+        self.mobile = self.mobile.strip() if self.mobile else None
+        if not self.displayName:
+            raise ValueError("Display name cannot be blank")
+        if not self.email and not self.mobile:
+            raise ValueError("At least one contact channel is required")
+        if self.expiresAtUtc.tzinfo is None:
+            raise ValueError("expiresAtUtc must include timezone information")
+        self.expiresAtUtc = self.expiresAtUtc.astimezone(UTC)
+        return self
+
+
+class OwnerInvitationRequest(BaseModel):
+    displayName: str = Field(min_length=1, max_length=240)
+    email: str | None = Field(default=None, max_length=320)
+    mobile: str | None = Field(default=None, max_length=40)
+    employeeCode: str | None = Field(default=None, max_length=120)
+    expiresAtUtc: datetime
+
+    @model_validator(mode="after")
+    def validate_owner_invitation(self) -> OwnerInvitationRequest:
         self.displayName = self.displayName.strip()
         self.email = self.email.strip() if self.email else None
         self.mobile = self.mobile.strip() if self.mobile else None
@@ -120,7 +148,6 @@ def create_access_session(
     # Persistent same-key replay across stateless replicas still requires the approved
     # idempotency store tracked in IMPLEMENTATION_STATUS.
     _ = idempotency_key
-
     identity = identity_from_token(authorization_token, settings)
     geo = GeoSample(
         latitude=body.geo.latitude,
@@ -140,6 +167,46 @@ def create_access_session(
         source_ip=ip,
         correlation_id=request.state.correlation_id,
     )
+
+
+@router.post(
+    "/platform/tenants/{tenantId}/owner-invitations",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Platform Administration"],
+)
+def create_owner_invitation(
+    tenantId: str,
+    body: OwnerInvitationRequest,
+    request: Request,
+    claims: dict[str, Any] = Depends(
+        require_platform_permission("security.tenant.bootstrap_admin")
+    ),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    service = OnboardingService(session)
+    try:
+        owner_role_id = service.role_id_by_key(
+            tenant_id=tenantId,
+            role_key="tenant.owner",
+        )
+        invitation, acceptance_value = service.create_invitation(
+            tenant_id=tenantId,
+            actor_user_id=str(claims["sub"]),
+            display_name=body.displayName,
+            email=body.email,
+            mobile=body.mobile,
+            employee_code=body.employeeCode,
+            role_ids=[owner_role_id],
+            group_ids=[],
+            location_assignments=[],
+            expires_at_utc=body.expiresAtUtc,
+            correlation_id=request.state.correlation_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {**invitation, "acceptanceToken": acceptance_value}
 
 
 @router.post(
@@ -163,7 +230,7 @@ def create_invitation(
         "security.member.invite",
     )
     try:
-        invitation, acceptance_token = OnboardingService(repo.s).create_invitation(
+        invitation, acceptance_value = OnboardingService(repo.s).create_invitation(
             tenant_id=tenantId,
             actor_user_id=actor_id,
             display_name=body.displayName,
@@ -180,7 +247,7 @@ def create_invitation(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {**invitation, "acceptanceToken": acceptance_token}
+    return {**invitation, "acceptanceToken": acceptance_value}
 
 
 @router.get(
