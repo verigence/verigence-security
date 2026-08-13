@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { id serviceId environmentId source { image } latestDeployment { id status createdAt deploymentStopped instances { id status } } activeDeployments { id status createdAt } } } } } }'
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { id serviceId environmentId source { image } latestDeployment { id status createdAt deploymentStopped instances { id status } } activeDeployments { id status createdAt } domains { serviceDomains { id domain targetPort } customDomains { id domain targetPort } } } } } } }'
           variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
           response="$(curl --fail-with-body --silent --show-error \
@@ -38,4 +38,4 @@ jobs:
             exit 1
           fi
 
-          printf '%s\n' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service) | {id,serviceId,environmentId,source,latestDeployment,activeDeployments}]'
+          printf '%s\n' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service) | {id,serviceId,environmentId,source,latestDeployment,activeDeployments,domains}]'
