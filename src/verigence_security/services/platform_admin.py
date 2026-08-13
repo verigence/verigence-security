@@ -90,7 +90,9 @@ class PlatformAdminService:
     ) -> dict[str, Any]:
         if self.settings.app_env not in _ALLOWED_BOOTSTRAP_ENVS:
             raise ValueError("PLATFORM_ADMIN_BOOTSTRAP_NOT_ALLOWED")
+        self.repository.lock_bootstrap()
         if self.repository.admin_count() != 0:
+            self.repository.rollback()
             raise ValueError("PLATFORM_ADMIN_ALREADY_BOOTSTRAPPED")
         normalized_username = username.strip().lower()
         admin_id = str(uuid4())
