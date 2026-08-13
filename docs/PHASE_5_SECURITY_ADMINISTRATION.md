@@ -1,8 +1,8 @@
 # Phase 5 — Security Administration Foundation
 
-**Status:** PARTIAL — Increments 1–3 validated on Neon DEV  
+**Status:** PARTIAL — Increments 1–4 validated on Neon DEV  
 **Approved baseline:** Security Solution v1.3  
-**Latest Neon validation run:** `31680129517`
+**Latest Neon validation run:** `31680743813`
 
 ## Objective
 
@@ -10,75 +10,54 @@ Build Security administration from the approved persistence model without invent
 
 ## Increment 1 — Tenant Security Policy and Retention Policy administration
 
-Implemented internal administration for:
+Implemented internal administration for `tenant_security_policies` and `security_retention_policies`. Every Security threshold/TTL and retention duration is explicit; no hidden defaults are introduced. The existing runtime consumes administered ACTIVE policy values unchanged.
 
-- `security.tenant_security_policies`;
-- `security.security_retention_policies`.
-
-Every approved Security threshold/TTL and every retention duration is supplied explicitly. No numeric Security default is introduced. An ACTIVE policy written through Phase 5 is consumed unchanged by the existing runtime `SecurityRepository.get_tenant_policy()` path.
-
-Initial Neon run `31678680842`: **SUCCESS**.
+Neon `31678680842`: **PASS**.
 
 ## Increment 2 — Tenant location and schedule administration
 
-Implemented internal administration for:
+Implemented internal administration for `tenant_locations`, `access_schedules` and `access_schedule_windows`. Exact location/radius/timezone data and normal/overnight windows are persisted and consumed through the existing runtime schedule reader. No implicit window deletion/replacement semantics are invented.
 
-- `security.tenant_locations`;
-- `security.access_schedules`;
-- `security.access_schedule_windows`.
-
-Location geo/radius/timezone/address/status and normal/overnight schedule windows are stored exactly as supplied. Existing runtime schedule readers consume the administered rows directly. No implicit schedule-window deletion/replacement semantics are invented.
-
-Neon run `31679363993`: **SUCCESS — 6/6 tests**.
+Neon `31679363993`: **6/6 PASS**.
 
 ## Increment 3 — Tenant membership, employee-location and RBAC administration
 
-Implemented internal administration for existing USER principals across:
+Implemented internal administration for existing USER principals across memberships, canonical permission catalogue rows, Tenant roles, role-permission grants, user-role assignments and user-location/schedule assignments.
 
-- `security.tenant_memberships`;
-- `security.permissions`;
-- `security.roles`;
-- `security.role_permissions`;
-- `security.user_role_assignments`;
-- `security.user_location_assignments`.
+The runtime acceptance test proves the existing production authorization repository directly resolves the administered membership, approved location/schedule, Tenant role and approved example permission `di.document.upload`. No separate Phase 5 read model exists.
 
-The increment adds:
+No automatic `authorization_version` bump policy is invented; the approved value is supplied explicitly.
 
-- `MembershipAdminRepository` for Tenant/user membership configuration;
-- `RbacAdminRepository` for canonical permission catalogue entries, Tenant roles, role-permission grants and user-role assignments;
-- `UserLocationAdminRepository` for employee-to-approved-location/schedule assignment;
-- `TenantAuthorizationConfigurationService` coordinating the internal administration transactions;
-- canonical dot-notation validation for supplied permission keys;
-- no automatic `authorization_version` mutation policy beyond the explicitly supplied value, because that mutation policy is not frozen by the active approved sources.
+Neon `31680129517`: **7/7 PASS**.
 
-The runtime acceptance test uses the explicitly approved example permission `di.document.upload`; no new production permission key is invented.
+## Increment 4 — USER onboarding and external identity persistence
 
-## Neon validation
+Implemented the Security-side portion of employee onboarding:
 
-Workflow: `.github/workflows/phase5-neon-admin.yml`  
-Latest run: `31680129517`  
-Result: **SUCCESS — 7/7 Phase 5 PostgreSQL tests passed**.
+- `security.security_principals` USER persistence;
+- `security.users` persistence;
+- `security.external_identities` provider-subject mapping;
+- USER updates without silently retyping existing SYSTEM/SERVICE_INTEGRATION principals;
+- protection against rebinding an existing external provider subject to another USER.
 
-The Increment 3 acceptance test proves that records created by the administration services are immediately consumed by the existing production runtime:
+`UserAdministrationService` intentionally does **not** call Clerk invitation/onboarding APIs. Provider orchestration remains the later Clerk integration phase; Phase 5 owns only the Security authorization-side records.
 
-1. `SecurityRepository.get_user_context()` resolves the administered ACTIVE Tenant membership and authorization version.
-2. `SecurityRepository.assigned_locations()` resolves the administered employee location and its schedule.
-3. `SecurityRepository.effective_user_permissions()` resolves the administered Tenant role and `di.document.upload` grant.
+The real-Neon runtime acceptance test links a unique `CLERK` subject and proves `SecurityRepository.resolve_identity_user()` immediately resolves the administered USER. A conflicting attempt to bind the same subject to another USER is rejected, and a pre-existing SYSTEM principal cannot be converted into a USER through this service.
 
-There is no separate Phase 5 authorization-read model.
+Neon `31680743813`: **10/10 Phase 5 tests PASS**.
 
 ## Deliberately not implemented yet
 
 - public administration routes;
 - endpoint-level administrator permission checks;
-- Tenant activation-readiness result model/service;
+- live Clerk invitation/API orchestration;
+- complete Tenant activation-readiness prerequisite catalogue;
 - Tenant activation mutation;
-- external identity / Clerk onboarding administration;
 - implicit removal/replacement semantics for assignments or schedule windows;
 - automatic `authorization_version` bump rules not explicitly frozen by approved design.
 
-The exact public admin permission catalogue remains blocked. Phase 5 therefore continues through deterministic internal services first.
+The exact public admin permission catalogue and authoritative public OpenAPI remain source-gated. Phase 5 therefore continues through deterministic internal services first.
 
 ## Next safe increment
 
-Implement SEC-032 Tenant activation-readiness as an internal query that reports only prerequisites deterministically supported by approved sources/schema, then add the activation state transition only when every required prerequisite is explicitly represented and green.
+Implement the SEC-032 activation-readiness foundation as a fail-closed internal evaluator. It may report explicitly frozen prerequisites such as ACTIVE retention policy and mandatory Security configuration, but it must not claim the activation checklist is complete or transition the Tenant to ACTIVE until the full prerequisite catalogue is explicitly approved.
