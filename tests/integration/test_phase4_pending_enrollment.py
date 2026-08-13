@@ -123,10 +123,16 @@ def test_create_pending_enrollment_persists_only_pending_state() -> None:
                 text("DELETE FROM security.registered_devices WHERE tenant_id=:id"),
                 {"id": tenant_id},
             )
-            conn.execute(text("DELETE FROM security.users WHERE user_id=:id"), {"id": user_id})
+            conn.execute(
+                text("DELETE FROM security.users WHERE user_id=:id"),
+                {"id": user_id},
+            )
             conn.execute(
                 text("DELETE FROM security.security_principals WHERE principal_id=:id"),
                 {"id": user_id},
             )
-            conn.execute(text("DELETE FROM security.tenants WHERE tenant_id=:id"), {"id": tenant_id})
+            conn.execute(
+                text("DELETE FROM security.tenants WHERE tenant_id=:id"),
+                {"id": tenant_id},
+            )
         engine.dispose()
