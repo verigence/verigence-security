@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 
 SECURITY_ADMIN_PERMISSION_KEYS: frozenset[str] = frozenset(
