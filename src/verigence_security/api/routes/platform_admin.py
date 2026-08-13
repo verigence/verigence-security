@@ -54,9 +54,10 @@ def platform_change_password(
     body: PlatformPasswordChangeRequest,
     request: Request,
     claims: dict[str, Any] = Depends(platform_claims),
+    settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> Response:
-    PlatformAuthenticationService(session, get_settings()).change_password(
+    PlatformAuthenticationService(session, settings).change_password(
         user_id=str(claims["sub"]),
         new_password=body.newPassword,
         correlation_id=request.state.correlation_id,
