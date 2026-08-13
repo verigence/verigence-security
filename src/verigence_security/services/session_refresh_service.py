@@ -2,18 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
-from verigence_security.adapters.network_risk import NetworkRiskAdapter
-from verigence_security.core.errors import security_error
+from verigence_security.adapters.network_risk import NetworkRiskAdapter, NetworkRiskResult
+from verigence_security.core.errors import SecurityError, security_error
 from verigence_security.core.types import ActorType, PolicyAction, VpnStatus
 from verigence_security.repositories.security_repository import SecurityRepository
 from verigence_security.repositories.session_refresh_repository import (
     SessionRefreshRepository,
 )
-from verigence_security.services.geo import GeoSample, match_location, validate_geo
+from verigence_security.services.geo import GeoSample, LocationCandidate, match_location, validate_geo
 from verigence_security.services.permissions import validate_permissions
-from verigence_security.services.schedule import evaluate_schedule
+from verigence_security.services.schedule import ScheduleDecision, evaluate_schedule
 from verigence_security.services.session_lifecycle import UserSessionLifecycleService
 from verigence_security.services.token_service import AccessTokenClaims, TokenService
 
@@ -29,6 +30,15 @@ class RefreshedUserSession:
     location_id: str
     roles: tuple[str, ...]
     permissions: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _RefreshEvidenceContext:
+    access_session_id: str | None = None
+    location: LocationCandidate | None = None
+    distance_meters: float | None = None
+    schedule: ScheduleDecision | None = None
+    risk: NetworkRiskResult | None = None
 
 
 class UserSessionRefreshService:
@@ -47,6 +57,95 @@ class UserSessionRefreshService:
         self.network = network
         self.tokens = tokens
 
+    def _evaluation_payload(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        geo: GeoSample | None,
+        source_ip: str,
+        correlation_id: str,
+        decision: str,
+        reason_code: str,
+        evaluated_at: datetime,
+        evidence: _RefreshEvidenceContext,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "evaluation_id": str(uuid4()),
+            "tenant_id": tenant_id,
+            "principal_id": user_id,
+            "actor_type": ActorType.USER.value,
+            "source_ip": source_ip,
+            "decision": decision,
+            "decision_reason_code": reason_code,
+            "correlation_id": correlation_id,
+            "evaluated_at_utc": evaluated_at,
+        }
+        if evidence.access_session_id is not None:
+            payload["access_session_id"] = evidence.access_session_id
+        if geo is not None:
+            payload.update(
+                {
+                    "supplied_latitude": geo.latitude,
+                    "supplied_longitude": geo.longitude,
+                    "supplied_accuracy_meters": geo.accuracy_meters,
+                    "geo_captured_at_utc": geo.captured_at,
+                    "geo_source": geo.source.value,
+                    "geo_integrity_status": geo.integrity_status.value,
+                    "geo_integrity_reason": geo.integrity_reason,
+                }
+            )
+        if evidence.location is not None:
+            payload.update(
+                {
+                    "matched_location_id": evidence.location.location_id,
+                    "matched_distance_meters": evidence.distance_meters,
+                    "evaluated_timezone": evidence.location.timezone_iana,
+                    "schedule_id": evidence.location.schedule_id,
+                }
+            )
+        if evidence.schedule is not None:
+            payload["evaluated_local_time"] = evidence.schedule.local_time.replace(tzinfo=None)
+        if evidence.risk is not None:
+            payload["vpn_status"] = evidence.risk.vpn_status.value
+        return payload
+
+    def _persist_denial_evidence_best_effort(
+        self,
+        *,
+        error: SecurityError,
+        user_id: str,
+        tenant_id: str,
+        geo: GeoSample | None,
+        source_ip: str,
+        correlation_id: str,
+        evaluated_at: datetime,
+        evidence: _RefreshEvidenceContext,
+    ) -> None:
+        # 5xx Security errors are service/infrastructure failures, not access-policy DENY
+        # decisions. For 4xx lifecycle denials, persist evidence in a new transaction after the
+        # failed refresh transaction has been rolled back. Evidence failure must never replace the
+        # original Security denial returned to the caller.
+        if error.status_code >= 500:
+            return
+        try:
+            self.refresh_repo.record_evaluation(
+                self._evaluation_payload(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    geo=geo,
+                    source_ip=source_ip,
+                    correlation_id=correlation_id,
+                    decision="DENY",
+                    reason_code=error.code,
+                    evaluated_at=evaluated_at,
+                    evidence=evidence,
+                )
+            )
+            self.refresh_repo.commit()
+        except Exception:
+            self.refresh_repo.rollback()
+
     def refresh(
         self,
         *,
@@ -57,13 +156,16 @@ class UserSessionRefreshService:
         source_ip: str,
         correlation_id: str,
     ) -> RefreshedUserSession:
-        geo = UserSessionLifecycleService.require_refresh_geo(geo)
         now = datetime.now(UTC)
-
-        # Keep provider calls outside the database transaction/row-lock window.
-        risk = self.network.evaluate(source_ip, correlation_id)
+        evidence = _RefreshEvidenceContext()
 
         try:
+            geo = UserSessionLifecycleService.require_refresh_geo(geo)
+
+            # Keep provider calls outside the database row-lock window.
+            risk = self.network.evaluate(source_ip, correlation_id)
+            evidence.risk = risk
+
             tenant_status = self.security.tenant_status(tenant_id)
             if tenant_status in {"OFFBOARDING", "OFFBOARDED"}:
                 raise security_error("TENANT_OFFBOARDING")
@@ -83,6 +185,7 @@ class UserSessionRefreshService:
             )
             if observed_session is None or observed_session["status"] != "ACTIVE":
                 raise security_error("SESSION_REVOKED")
+            evidence.access_session_id = access_session_id
 
             device_id = str(observed_session["device_id"])
             self.security.lock_active_device(user_id, tenant_id, device_id)
@@ -97,8 +200,6 @@ class UserSessionRefreshService:
             if session is None or session["status"] != "ACTIVE":
                 raise security_error("SESSION_REVOKED")
             if str(session["device_id"]) != device_id:
-                # Device identity is not expected to move between sessions. Fail closed if the
-                # persisted context changed between the discovery read and the locked re-read.
                 raise security_error("SESSION_REVOKED")
 
             current_expiry = session["expires_at_utc"]
@@ -117,6 +218,8 @@ class UserSessionRefreshService:
                 geo,
                 self.security.assigned_locations(user_id, tenant_id, now),
             )
+            evidence.location = location
+            evidence.distance_meters = distance
 
             self.security.ensure_active_schedule(tenant_id, location.schedule_id)
             windows = self.security.schedule_windows(tenant_id, location.schedule_id)
@@ -132,6 +235,7 @@ class UserSessionRefreshService:
                 windows=windows,
                 override_until_utc=override,
             )
+            evidence.schedule = schedule
 
             if (
                 risk.vpn_status == VpnStatus.DETECTED
@@ -180,32 +284,18 @@ class UserSessionRefreshService:
             if not updated:
                 raise security_error("SESSION_REVOKED")
 
-            self.security.record_evaluation(
-                {
-                    "evaluation_id": str(uuid4()),
-                    "access_session_id": access_session_id,
-                    "tenant_id": tenant_id,
-                    "principal_id": user_id,
-                    "actor_type": ActorType.USER.value,
-                    "supplied_latitude": geo.latitude,
-                    "supplied_longitude": geo.longitude,
-                    "supplied_accuracy_meters": geo.accuracy_meters,
-                    "geo_captured_at_utc": geo.captured_at,
-                    "geo_source": geo.source.value,
-                    "geo_integrity_status": geo.integrity_status.value,
-                    "geo_integrity_reason": geo.integrity_reason,
-                    "matched_location_id": location.location_id,
-                    "matched_distance_meters": distance,
-                    "evaluated_local_time": schedule.local_time.replace(tzinfo=None),
-                    "evaluated_timezone": location.timezone_iana,
-                    "schedule_id": location.schedule_id,
-                    "source_ip": source_ip,
-                    "vpn_status": risk.vpn_status.value,
-                    "decision": "ALLOW",
-                    "decision_reason_code": "ACCESS_GRANTED",
-                    "correlation_id": correlation_id,
-                    "evaluated_at_utc": now,
-                }
+            self.refresh_repo.record_evaluation(
+                self._evaluation_payload(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    geo=geo,
+                    source_ip=source_ip,
+                    correlation_id=correlation_id,
+                    decision="ALLOW",
+                    reason_code="ACCESS_GRANTED",
+                    evaluated_at=now,
+                    evidence=evidence,
+                )
             )
 
             token = self.tokens.issue(
@@ -222,6 +312,19 @@ class UserSessionRefreshService:
                 )
             )
             self.refresh_repo.commit()
+        except SecurityError as exc:
+            self.refresh_repo.rollback()
+            self._persist_denial_evidence_best_effort(
+                error=exc,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                geo=geo,
+                source_ip=source_ip,
+                correlation_id=correlation_id,
+                evaluated_at=now,
+                evidence=evidence,
+            )
+            raise
         except Exception:
             self.refresh_repo.rollback()
             raise
