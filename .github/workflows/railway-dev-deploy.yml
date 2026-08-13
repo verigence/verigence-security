@@ -8,19 +8,21 @@ on:
 permissions:
   actions: read
   contents: read
+  packages: write
 
 concurrency:
   group: railway-dev-deployment
   cancel-in-progress: false
 
 env:
+  IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
   RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
   RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
   RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
 
 jobs:
   deploy-dev:
-    name: Validate and deploy Security to Railway DEV
+    name: Build immutable image and deploy to Railway DEV
     runs-on: ubuntu-latest
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -71,15 +73,50 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Validate Dockerfile build before deployment
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      - name: Record and validate immutable image
+        id: image
         shell: bash
         run: |
           set -euo pipefail
-          image="verigence-security-dev-check:${GITHUB_SHA}"
-          docker build --pull --tag "$image" .
-          docker run --rm "$image" python --version 2>&1 | grep -E '^Python 3\.12\.'
+          image_ref="${IMAGE_REPOSITORY}@${{ steps.build.outputs.digest }}"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "Immutable image: $image_ref"
 
-      - name: Verify Railway token is available
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          if ! docker manifest inspect "$image_ref" >/dev/null 2>&1; then
+            echo "::error::Published GHCR image is not anonymously pullable by Railway."
+            exit 1
+          fi
+
+          docker pull "$image_ref" >/dev/null
+          docker run --rm "$image_ref" python --version 2>&1 | grep -E '^Python 3\.12\.'
+
+      - name: Verify Railway token and exact DEV scope
         shell: bash
         run: |
           set -euo pipefail
@@ -88,10 +125,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Railway Project Token scope
-        shell: bash
-        run: |
-          set -euo pipefail
           response="$(curl --fail-with-body --silent --show-error \
             --request POST \
             --url 'https://backboard.railway.com/graphql/v2' \
@@ -118,6 +151,30 @@ jobs:
 
           echo "Railway Project Token scope matches the configured DEV project and environment."
 
+      - name: Snapshot existing Railway deployments
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 10) { edges { node { id status createdAt } } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{projectId:$project,serviceId:$service}}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Unable to snapshot Railway deployments before deployment."
+            exit 1
+          fi
+
+          before_ids="$(printf '%s' "$response" | jq -c '[.data.deployments.edges[].node.id]')"
+          echo "ids=$before_ids" >> "$GITHUB_OUTPUT"
+
       - name: Install pinned Railway CLI
         shell: bash
         run: |
@@ -125,30 +182,122 @@ jobs:
           npm install --global @railway/cli@5.30.1
           railway --version
 
-      - name: Deploy exact validated source commit to Railway DEV
+      - name: Connect exact immutable image to Railway DEV service
         shell: bash
         run: |
           set -euo pipefail
-          railway up \
+          railway service source connect \
             --project "$RAILWAY_PROJECT_ID" \
             --environment "$RAILWAY_ENVIRONMENT_ID" \
             --service "$RAILWAY_SERVICE_ID" \
-            --message "Verigence Security DEV ${GITHUB_SHA}" \
-            --yes
+            --image "${{ steps.image.outputs.image_ref }}" \
+            --json
 
-      - name: Generate or resolve Railway DEV public domain
+      - name: Wait for the new Railway deployment to succeed
+        id: deployment
+        shell: bash
+        env:
+          BEFORE_IDS: ${{ steps.before.outputs.ids }}
+        run: |
+          set -euo pipefail
+          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 10) { edges { node { id status createdAt } } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{projectId:$project,serviceId:$service}}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          deployment_id=""
+
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Project-Access-Token: $RAILWAY_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$body")"
+
+            if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+              printf '%s\n' "$response" | jq -c '.errors'
+              echo "::error::Unable to query Railway deployment status."
+              exit 1
+            fi
+
+            if [ -z "$deployment_id" ]; then
+              deployment_id="$(printf '%s' "$response" | jq -r --argjson before "$BEFORE_IDS" '[.data.deployments.edges[].node | select((.id as $id | $before | index($id)) == null)] | sort_by(.createdAt) | reverse | first | .id // empty')"
+              if [ -z "$deployment_id" ]; then
+                echo "No new Railway deployment visible yet; waiting 5 seconds."
+                sleep 5
+                continue
+              fi
+              echo "Detected new Railway deployment: $deployment_id"
+            fi
+
+            status="$(printf '%s' "$response" | jq -r --arg id "$deployment_id" '[.data.deployments.edges[].node | select(.id == $id)] | first | .status // empty')"
+            echo "Railway deployment $deployment_id status=${status:-unknown}"
+
+            case "$status" in
+              SUCCESS)
+                echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              FAILED|CRASHED|REMOVED|SKIPPED)
+                echo "::error::Railway deployment $deployment_id ended with status $status."
+                exit 1
+                ;;
+              *)
+                sleep 5
+                ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for Railway deployment $deployment_id to reach SUCCESS."
+          exit 1
+
+      - name: Resolve or create Railway DEV public domain
         id: domain
         shell: bash
         run: |
           set -euo pipefail
-          output="$(railway domain --service "$RAILWAY_SERVICE_ID" --json)"
-          printf '%s\n' "$output"
-          domain="$(printf '%s' "$output" | jq -r '.. | strings | select(test("\\.up\\.railway\\.app$"))' | head -n 1)"
-          if [ -z "$domain" ]; then
-            echo "::error::Railway domain command did not return a Railway-provided domain."
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { id domain } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Unable to query Railway service domains."
             exit 1
           fi
+
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          if [ -z "$domain" ]; then
+            mutation='mutation serviceDomainCreate($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }'
+            mutation_variables="$(jq -cn --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{environmentId:$environment,serviceId:$service}}')"
+            mutation_body="$(jq -cn --arg query "$mutation" --argjson variables "$mutation_variables" '{query:$query,variables:$variables}')"
+            response="$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Project-Access-Token: $RAILWAY_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$mutation_body")"
+
+            if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+              printf '%s\n' "$response" | jq -c '.errors'
+              echo "::error::Unable to create Railway-provided domain."
+              exit 1
+            fi
+            domain="$(printf '%s' "$response" | jq -r '.data.serviceDomainCreate.domain // empty')"
+          fi
+
+          if [ -z "$domain" ]; then
+            echo "::error::Railway did not provide a public service domain."
+            exit 1
+          fi
+
           echo "base_url=https://$domain" >> "$GITHUB_OUTPUT"
+          echo "Railway DEV base URL: https://$domain"
 
       - name: Verify deployed readiness
         shell: bash
@@ -164,8 +313,7 @@ jobs:
             echo "Readiness attempt $attempt/30 returned HTTP ${code:-000}; waiting 5 seconds."
             sleep 5
           done
-          echo "::error::Railway DEV readiness check failed after deployment."
-          railway logs --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --latest --lines 100 || true
+          echo "::error::Railway DEV readiness check failed after successful deployment."
           exit 1
 
       - name: Verify liveness and correlation ID over deployed HTTPS
@@ -190,7 +338,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Source commit: $GITHUB_SHA"
-          echo "Deployment method: railway up from exact validated source commit"
+          echo "Immutable image: ${{ steps.image.outputs.image_ref }}"
+          echo "Railway deployment: ${{ steps.deployment.outputs.id }}"
           echo "Railway project: $RAILWAY_PROJECT_ID"
           echo "Railway environment: $RAILWAY_ENVIRONMENT_ID"
           echo "Railway service: $RAILWAY_SERVICE_ID"
