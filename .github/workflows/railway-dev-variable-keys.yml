@@ -1,0 +1,40 @@
+name: Railway DEV Variable-Key Diagnostic
+
+on:
+  push:
+    branches:
+      - feature/railway-bootstrap-dev-service-instance
+
+permissions:
+  contents: read
+
+env:
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+
+jobs:
+  variables:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: List configured DEV variable names only
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query GetEnvironmentConfig($id: String!, $decryptVariables: Boolean) { environment(id: $id) { id name config(decryptVariables: $decryptVariables) } }'
+          variables="$(jq -cn --arg id "$RAILWAY_ENVIRONMENT_ID" '{id:$id,decryptVariables:false}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+
+          printf '%s\n' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '{serviceVariableNames: ((.data.environment.config.services[$service].variables // {}) | keys), sharedVariableNames: ((.data.environment.config.sharedVariables // {}) | keys)}'
