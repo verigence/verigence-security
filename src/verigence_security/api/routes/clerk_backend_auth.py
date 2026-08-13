@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
@@ -34,9 +35,9 @@ class GroupAwareSecurityRepository(SecurityRepository):
         self,
         tenant_id: str,
         user_id: str,
-        now: object,
+        now: datetime,
     ) -> tuple[list[str], list[str]]:
-        return effective_user_permissions(self.s, tenant_id, user_id, now)  # type: ignore[arg-type]
+        return effective_user_permissions(self.s, tenant_id, user_id, now)
 
 
 @router.post("/platform/bootstrap/claim", response_model=PlatformTokenResponse)
