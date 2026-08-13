@@ -27,6 +27,7 @@ from verigence_security.services.access_service import UserAccessService
 from verigence_security.services.geo import GeoSample
 from verigence_security.services.onboarding import OnboardingService
 from verigence_security.services.permissions import effective_user_permissions
+from verigence_security.services.platform_self_onboarding import PlatformSelfOnboardingService
 from verigence_security.services.tenant_rbac_gate import TenantRbacGateService
 from verigence_security.services.token_service import TokenService
 
@@ -103,6 +104,10 @@ class SelfOnboardingApprovalRequest(BaseModel):
     roleIds: list[str] = Field(default_factory=list)
     groupIds: list[str] = Field(default_factory=list)
     locationAssignments: list[LocationAssignmentRequest] = Field(default_factory=list)
+
+
+class SelfOnboardingValueRequest(BaseModel):
+    token: str = Field(min_length=1)
 
 
 class RejectionRequest(BaseModel):
@@ -207,6 +212,50 @@ def create_owner_invitation(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {**invitation, "acceptanceToken": acceptance_value}
+
+
+@router.put(
+    "/platform/tenants/{tenantId}/self-onboarding-token",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Platform Administration"],
+)
+def rotate_self_onboarding_value(
+    tenantId: str,
+    body: SelfOnboardingValueRequest,
+    request: Request,
+    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.update")),
+    session: Session = Depends(platform_session),
+) -> Response:
+    changed = PlatformSelfOnboardingService(session).rotate(
+        tenant_id=tenantId,
+        actor_user_id=str(claims["sub"]),
+        supplied_value=body.token,
+        correlation_id=request.state.correlation_id,
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/platform/tenants/{tenantId}/self-onboarding-token",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Platform Administration"],
+)
+def disable_self_onboarding_value(
+    tenantId: str,
+    request: Request,
+    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.update")),
+    session: Session = Depends(platform_session),
+) -> Response:
+    changed = PlatformSelfOnboardingService(session).disable(
+        tenant_id=tenantId,
+        actor_user_id=str(claims["sub"]),
+        correlation_id=request.state.correlation_id,
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="Tenant or self-onboarding value not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
