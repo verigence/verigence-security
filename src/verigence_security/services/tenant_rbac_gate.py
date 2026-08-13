@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import NoReturn
 
 from sqlalchemy import text
 
@@ -9,7 +10,7 @@ from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.tenant_rbac_admin import TenantRbacAdminService
 
 
-def _deny(code: str) -> None:
+def _deny(code: str) -> NoReturn:
     status_code, title = ERRORS[code]
     raise SecurityError(code=code, status_code=status_code, title=title)
 
