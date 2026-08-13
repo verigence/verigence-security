@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/device-*
+      - feature/session-*
   workflow_dispatch:
 
 permissions:
