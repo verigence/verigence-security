@@ -1,12 +1,12 @@
 # Phase 5 — Security Administration Foundation
 
-**Status:** PARTIAL — Increments 1–4 validated on Neon DEV  
+**Status:** PARTIAL — Increments 1–5 validated on Neon DEV  
 **Approved baseline:** Security Solution v1.3  
-**Latest Neon validation run:** `31680743813`
+**Latest Neon validation run:** `31681385872`
 
 ## Objective
 
-Build Security administration from the approved persistence model without inventing public API shapes or endpoint-level `security.*` permission keys that are not frozen by the approved design.
+Build Security administration from the approved persistence model without inventing public API shapes, endpoint-level `security.*` permission keys, or activation prerequisites that are not frozen by approved design.
 
 ## Increment 1 — Tenant Security Policy and Retention Policy administration
 
@@ -34,30 +34,53 @@ Neon `31680129517`: **7/7 PASS**.
 
 Implemented the Security-side portion of employee onboarding:
 
-- `security.security_principals` USER persistence;
+- USER `security_principals` persistence;
 - `security.users` persistence;
-- `security.external_identities` provider-subject mapping;
-- USER updates without silently retyping existing SYSTEM/SERVICE_INTEGRATION principals;
-- protection against rebinding an existing external provider subject to another USER.
+- `external_identities` provider-subject mapping;
+- protection against retyping existing machine principals;
+- protection against rebinding an external provider subject to a second USER.
 
-`UserAdministrationService` intentionally does **not** call Clerk invitation/onboarding APIs. Provider orchestration remains the later Clerk integration phase; Phase 5 owns only the Security authorization-side records.
+Live Clerk invitation/API orchestration remains the later Clerk integration phase. The runtime acceptance test proves an administered `CLERK` subject resolves through the existing `SecurityRepository.resolve_identity_user()` path.
 
-The real-Neon runtime acceptance test links a unique `CLERK` subject and proves `SecurityRepository.resolve_identity_user()` immediately resolves the administered USER. A conflicting attempt to bind the same subject to another USER is rejected, and a pre-existing SYSTEM principal cannot be converted into a USER through this service.
+Final-head Neon `31681097935`: **10/10 PASS**.  
+PR #34 Security CI `31681103229`: **PASS**.  
+Promoted commit: `44abea318c3fab5b4ac54c66887e2be1b28cad9c`.  
+Post-merge Security CI `31681204042`: **PASS**.  
+Railway `31681204041`: **PASS** through exact-image deployment, readiness, liveness and correlation.
 
-Neon `31680743813`: **10/10 Phase 5 tests PASS**.
+## Increment 5 — SEC-032 activation-readiness foundation
+
+Implemented `TenantActivationReadinessService` as a fail-closed internal evaluator.
+
+The active approved sources currently support these readiness facts:
+
+1. Tenant Security thresholds are mandatory Tenant configuration rather than code defaults; the evaluator therefore reports whether an ACTIVE Tenant Security Policy exists.
+2. SEC-037 explicitly requires an ACTIVE Security retention policy before Tenant activation.
+
+The evaluator returns each known prerequisite as PASS/FAIL and also returns:
+
+- `known_prerequisites_pass`;
+- `prerequisite_catalogue_complete=false`;
+- `activation_allowed=false`.
+
+Even when both known prerequisites pass, the evaluator does **not** mutate the Tenant to ACTIVE because the complete SEC-032 prerequisite catalogue is not present in the active approved sources. This preserves fail-closed activation semantics without pretending the design is complete.
+
+Neon `31681385872`: **11/11 Phase 5 tests PASS**. The test verifies the Tenant remains `CONFIGURING` after all currently-known prerequisites pass.
 
 ## Deliberately not implemented yet
 
 - public administration routes;
 - endpoint-level administrator permission checks;
 - live Clerk invitation/API orchestration;
-- complete Tenant activation-readiness prerequisite catalogue;
+- complete SEC-032 prerequisite catalogue;
 - Tenant activation mutation;
 - implicit removal/replacement semantics for assignments or schedule windows;
 - automatic `authorization_version` bump rules not explicitly frozen by approved design.
 
-The exact public admin permission catalogue and authoritative public OpenAPI remain source-gated. Phase 5 therefore continues through deterministic internal services first.
+The exact public admin permission catalogue and authoritative public OpenAPI remain source-gated.
 
-## Next safe increment
+## Current boundary
 
-Implement the SEC-032 activation-readiness foundation as a fail-closed internal evaluator. It may report explicitly frozen prerequisites such as ACTIVE retention policy and mandatory Security configuration, but it must not claim the activation checklist is complete or transition the Tenant to ACTIVE until the full prerequisite catalogue is explicitly approved.
+Phase 5 now has deterministic internal administration for Tenant policies, retention, locations, schedules, USER onboarding, membership, employee-location assignment and RBAC, plus a fail-closed SEC-032 readiness foundation.
+
+The next step that can change a Tenant to `ACTIVE`, or expose these operations as public administrator APIs, must wait for the missing approved contract details rather than inventing them.
