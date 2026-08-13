@@ -1,114 +1,119 @@
 # Phase 4 — USER Device and Session Lifecycle
 
-**Status:** PARTIAL — increments 1–3 validated  
-**Approved baseline:** Security Solution v1.3  
-**Latest Neon validation run:** `31672322586`
+**Status:** PARTIAL — increments 1–4 validated internally  
+**Approved baseline:** Security Solution v1.3 + recorded Phase 4 clarifications  
+**Latest Neon validation run:** `31673792244`
 
 ## Objective
 
-Complete the approved USER device and access-session lifecycle without weakening the v1.3 access gates or inventing API, permission, error, persistence or event contracts that are not frozen by the approved design.
+Complete the approved USER device and access-session lifecycle without weakening the v1.3 access gates or inventing API, permission, error, persistence or event contracts that are not frozen by the approved design or explicitly recorded clarification.
 
 ## Approved lifecycle anchors
 
-Phase 4 implementation is grounded in the existing v1.3 decisions and schema:
+Phase 4 implementation is grounded in the existing v1.3 decisions/schema and `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`:
 
 - USER access requires an ACTIVE registered device.
 - Unknown devices enter a PENDING enrollment/approval path before normal access.
 - the canonical device identifier is the Verigence device UUID; MAC address is optional metadata rather than identity.
 - the Tenant Security Policy controls `max_active_devices_per_user`.
 - USER access-session refresh requires a new geo sample; missing geo returns normative `GEO_REQUIRED`.
+- refresh geo must resolve to a currently ACTIVE/effective assigned Tenant location.
+- if refresh geo resolves to a different approved/assigned location, the same ACTIVE session may move to that location only after full policy re-evaluation.
+- if refresh geo is outside all approved/assigned locations, refresh is denied using existing location errors.
 - at most one ACTIVE USER access session may exist for the same Tenant, user and device.
-- equivalent concurrent session creation is serialized on the registered-device row.
-- revoking an access session immediately blocks refresh/new issuance for that session context, while an already-issued Phase-1 JWT remains cryptographically valid until its existing `exp`.
+- revoking an access session blocks refresh/new issuance while an already-issued Phase-1 JWT remains valid until its existing `exp`.
 - Tenant `OFFBOARDING` prevents new USER session creation/refresh and revokes ACTIVE sessions.
 - persistent cross-replica `Idempotency-Key` replay remains blocked until an approved persistence model exists.
 
 ## Increment 1 — persistence primitives
 
-`src/verigence_security/repositories/device_session_repository.py` adds PostgreSQL primitives for:
-
-- creating a registered device in `PENDING` state together with a `PENDING` device-enrollment request;
-- locking the Tenant membership row to serialize active-device-limit decisions for the same Tenant/user;
-- counting only `ACTIVE` registered devices;
-- locking a PENDING device row for approval work;
-- atomically transitioning the matching PENDING device and PENDING enrollment request to `ACTIVE` / `APPROVED` inside the caller transaction;
-- locking a USER access-session row by access-session/Tenant/user scope;
-- transitioning an ACTIVE USER access session to `REVOKED` without changing the lifetime of an already-issued JWT.
+`src/verigence_security/repositories/device_session_repository.py` adds PostgreSQL primitives for PENDING enrollment persistence, device approval transitions, active-device counting/serialization and scoped USER session locking/revocation.
 
 Validation run `31670840296`: **SUCCESS — 6/6 PostgreSQL tests passed**.
 
 ## Increment 2 — active-device-limit enforcement
 
-`src/verigence_security/services/device_lifecycle.py` adds `DeviceApprovalService`, which:
-
-1. acquires the Tenant/user membership row lock;
-2. requires the membership to be ACTIVE using existing normative membership errors;
-3. loads the ACTIVE Tenant Security Policy;
-4. locks the target PENDING device;
-5. counts ACTIVE devices only after acquiring the serialization lock;
-6. raises normative `DEVICE_LIMIT_REACHED` when the configured limit is exhausted;
-7. otherwise atomically activates the PENDING device and approves the matching enrollment request.
-
-This prevents two simultaneous approvals for the same Tenant/user from both observing spare capacity and exceeding the configured device limit.
+`src/verigence_security/services/device_lifecycle.py` enforces the ACTIVE Tenant Security Policy's `max_active_devices_per_user` after a Tenant/user serialization lock. Concurrent approvals cannot both consume the same remaining capacity.
 
 Validation run `31671542390`: **SUCCESS — 7/7 PostgreSQL tests passed**.
 
-The concurrency test created two simultaneous approval attempts against a Tenant policy of one active device. Exactly one approval succeeded; the other returned `DEVICE_LIMIT_REACHED`, and PostgreSQL ended with one ACTIVE and one PENDING device.
-
 ## Increment 3 — deterministic USER refresh/revoke boundaries
 
-`src/verigence_security/services/session_lifecycle.py` introduces only the session lifecycle behavior that v1.3 freezes unambiguously:
-
-- `require_refresh_geo(...)` rejects a missing refresh geo sample with normative `GEO_REQUIRED`;
-- `revoke(...)` locks the USER session by access-session/Tenant/user scope and persists `ACTIVE → REVOKED` transactionally;
-- a non-ACTIVE or absent scoped session is not mutated by the revoke service;
-- revocation does not attempt to invalidate an already-issued JWT before its existing `exp`, matching SEC-033.
-
-`tests/unit/test_session_lifecycle.py` verifies the mandatory refresh-geo guard and transactional revoke service behavior.
-
-`tests/integration/test_phase4_session_lifecycle.py` verifies the service-level ACTIVE→REVOKED transition against real Neon PostgreSQL and confirms a repeated revoke does not perform a second transition.
+`src/verigence_security/services/session_lifecycle.py` enforces mandatory refresh geo (`GEO_REQUIRED`) and transactional scoped USER session `ACTIVE → REVOKED` behavior. Revocation does not attempt to invalidate an already-issued JWT before its existing `exp`.
 
 Validation run `31672322586`: **SUCCESS — 8/8 Phase 4 PostgreSQL integration tests passed**.
 
-### Important non-claim for refresh
+## Increment 4 — USER refresh policy re-evaluation and approved location-context move
 
-Increment 3 does **not** claim the full USER refresh algorithm is complete. In particular, committed v1.3 sources available in this repository do not deterministically state the refresh transition when a fresh valid geo sample resolves to a different assigned location than the location stored on the ACTIVE session. That behavior is not guessed here.
+The previously open refresh-location transition is resolved by `CLAR-004-001` in `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`.
 
-The full refresh policy re-evaluation, expiry recalculation, evidence persistence and token response must remain aligned to the exact approved contract before being declared complete.
+`src/verigence_security/services/session_refresh_service.py` now performs the internal USER refresh lifecycle:
+
+1. requires fresh geo;
+2. evaluates network risk before entering the database row-lock window;
+3. requires an ACTIVE Tenant and effective USER membership;
+4. locks the scoped ACTIVE USER access session;
+5. rejects a revoked/non-ACTIVE session and an already-expired session;
+6. requires the session's device to remain ACTIVE;
+7. validates geo freshness, accuracy and integrity;
+8. matches geo only against currently ACTIVE/effective assigned Tenant locations;
+9. evaluates the matched location's ACTIVE schedule, time window and override;
+10. re-evaluates Tenant network policy and effective RBAC;
+11. recalculates expiry as the minimum of access-token TTL, geo revalidation interval, the original session maximum-duration end and the newly matched schedule authorization end;
+12. updates the same ACTIVE session's location/source-IP/network/authz/geo timestamps;
+13. records successful access-context evidence;
+14. issues a refreshed Security JWT whose `location_id` is the location that passed the current refresh evaluation;
+15. commits only after token signing succeeds.
+
+Behavior now covered explicitly:
+
+- same approved location → refresh the existing session in place;
+- different approved/assigned location → move the same session to that approved location after full re-evaluation;
+- geo outside all approved/assigned locations → deny; no session context update, evidence write or token issuance;
+- the original session maximum-duration cap is preserved and cannot be extended by refreshing from another approved location.
+
+`src/verigence_security/repositories/session_refresh_repository.py` provides the scoped `FOR UPDATE` session lock and ACTIVE-session context update.
+
+Unit tests cover same-location refresh, approved different-location movement and unapproved-location denial.
+
+Real Neon PostgreSQL validation initially exposed only a test-representation mismatch (`inet` rendered a host as `/32`); production logic was unchanged. The corrected test uses PostgreSQL `host(inet)` and the complete Phase 4 suite passed.
+
+Validation run `31673792244`: **SUCCESS — 9/9 Phase 4 PostgreSQL integration tests passed**.
 
 ## Validated behavior to date
 
 1. PENDING enrollment persistence creates only PENDING device/enrollment state.
 2. active-device counting ignores PENDING/BLOCKED/REVOKED devices.
-3. membership-row `FOR UPDATE` serializes device-limit decisions.
-4. PENDING device approval updates device and enrollment request together.
-5. concurrent approvals cannot exceed `max_active_devices_per_user`.
-6. USER session revocation is scoped by access-session/Tenant/user and transactional.
-7. repeated revoke does not mutate an already non-ACTIVE session.
-8. PostgreSQL enforces one ACTIVE USER session for the same Tenant/user/device.
-9. missing USER refresh geo is rejected with normative `GEO_REQUIRED` at the service boundary.
+3. concurrent device approvals cannot exceed `max_active_devices_per_user`.
+4. PENDING device approval updates the device and enrollment request together.
+5. USER session revocation is scoped and transactional.
+6. PostgreSQL enforces one ACTIVE USER session for the same Tenant/user/device.
+7. missing USER refresh geo is rejected with normative `GEO_REQUIRED`.
+8. refresh to the same approved location is supported.
+9. refresh to another approved/assigned location moves the same ACTIVE session only after full policy re-evaluation.
+10. refresh geo outside every approved/assigned location is rejected without mutating the session context.
+11. refreshed token/evidence/session context use the newly approved matched location.
+12. refresh retains the original session maximum-duration cap.
 
 The PostgreSQL tests use the real Neon DEV database and clean temporary fixtures after execution.
 
 ## Intentionally not yet implemented
 
 - public device-enrollment request/response models and route wiring;
-- device administration approval/block/revoke API wiring;
-- complete USER access-session refresh policy re-evaluation and token issuance;
-- the unresolved refresh-context transition when fresh geo maps to a different assigned location;
+- public/admin device approval/block/revoke route wiring;
 - USER access-session refresh/revoke public route wiring;
 - denial-event persistence for lifecycle denials;
-- deployed Railway Phase 4 lifecycle E2E;
+- deployed Railway Phase 4 lifecycle E2E through the missing public contracts;
 - persistent cross-replica idempotency replay.
 
 ## Current grounding constraint
 
-The repository contains the approved v1.3 decision, lifecycle and database artifacts, but authoritative `SECURITY_OPENAPI_v1.3.yaml` is referenced by checksum rather than stored in the repository. The exact endpoint request/response/security shapes must be recovered from the checksum-matching approved artifact before adding public lifecycle routes beyond endpoint details already explicitly frozen in committed decisions.
+The checksum-referenced authoritative `SECURITY_OPENAPI_v1.3.yaml` was never committed to this repository; repository history shows no delete/change commit for it. Its exact endpoint request/response/security shapes remain unavailable in the active sources.
 
-This is a source-availability constraint, not permission to infer or redesign the API.
+Therefore the internal lifecycle can continue from approved decisions/clarifications, but public lifecycle route shapes must not be invented until the checksum-matching OpenAPI is recovered or a replacement contract is explicitly approved and versioned.
 
 ## Next safe increment
 
-Continue only with USER refresh behavior that can be deterministically derived from approved v1.3 sources and existing policy components. Record any unresolved refresh transition before implementation rather than choosing a behavior by convenience.
+Promote Increment 4 through standard Security CI and Railway DEV. After promotion, continue deterministic lifecycle work that does not require missing public request/response shapes, especially denial/security-event persistence where the existing schema and catalogue make the behavior deterministic.
 
-Public route wiring remains gated on recovery of the authoritative OpenAPI artifact.
+Public route wiring remains gated on the authoritative OpenAPI artifact.
