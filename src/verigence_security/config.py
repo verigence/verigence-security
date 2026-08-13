@@ -78,11 +78,17 @@ class Settings(BaseSettings):
             if self.app_env not in allowed_bootstrap_envs:
                 raise ValueError("Platform bootstrap is prohibited in UAT/production")
             if not self.platform_bootstrap_login.strip():
-                raise ValueError("Platform bootstrap login is required when bootstrap is enabled")
+                raise ValueError(
+                    "Platform bootstrap login is required when bootstrap is enabled"
+                )
             if not self.platform_bootstrap_password:
-                raise ValueError("Platform bootstrap password is required when bootstrap is enabled")
+                raise ValueError(
+                    "Platform bootstrap password is required when bootstrap is enabled"
+                )
             if self.platform_admin_token_ttl_minutes is None:
-                raise ValueError("Platform Admin token TTL is required when bootstrap is enabled")
+                raise ValueError(
+                    "Platform Admin token TTL is required when bootstrap is enabled"
+                )
         return self
 
     @property
