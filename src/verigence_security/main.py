@@ -6,7 +6,14 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 
 from verigence_security.api.dependencies import correlation_header_parameter
-from verigence_security.api.routes import access, dev_mock, health, jwks, platform_admin
+from verigence_security.api.routes import (
+    access,
+    dev_mock,
+    health,
+    jwks,
+    platform_admin,
+    platform_modules,
+)
 from verigence_security.config import get_settings
 from verigence_security.core.correlation import CorrelationIdMiddleware
 from verigence_security.core.errors import SecurityError
@@ -42,5 +49,6 @@ app.include_router(health.router)
 app.include_router(jwks.router)
 app.include_router(access.router)
 app.include_router(platform_admin.router)
+app.include_router(platform_modules.router)
 if settings.dev_mock_auth_enabled:
     app.include_router(dev_mock.router)
