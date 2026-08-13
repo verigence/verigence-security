@@ -31,13 +31,29 @@ A detailed code-to-design review is in `docs/DESIGN_TRACEABILITY_REVIEW_v0.1.md`
 - Normative v1.3 error catalogue aligned exactly (42 codes/statuses).
 - Unit/API tests for correlation, unexpected 500 traceability, geo/spoof stance, schedule windows, canonical permissions, environment safety, access-service transaction ordering/session conflict/session-max behavior and JWT key/claim behavior.
 
-## Not yet implemented in v0.1
+## Post-review validated milestones
+
+The following milestones were completed after the v0.1 review baseline without changing the approved Security v1.3 normative artifacts:
+
+- **Phase 1 CI quality gate — DONE:** design/static integrity, compile, Ruff, strict Mypy, Pytest, package build and dependency consistency are enforced through GitHub Actions.
+- **Phase 2 Neon DEV integration — DONE:** the approved v1.3 `security` schema is deployed in Neon DEV and validated as 27 tables, 7 explicit indexes, 56 foreign keys and 57 CHECK constraints.
+- **Real PostgreSQL repository validation — DONE:** 4/4 Neon integration tests pass, including actual `SELECT ... FOR UPDATE` serialization and representative CHECK/FK enforcement.
+- **Phase 3 Railway DEV deployment — DONE:** the exact immutable GHCR image is deployed to the Railway DEV service instance using the environment-specific image source.
+- **Railway runtime configuration — DONE for DEV:** Neon runtime DB connection, Security signing material, DEV mock identity configuration, DEV mock network-risk mode and trusted ingress-header setting are configured without committing secret values.
+- **Deployed HTTPS smoke tests — DONE:** `/health/ready`, `/health/live` and `X-Correlation-ID` propagation pass against the public Railway DEV endpoint.
+- **Deployed DEV USER E2E — DONE:** DEV mock identity → Railway Security API → Neon Tenant/device/location/schedule/RBAC evaluation → Security access-session/JWT issuance passes, with temporary fixture cleanup verified.
+
+Evidence is recorded in `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`, `docs/PHASE_2_NEON_INTEGRATION.md` and `docs/PHASE_3_RAILWAY_DEV_VALIDATION.md`.
+
+## Not yet implemented
 
 The following v1.3 contracts remain for subsequent milestones and are intentionally not guessed or partially represented as complete:
 
 - persistent idempotency storage/replay across stateless replicas;
-- device enrollment/approval APIs;
-- USER refresh/revoke endpoints;
+- device enrollment/approval/block/revoke APIs;
+- USER session refresh/revoke endpoints;
+- active-device-limit enforcement under concurrency;
+- complete denial-event persistence for device/session lifecycle flows;
 - machine-principal credentials and machine access-token endpoint;
 - SYSTEM/SERVICE_INTEGRATION administrator endpoints;
 - Tenant activation-readiness endpoint and activation application service;
@@ -48,7 +64,6 @@ The following v1.3 contracts remain for subsequent milestones and are intentiona
 - endpoint-level administration permission catalogue where exact permission keys must be frozen;
 - overlapping JWKS old/new key rotation and verifier-cache transition support;
 - production network-risk provider adapter (provider not selected in v1.3 design);
-- integration test against a real Neon PostgreSQL database;
 - Clerk invitation/onboarding API calls and live Clerk integration test.
 
 These are implementation milestones, not removed scope.
@@ -61,11 +76,18 @@ These are implementation milestones, not removed scope.
 4. **Session idle-timeout semantics:** v1.3 makes `session_idle_timeout_minutes` mandatory configuration, but DI/WPM validate short-lived Security JWTs locally and Security therefore does not observe ordinary downstream request activity. v0.1 does not invent a cross-module heartbeat/introspection mechanism. The exact definition of “activity” and how idle timeout is enforced across modules must be frozen before this policy can be claimed complete.
 5. **Generic request-validation error contract:** v1.3 OpenAPI documents HTTP 400 `Problem` for bad requests, while the normative 42-code catalogue contains no generic malformed-request code. FastAPI/Pydantic therefore still emits framework HTTP 422 responses for malformed UUID/body/header validation (for example a missing `Idempotency-Key`). v0.1 does not invent a new client error code. This API-error normalization must be baselined before the runtime contract can be called fully OpenAPI-conformant.
 
-## Verification at review gate
+## Verification at review and deployed DEV gates
 
-- `pytest`: 30 passed.
+- v0.1 review `pytest`: 30 passed.
 - Python compile/AST checks: PASS.
 - v1.3 OpenAPI/schema/decision/correlation/lifecycle copies: byte-identical to the approved solution artifacts.
 - v1.3 error catalogue: 42/42 exact code and HTTP-status match.
 - Static design gates: 24/24 PASS (including secret, legacy-permission, runtime OpenAPI and request-authority checks).
-- `ruff`, `mypy`, package build and live Neon migration are CI/pre-merge gates still to be executed in an environment where those tools/services are available.
+- GitHub CI: Ruff, strict Mypy, Pytest, package build and dependency consistency PASS on promoted phases.
+- Neon DEV schema validation: PASS.
+- Real Neon repository integration tests: 4/4 PASS.
+- Railway DEV runtime deployment: PASS.
+- Railway `/health/ready`: PASS (`databaseReady=true`, `signingKeyReady=true`).
+- Railway `/health/live`: PASS.
+- Deployed `X-Correlation-ID` propagation: PASS.
+- Deployed DEV USER access-session E2E against Neon: PASS.
