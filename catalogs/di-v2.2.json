@@ -1,0 +1,104 @@
+{
+  "moduleKey": "di",
+  "moduleName": "Document Intelligence",
+  "catalogVersion": "2.2",
+  "permissions": [
+    {"key": "di.subject.create", "name": "di.subject.create"},
+    {"key": "di.subject.read", "name": "di.subject.read"},
+    {"key": "di.document.upload", "name": "di.document.upload"},
+    {"key": "di.document.read", "name": "di.document.read"},
+    {"key": "di.document.content.read", "name": "di.document.content.read"},
+    {"key": "di.document.fields.read", "name": "di.document.fields.read"},
+    {"key": "di.document.quality.read", "name": "di.document.quality.read"},
+    {"key": "di.document.delete", "name": "di.document.delete"},
+    {"key": "di.verification.read", "name": "di.verification.read"},
+    {"key": "di.verification.write", "name": "di.verification.write"},
+    {"key": "di.entity_link.read", "name": "di.entity_link.read"},
+    {"key": "di.entity_link.write", "name": "di.entity_link.write"},
+    {"key": "di.operations.read", "name": "di.operations.read"},
+    {"key": "di.unassigned_document.read", "name": "di.unassigned_document.read"},
+    {"key": "di.unassigned_document.assign", "name": "di.unassigned_document.assign"},
+    {"key": "di.requirement_profile.read", "name": "di.requirement_profile.read"},
+    {"key": "di.requirement_profile.write", "name": "di.requirement_profile.write"},
+    {"key": "di.requirement_profile.publish", "name": "di.requirement_profile.publish"},
+    {"key": "di.requirement_profile.assign", "name": "di.requirement_profile.assign"},
+    {"key": "di.extraction_config.read", "name": "di.extraction_config.read"},
+    {"key": "di.extraction_config.write", "name": "di.extraction_config.write"},
+    {"key": "di.extraction_config.publish", "name": "di.extraction_config.publish"},
+    {"key": "di.quality_config.read", "name": "di.quality_config.read"},
+    {"key": "di.quality_config.write", "name": "di.quality_config.write"},
+    {"key": "di.tenant_config.read", "name": "di.tenant_config.read"},
+    {"key": "di.tenant_config.write", "name": "di.tenant_config.write"},
+    {"key": "di.subject_matching.write", "name": "di.subject_matching.write"},
+    {"key": "di.platform.whatsapp.admin", "name": "di.platform.whatsapp.admin"}
+  ],
+  "roleTemplates": [
+    {
+      "key": "di.document_operator",
+      "name": "DOCUMENT_OPERATOR",
+      "permissions": [
+        "di.subject.create",
+        "di.subject.read",
+        "di.document.upload",
+        "di.document.read",
+        "di.document.content.read",
+        "di.document.fields.read",
+        "di.document.quality.read",
+        "di.entity_link.read",
+        "di.entity_link.write"
+      ]
+    },
+    {
+      "key": "di.document_verifier",
+      "name": "DOCUMENT_VERIFIER",
+      "permissions": [
+        "di.subject.read",
+        "di.document.read",
+        "di.document.content.read",
+        "di.document.fields.read",
+        "di.document.quality.read",
+        "di.verification.read",
+        "di.verification.write"
+      ]
+    },
+    {
+      "key": "di.operations_viewer",
+      "name": "OPERATIONS_VIEWER",
+      "permissions": [
+        "di.subject.read",
+        "di.document.read",
+        "di.verification.read",
+        "di.operations.read"
+      ]
+    },
+    {
+      "key": "di.unassigned_intake_operator",
+      "name": "UNASSIGNED_INTAKE_OPERATOR",
+      "permissions": [
+        "di.subject.read",
+        "di.document.read",
+        "di.document.content.read",
+        "di.document.fields.read",
+        "di.document.quality.read",
+        "di.unassigned_document.read",
+        "di.unassigned_document.assign"
+      ]
+    },
+    {
+      "key": "di.configuration_admin",
+      "name": "CONFIGURATION_ADMIN",
+      "permissions": [
+        "di.requirement_profile.read",
+        "di.requirement_profile.write",
+        "di.requirement_profile.publish",
+        "di.requirement_profile.assign",
+        "di.extraction_config.read",
+        "di.extraction_config.write",
+        "di.extraction_config.publish",
+        "di.quality_config.read",
+        "di.quality_config.write",
+        "di.tenant_config.read"
+      ]
+    }
+  ]
+}
