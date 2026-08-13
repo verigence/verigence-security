@@ -10,7 +10,7 @@ from verigence_security.api.dependencies import (
 )
 from verigence_security.config import Settings, get_settings
 from verigence_security.repositories.security_repository import SecurityRepository
-from verigence_security.services.tenant_rbac_admin import TenantRbacAdminService
+from verigence_security.services.tenant_rbac_gate import TenantRbacGateService
 
 router = APIRouter(prefix="/security/v1/admin/tenants/{tenantId}/groups", tags=["Tenant Groups"])
 
@@ -36,7 +36,7 @@ def _admin_user(
 ) -> str:
     identity = identity_from_token(token, settings)
     user_id = repo.resolve_identity_user(identity.provider, identity.provider_subject)
-    TenantRbacAdminService(repo.s).authorize_user(
+    TenantRbacGateService(repo.s).authorize_user(
         tenant_id=tenant_id,
         user_id=user_id,
         permission_key=permission_key,
@@ -52,7 +52,7 @@ def list_groups(
     repo: SecurityRepository = Depends(repository),
 ) -> list[dict[str, object]]:
     _admin_user(token, settings, repo, tenantId, "security.group.read")
-    return TenantRbacAdminService(repo.s).list_groups(tenantId)
+    return TenantRbacGateService(repo.s).list_groups(tenantId)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -66,7 +66,7 @@ def create_group(
 ) -> dict[str, object]:
     user_id = _admin_user(token, settings, repo, tenantId, "security.group.create")
     try:
-        return TenantRbacAdminService(repo.s).create_group(
+        return TenantRbacGateService(repo.s).create_group(
             tenant_id=tenantId,
             group_key=body.groupKey,
             group_name=body.groupName,
@@ -87,7 +87,7 @@ def get_group(
     repo: SecurityRepository = Depends(repository),
 ) -> dict[str, object]:
     _admin_user(token, settings, repo, tenantId, "security.group.read")
-    row = TenantRbacAdminService(repo.s).get_group(tenantId, groupId)
+    row = TenantRbacGateService(repo.s).get_group(tenantId, groupId)
     if row is None:
         raise HTTPException(status_code=404, detail="Group not found")
     return row
@@ -104,7 +104,7 @@ def update_group(
     repo: SecurityRepository = Depends(repository),
 ) -> dict[str, object]:
     user_id = _admin_user(token, settings, repo, tenantId, "security.group.update")
-    row = TenantRbacAdminService(repo.s).update_group(
+    row = TenantRbacGateService(repo.s).update_group(
         tenant_id=tenantId,
         group_id=groupId,
         actor_user_id=user_id,
@@ -130,7 +130,7 @@ def add_group_member(
 ) -> Response:
     actor_id = _admin_user(token, settings, repo, tenantId, "security.group.assign")
     try:
-        TenantRbacAdminService(repo.s).add_group_member(
+        TenantRbacGateService(repo.s).add_group_member(
             tenant_id=tenantId,
             group_id=groupId,
             user_id=userId,
@@ -153,7 +153,7 @@ def remove_group_member(
     repo: SecurityRepository = Depends(repository),
 ) -> Response:
     actor_id = _admin_user(token, settings, repo, tenantId, "security.group.assign")
-    TenantRbacAdminService(repo.s).remove_group_member(
+    TenantRbacGateService(repo.s).remove_group_member(
         tenant_id=tenantId,
         group_id=groupId,
         user_id=userId,
@@ -175,7 +175,7 @@ def assign_group_role(
 ) -> Response:
     actor_id = _admin_user(token, settings, repo, tenantId, "security.group.assign")
     try:
-        TenantRbacAdminService(repo.s).assign_group_role(
+        TenantRbacGateService(repo.s).assign_group_role(
             tenant_id=tenantId,
             group_id=groupId,
             role_id=roleId,
@@ -198,7 +198,7 @@ def remove_group_role(
     repo: SecurityRepository = Depends(repository),
 ) -> Response:
     actor_id = _admin_user(token, settings, repo, tenantId, "security.group.assign")
-    TenantRbacAdminService(repo.s).remove_group_role(
+    TenantRbacGateService(repo.s).remove_group_role(
         tenant_id=tenantId,
         group_id=groupId,
         role_id=roleId,
