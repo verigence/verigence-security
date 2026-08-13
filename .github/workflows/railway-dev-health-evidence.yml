@@ -1,0 +1,44 @@
+name: Railway DEV Health Evidence
+
+on:
+  push:
+    branches:
+      - feature/railway-bootstrap-dev-service-instance
+
+permissions:
+  contents: read
+
+env:
+  BASE_URL: https://verigence-security-dev.up.railway.app
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify DEV readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --dump-header /tmp/ready.headers \
+            "$BASE_URL/health/ready" > /tmp/ready.json
+          echo "Readiness response:"
+          cat /tmp/ready.json
+
+      - name: Verify DEV liveness and correlation ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          correlation_id="$(python -c 'import uuid; print(uuid.uuid4())')"
+          curl --fail-with-body --silent --show-error \
+            --dump-header /tmp/live.headers \
+            --header "X-Correlation-ID: $correlation_id" \
+            "$BASE_URL/health/live" > /tmp/live.json
+          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\r", "", $2); print $2}' /tmp/live.headers | tail -n 1)"
+          if [ "$returned" != "$correlation_id" ]; then
+            echo "::error::Correlation ID mismatch. Expected $correlation_id, received ${returned:-<missing>}."
+            exit 1
+          fi
+          echo "Liveness response:"
+          cat /tmp/live.json
+          echo "Correlation ID echoed correctly: $returned"
