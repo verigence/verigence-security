@@ -196,6 +196,91 @@ jobs:
             --image "${{ steps.image.outputs.image_ref }}" \
             --json
 
+      - name: Preflight DEV service-instance visibility and staged changes
+        shell: bash
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_API_TOKEN is not configured."
+            exit 1
+          fi
+
+          instance_query='query ServiceInstance($environmentId: String!, $serviceId: String!) { serviceInstance(environmentId: $environmentId, serviceId: $serviceId) { id } }'
+          instance_variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg service "$RAILWAY_SERVICE_ID" \
+            '{environmentId:$environment,serviceId:$service}')"
+          instance_body="$(jq -cn --arg query "$instance_query" --argjson variables "$instance_variables" '{query:$query,variables:$variables}')"
+
+          project_response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$instance_body")"
+          api_response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$instance_body")"
+
+          project_instance_id="$(printf '%s' "$project_response" | jq -r '.data.serviceInstance.id // empty')"
+          api_instance_id="$(printf '%s' "$api_response" | jq -r '.data.serviceInstance.id // empty')"
+
+          if [ -n "$project_instance_id" ]; then
+            echo "Project-token service-instance visibility: present ($project_instance_id)"
+          else
+            echo "Project-token service-instance visibility: absent"
+          fi
+          if [ -n "$api_instance_id" ]; then
+            echo "API-token service-instance visibility: present ($api_instance_id)"
+          else
+            echo "API-token service-instance visibility: absent"
+          fi
+
+          if [ -n "$project_instance_id" ]; then
+            if [ -n "$api_instance_id" ] && [ "$project_instance_id" != "$api_instance_id" ]; then
+              echo "::error::Railway credentials resolved different DEV service instances."
+              exit 1
+            fi
+            echo "DEV service instance exists; deployment may proceed."
+            exit 0
+          fi
+
+          staged_query='query EnvironmentStagedChanges($environmentId: String!) { environmentStagedChanges(environmentId: $environmentId) { id status patch } }'
+          staged_variables="$(jq -cn --arg environment "$RAILWAY_ENVIRONMENT_ID" '{environmentId:$environment}')"
+          staged_body="$(jq -cn --arg query "$staged_query" --argjson variables "$staged_variables" '{query:$query,variables:$variables}')"
+          staged_response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$staged_body")"
+
+          if [ "$(printf '%s' "$staged_response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$staged_response" | jq -c '[.errors[] | {message, path, code:(.extensions.code // null)}]'
+            echo "::error::Unable to inspect Railway DEV staged changes."
+            exit 1
+          fi
+
+          staged_count="$(printf '%s' "$staged_response" | jq -r '.data.environmentStagedChanges | length')"
+          target_change_count="$(printf '%s' "$staged_response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '[.data.environmentStagedChanges[] | select((.patch | tostring | contains($service)))] | length')"
+          staged_statuses="$(printf '%s' "$staged_response" | jq -r '[.data.environmentStagedChanges[].status] | unique | join(",")')"
+          echo "DEV staged-change count: $staged_count"
+          echo "Staged changes referencing target service: $target_change_count"
+          echo "Staged-change statuses: ${staged_statuses:-none}"
+
+          if [ -n "$api_instance_id" ]; then
+            echo "::error::DEV service instance is visible to the API token but not to the project token; deployment remains fail-closed pending credential-scope correction."
+            exit 1
+          fi
+
+          echo "::error::DEV service instance is absent. Staged-change structure was inspected without printing patch or variable values; no staged change was committed."
+          exit 1
+
       - name: Trigger Railway deployment from exact configured image
         id: trigger
         shell: bash
