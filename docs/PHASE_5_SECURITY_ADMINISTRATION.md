@@ -1,8 +1,8 @@
 # Phase 5 — Security Administration Foundation
 
-**Status:** PARTIAL — Increment 1 validated on Neon DEV  
+**Status:** PARTIAL — Increments 1–2 validated on Neon DEV  
 **Approved baseline:** Security Solution v1.3  
-**Neon validation run:** `31678680842`
+**Latest Neon validation run:** `31679363993`
 
 ## Objective
 
@@ -10,7 +10,7 @@ Build Security administration from the approved persistence model without invent
 
 ## Increment 1 — Tenant Security Policy and Retention Policy administration
 
-Implemented internal administration for the two Tenant configuration records whose persistence contracts are explicit in the approved v1.3 schema:
+Implemented internal administration for:
 
 - `security.tenant_security_policies`;
 - `security.security_retention_policies`.
@@ -23,64 +23,64 @@ The increment adds:
 - DRAFT/ACTIVE persistence exactly as permitted by the approved schema;
 - compatibility proof that an ACTIVE policy written through Phase 5 is consumed unchanged by the existing runtime `SecurityRepository.get_tenant_policy()` path.
 
-### Security Policy configuration remains explicit
+### Explicit Security configuration
 
-The administration service requires every approved threshold/value to be supplied:
+Every approved threshold/TTL is supplied by configuration. No numeric Security default is introduced.
 
-- `max_active_devices_per_user`;
-- `max_geo_accuracy_meters`;
-- `max_geo_age_seconds`;
-- `geo_revalidation_interval_seconds`;
-- `access_token_ttl_minutes`;
-- `machine_token_ttl_minutes`;
-- `session_idle_timeout_minutes`;
-- `session_max_duration_minutes`;
-- `vpn_detected_action`;
-- `vpn_unknown_action`;
-- `configuration_version`;
-- policy status.
+Retention values are also explicit, aligned with SEC-037: an ACTIVE Security retention policy is required before Tenant activation and retention day counts are Tenant configuration.
 
-No numeric Security default is introduced.
+Initial Neon run `31678680842`: **SUCCESS**.
 
-### Retention Policy configuration remains explicit
+## Increment 2 — Tenant location and schedule administration
 
-The service requires explicit values for:
+Implemented internal administration for:
 
-- `access_context_retention_days`;
-- `access_session_retention_days`;
-- `security_event_retention_days`;
-- policy status.
+- `security.tenant_locations`;
+- `security.access_schedules`;
+- `security.access_schedule_windows`.
 
-This is aligned with SEC-037: an ACTIVE Security retention policy is required before Tenant activation, and retention day counts are Tenant configuration rather than hidden defaults.
+The increment adds:
+
+- `LocationAdminRepository` for Tenant-scoped location persistence;
+- `ScheduleAdminRepository` for Tenant-scoped schedules and schedule windows;
+- `TenantAccessConfigurationService` for transactional configuration;
+- exact storage of location geo/radius/timezone/address/status values;
+- exact storage of schedule status and normal/overnight window definitions;
+- runtime compatibility proof using the existing `SecurityRepository.ensure_active_schedule()` and `SecurityRepository.schedule_windows()` path.
+
+The implementation does not invent schedule replacement/deletion semantics. It creates or updates the explicitly supplied schedule/window identifiers only.
 
 ## Neon validation
 
 Workflow: `.github/workflows/phase5-neon-admin.yml`  
-Run: `31678680842`  
-Result: **SUCCESS**.
+Latest run: `31679363993`  
+Result: **SUCCESS — 6/6 Phase 5 PostgreSQL tests passed**.
 
-Validated behavior:
+Validated behavior across Increments 1–2:
 
 1. Security Policy DRAFT persistence preserves explicit configured values.
-2. The same Tenant policy can be replaced with ACTIVE configuration without creating a duplicate Tenant policy row.
-3. The existing runtime policy reader receives the exact ACTIVE values written by the administration service.
+2. The same Tenant policy can be replaced with ACTIVE configuration without a duplicate row.
+3. Existing runtime policy evaluation receives the exact ACTIVE administration values.
 4. ACTIVE retention policy persistence preserves exact configured retention periods.
-5. Approved PostgreSQL CHECK constraints reject invalid administration values and the failed transaction does not leave a partial policy row.
+5. PostgreSQL CHECK constraints reject invalid retention configuration without partial writes.
+6. Tenant location upsert preserves Tenant scope and exact geo/radius/timezone/address configuration.
+7. Reconfiguring the same location identifier updates the row rather than creating a duplicate.
+8. ACTIVE schedules and both normal/overnight windows written by administration are consumed by the existing runtime schedule repository.
+9. Invalid location radius is rejected by the approved PostgreSQL constraint without a partial location row.
 
-## Deliberately not implemented in Increment 1
+## Deliberately not implemented yet
 
 - public administration routes;
 - endpoint-level administrator permission checks;
 - Tenant activation-readiness decision list;
 - Tenant activation mutation;
 - user/membership administration;
-- Tenant location administration;
-- schedule/window administration;
 - employee-location assignment administration;
-- role/permission/user-role administration.
+- role/permission/user-role administration;
+- schedule-window removal/replacement semantics beyond explicit identifier upsert.
 
-The exact public admin permission catalogue remains blocked. This increment therefore establishes the internal transaction/persistence foundation only.
+The exact public admin permission catalogue remains blocked. Phase 5 therefore continues through deterministic internal persistence/services first.
 
 ## Next safe increment
 
-Continue with deterministic administration persistence for Tenant memberships, locations, schedules and assignment relationships, followed by the subset of activation-readiness prerequisites that are explicitly frozen by approved design.
+Continue with Tenant membership, employee-location assignment and RBAC administration persistence, then implement only activation-readiness prerequisites that are explicitly frozen by approved design.
