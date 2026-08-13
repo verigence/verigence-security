@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     database_url: str = ""
     migration_database_url: str = ""
 
+    # Clerk backend-only human identity/credential integration.
+    clerk_secret_key: str = ""
+    clerk_backend_api_url: str = "https://api.clerk.com/v1"
+
+    # Retained for provider-token compatibility/testing; Mobile/Web do not use Clerk directly in v1.4.2.
     clerk_issuer: str = ""
     clerk_jwt_key: str = ""
     clerk_authorized_parties: str = ""
@@ -28,10 +33,14 @@ class Settings(BaseSettings):
     security_private_key_pem: str = ""
     security_public_key_pem: str = ""
 
+    # v1.4.2 Clerk-backed first Platform Super Admin bootstrap.
     platform_bootstrap_enabled: bool = False
+    security_bootstrap_super_admin_clerk_user_id: str = ""
+    platform_admin_token_ttl_minutes: int | None = Field(default=None, gt=0)
+
+    # Deprecated local Platform credential configuration retained only for transition/migration compatibility.
     platform_bootstrap_login: str = ""
     platform_bootstrap_password: str = ""
-    platform_admin_token_ttl_minutes: int | None = Field(default=None, gt=0)
 
     dev_mock_auth_enabled: bool = False
     dev_mock_signing_secret: str = ""
@@ -60,8 +69,8 @@ class Settings(BaseSettings):
             raise ValueError("DEV mock authentication is prohibited in UAT/production")
         if self.app_env in protected and self.network_risk_mode.lower() == "mock":
             raise ValueError("Mock network-risk adapter is prohibited in UAT/production")
-        if self.app_env in protected and (not self.clerk_issuer or not self.clerk_jwt_key):
-            raise ValueError("Clerk issuer and public key are required in UAT/production")
+        if self.app_env in protected and not self.clerk_secret_key:
+            raise ValueError("Clerk Backend API secret key is required in UAT/production")
         if self.app_env == AppEnvironment.PRODUCTION and not self.database_url:
             raise ValueError("DATABASE_URL is required in production")
         if self.dev_mock_auth_enabled:
@@ -70,20 +79,11 @@ class Settings(BaseSettings):
             if self.dev_mock_token_ttl_minutes is None:
                 raise ValueError("DEV mock token TTL is required when mock auth is enabled")
         if self.platform_bootstrap_enabled:
-            allowed_bootstrap_envs = {
-                AppEnvironment.LOCAL,
-                AppEnvironment.CI,
-                AppEnvironment.DEV,
-            }
-            if self.app_env not in allowed_bootstrap_envs:
-                raise ValueError("Platform bootstrap is prohibited in UAT/production")
-            if not self.platform_bootstrap_login.strip():
+            if not self.clerk_secret_key:
+                raise ValueError("Clerk Backend API secret key is required for Platform bootstrap")
+            if not self.security_bootstrap_super_admin_clerk_user_id.strip():
                 raise ValueError(
-                    "Platform bootstrap login is required when bootstrap is enabled"
-                )
-            if not self.platform_bootstrap_password:
-                raise ValueError(
-                    "Platform bootstrap password is required when bootstrap is enabled"
+                    "Bootstrap Clerk user ID is required when Platform bootstrap is enabled"
                 )
             if self.platform_admin_token_ttl_minutes is None:
                 raise ValueError(
