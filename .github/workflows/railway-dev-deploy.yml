@@ -151,30 +151,6 @@ jobs:
 
           echo "Railway Project Token scope matches the configured DEV project and environment."
 
-      - name: Snapshot existing Railway deployments
-        id: before
-        shell: bash
-        run: |
-          set -euo pipefail
-          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 10) { edges { node { id status createdAt } } } }'
-          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{projectId:$project,serviceId:$service}}')"
-          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
-          response="$(curl --fail-with-body --silent --show-error \
-            --request POST \
-            --url 'https://backboard.railway.com/graphql/v2' \
-            --header "Project-Access-Token: $RAILWAY_TOKEN" \
-            --header 'Content-Type: application/json' \
-            --data "$body")"
-
-          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
-            printf '%s\n' "$response" | jq -c '.errors'
-            echo "::error::Unable to snapshot Railway deployments before deployment."
-            exit 1
-          fi
-
-          before_ids="$(printf '%s' "$response" | jq -c '[.data.deployments.edges[].node.id]')"
-          echo "ids=$before_ids" >> "$GITHUB_OUTPUT"
-
       - name: Install pinned Railway CLI
         shell: bash
         run: |
@@ -221,28 +197,48 @@ jobs:
             --json
 
       - name: Trigger Railway deployment from exact configured image
+        id: trigger
         shell: bash
         run: |
           set -euo pipefail
-          railway service redeploy \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT_ID" \
-            --service "$RAILWAY_SERVICE_ID" \
-            --from-source \
-            --yes \
-            --json
+          mutation='mutation ServiceInstanceDeploy($environmentId: String!, $serviceId: String!) { serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId) }'
+          variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg service "$RAILWAY_SERVICE_ID" \
+            '{environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
 
-      - name: Wait for the new Railway deployment to succeed
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Railway rejected the explicit DEV deployment request."
+            exit 1
+          fi
+
+          deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeployV2 // empty')"
+          if [ -z "$deployment_id" ]; then
+            echo "::error::Railway did not return a deployment ID."
+            exit 1
+          fi
+
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "Triggered Railway deployment: $deployment_id"
+
+      - name: Wait for the exact Railway deployment to succeed
         id: deployment
         shell: bash
         env:
-          BEFORE_IDS: ${{ steps.before.outputs.ids }}
+          DEPLOYMENT_ID: ${{ steps.trigger.outputs.id }}
         run: |
           set -euo pipefail
-          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 10) { edges { node { id status createdAt } } } }'
+          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 20) { edges { node { id status createdAt } } } }'
           variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{projectId:$project,serviceId:$service}}')"
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
-          deployment_id=""
 
           for attempt in $(seq 1 120); do
             response="$(curl --fail-with-body --silent --show-error \
@@ -258,26 +254,21 @@ jobs:
               exit 1
             fi
 
-            if [ -z "$deployment_id" ]; then
-              deployment_id="$(printf '%s' "$response" | jq -r --argjson before "$BEFORE_IDS" '[.data.deployments.edges[].node | select((.id as $id | $before | index($id)) == null)] | sort_by(.createdAt) | reverse | first | .id // empty')"
-              if [ -z "$deployment_id" ]; then
-                echo "No new Railway deployment visible yet; waiting 5 seconds."
-                sleep 5
-                continue
-              fi
-              echo "Detected new Railway deployment: $deployment_id"
+            status="$(printf '%s' "$response" | jq -r --arg id "$DEPLOYMENT_ID" '[.data.deployments.edges[].node | select(.id == $id)] | first | .status // empty')"
+            if [ -z "$status" ]; then
+              echo "Railway deployment $DEPLOYMENT_ID is not visible yet; waiting 5 seconds."
+              sleep 5
+              continue
             fi
 
-            status="$(printf '%s' "$response" | jq -r --arg id "$deployment_id" '[.data.deployments.edges[].node | select(.id == $id)] | first | .status // empty')"
-            echo "Railway deployment $deployment_id status=${status:-unknown}"
-
+            echo "Railway deployment $DEPLOYMENT_ID status=$status"
             case "$status" in
               SUCCESS)
-                echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+                echo "id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
               FAILED|CRASHED|REMOVED|SKIPPED)
-                echo "::error::Railway deployment $deployment_id ended with status $status."
+                echo "::error::Railway deployment $DEPLOYMENT_ID ended with status $status."
                 exit 1
                 ;;
               *)
@@ -286,7 +277,7 @@ jobs:
             esac
           done
 
-          echo "::error::Timed out waiting for Railway deployment $deployment_id to reach SUCCESS."
+          echo "::error::Timed out waiting for Railway deployment $DEPLOYMENT_ID to reach SUCCESS."
           exit 1
 
       - name: Resolve or create Railway DEV public domain
