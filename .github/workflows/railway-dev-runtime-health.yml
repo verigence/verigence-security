@@ -1,0 +1,50 @@
+name: Railway DEV Runtime Health
+
+on:
+  push:
+    branches:
+      - feature/railway-dev-runtime-config
+
+permissions:
+  contents: read
+
+env:
+  BASE_URL: https://verigence-security-dev.up.railway.app
+
+jobs:
+  health:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Wait for DEV readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$BASE_URL/health/ready" || true)"
+            if [ "$code" = "200" ]; then
+              echo "Readiness response:"
+              cat /tmp/ready.json
+              exit 0
+            fi
+            echo "Readiness attempt $attempt/60 returned HTTP ${code:-000}; response=$(cat /tmp/ready.json 2>/dev/null || true)"
+            sleep 5
+          done
+          echo "::error::DEV readiness did not reach HTTP 200."
+          exit 1
+
+      - name: Verify DEV liveness and correlation ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          correlation_id="$(python -c 'import uuid; print(uuid.uuid4())')"
+          curl --fail-with-body --silent --show-error \
+            --dump-header /tmp/live.headers \
+            --header "X-Correlation-ID: $correlation_id" \
+            "$BASE_URL/health/live" > /tmp/live.json
+          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\r", "", $2); print $2}' /tmp/live.headers | tail -n 1)"
+          [ "$returned" = "$correlation_id" ] || {
+            echo "::error::Correlation ID mismatch."
+            exit 1
+          }
+          echo "Liveness response: $(cat /tmp/live.json)"
+          echo "Correlation-ID round-trip verified."
