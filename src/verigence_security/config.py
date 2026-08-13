@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     security_private_key_pem: str = ""
     security_public_key_pem: str = ""
 
+    platform_bootstrap_enabled: bool = False
+    platform_bootstrap_login: str = ""
+    platform_bootstrap_password: str = ""
+    platform_admin_token_ttl_minutes: int | None = Field(default=None, gt=0)
+
     dev_mock_auth_enabled: bool = False
     dev_mock_signing_secret: str = ""
     dev_mock_token_ttl_minutes: int | None = Field(default=None, gt=0)
@@ -64,6 +69,15 @@ class Settings(BaseSettings):
                 raise ValueError("DEV mock signing secret is required when mock auth is enabled")
             if self.dev_mock_token_ttl_minutes is None:
                 raise ValueError("DEV mock token TTL is required when mock auth is enabled")
+        if self.platform_bootstrap_enabled:
+            if self.app_env not in {AppEnvironment.LOCAL, AppEnvironment.CI, AppEnvironment.DEV}:
+                raise ValueError("Platform bootstrap is prohibited in UAT/production")
+            if not self.platform_bootstrap_login.strip():
+                raise ValueError("Platform bootstrap login is required when bootstrap is enabled")
+            if not self.platform_bootstrap_password:
+                raise ValueError("Platform bootstrap password is required when bootstrap is enabled")
+            if self.platform_admin_token_ttl_minutes is None:
+                raise ValueError("Platform Admin token TTL is required when bootstrap is enabled")
         return self
 
     @property
