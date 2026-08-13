@@ -116,7 +116,7 @@ jobs:
           docker pull "$image_ref" >/dev/null
           docker run --rm "$image_ref" python --version 2>&1 | grep -E '^Python 3\.12\.'
 
-      - name: Verify Railway token and exact DEV scope
+      - name: Verify Railway project token and exact DEV scope
         shell: bash
         run: |
           set -euo pipefail
@@ -151,146 +151,55 @@ jobs:
 
           echo "Railway Project Token scope matches the configured DEV project and environment."
 
-      - name: Install pinned Railway CLI
+      - name: Snapshot Railway DEV service instance
+        id: before
         shell: bash
         run: |
           set -euo pipefail
-          version="5.30.1"
-          asset="railway-v${version}-x86_64-unknown-linux-gnu.tar.gz"
-          url="https://github.com/railwayapp/cli/releases/download/v${version}/${asset}"
-          expected_sha256="c6169e27e87d95d73fb7a30ec2c6b6c767c042f8a3ba9aa98c92deccda8db10c"
-
-          curl --fail --location --silent --show-error \
-            --retry 5 \
-            --retry-delay 2 \
-            --retry-all-errors \
-            --output "/tmp/${asset}" \
-            "$url"
-
-          echo "${expected_sha256}  /tmp/${asset}" | sha256sum --check -
-          binary_path="$(tar -tzf "/tmp/${asset}" | awk '/(^|\/)railway$/ {print; exit}')"
-          if [ -z "$binary_path" ]; then
-            echo "::error::Pinned Railway CLI archive does not contain the railway binary."
-            exit 1
-          fi
-          mkdir -p /tmp/railway-cli
-          tar -xzf "/tmp/${asset}" -C /tmp/railway-cli "$binary_path"
-          sudo install -m 0755 "/tmp/railway-cli/${binary_path}" /usr/local/bin/railway
-          railway --version | grep -F "5.30.1"
-
-      - name: Connect exact immutable image to Railway DEV service
-        shell: bash
-        env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
-            echo "::error::RAILWAY_API_TOKEN is not configured."
-            exit 1
-          fi
-
-          env -u RAILWAY_TOKEN railway service source connect \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT_ID" \
-            --service "$RAILWAY_SERVICE_ID" \
-            --image "${{ steps.image.outputs.image_ref }}" \
-            --json
-
-      - name: Preflight DEV service-instance visibility and staged changes
-        shell: bash
-        env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
-            echo "::error::RAILWAY_API_TOKEN is not configured."
-            exit 1
-          fi
-
-          instance_query='query ServiceInstance($environmentId: String!, $serviceId: String!) { serviceInstance(environmentId: $environmentId, serviceId: $serviceId) { id } }'
-          instance_variables="$(jq -cn \
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { id serviceId environmentId source { image } latestDeployment { id status createdAt } domains { serviceDomains { id domain targetPort } } } } } } }'
+          variables="$(jq -cn \
+            --arg project "$RAILWAY_PROJECT_ID" \
             --arg environment "$RAILWAY_ENVIRONMENT_ID" \
-            --arg service "$RAILWAY_SERVICE_ID" \
-            '{environmentId:$environment,serviceId:$service}')"
-          instance_body="$(jq -cn --arg query "$instance_query" --argjson variables "$instance_variables" '{query:$query,variables:$variables}')"
-
-          project_response="$(curl --fail-with-body --silent --show-error \
+            '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
             --request POST \
             --url 'https://backboard.railway.com/graphql/v2' \
             --header "Project-Access-Token: $RAILWAY_TOKEN" \
             --header 'Content-Type: application/json' \
-            --data "$instance_body")"
-          api_response="$(curl --fail-with-body --silent --show-error \
-            --request POST \
-            --url 'https://backboard.railway.com/graphql/v2' \
-            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
-            --header 'Content-Type: application/json' \
-            --data "$instance_body")"
+            --data "$body")"
 
-          project_instance_id="$(printf '%s' "$project_response" | jq -r '.data.serviceInstance.id // empty')"
-          api_instance_id="$(printf '%s' "$api_response" | jq -r '.data.serviceInstance.id // empty')"
-
-          if [ -n "$project_instance_id" ]; then
-            echo "Project-token service-instance visibility: present ($project_instance_id)"
-          else
-            echo "Project-token service-instance visibility: absent"
-          fi
-          if [ -n "$api_instance_id" ]; then
-            echo "API-token service-instance visibility: present ($api_instance_id)"
-          else
-            echo "API-token service-instance visibility: absent"
-          fi
-
-          if [ -n "$project_instance_id" ]; then
-            if [ -n "$api_instance_id" ] && [ "$project_instance_id" != "$api_instance_id" ]; then
-              echo "::error::Railway credentials resolved different DEV service instances."
-              exit 1
-            fi
-            echo "DEV service instance exists; deployment may proceed."
-            exit 0
-          fi
-
-          staged_query='query EnvironmentStagedChanges($environmentId: String!) { environmentStagedChanges(environmentId: $environmentId) { id status patch } }'
-          staged_variables="$(jq -cn --arg environment "$RAILWAY_ENVIRONMENT_ID" '{environmentId:$environment}')"
-          staged_body="$(jq -cn --arg query "$staged_query" --argjson variables "$staged_variables" '{query:$query,variables:$variables}')"
-          staged_response="$(curl --fail-with-body --silent --show-error \
-            --request POST \
-            --url 'https://backboard.railway.com/graphql/v2' \
-            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
-            --header 'Content-Type: application/json' \
-            --data "$staged_body")"
-
-          if [ "$(printf '%s' "$staged_response" | jq -r 'has("errors")')" = "true" ]; then
-            printf '%s\n' "$staged_response" | jq -c '[.errors[] | {message, path, code:(.extensions.code // null)}]'
-            echo "::error::Unable to inspect Railway DEV staged changes."
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Unable to query Railway DEV service instances."
             exit 1
           fi
 
-          staged_count="$(printf '%s' "$staged_response" | jq -r '.data.environmentStagedChanges | length')"
-          target_change_count="$(printf '%s' "$staged_response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '[.data.environmentStagedChanges[] | select((.patch | tostring | contains($service)))] | length')"
-          staged_statuses="$(printf '%s' "$staged_response" | jq -r '[.data.environmentStagedChanges[].status] | unique | join(",")')"
-          echo "DEV staged-change count: $staged_count"
-          echo "Staged changes referencing target service: $target_change_count"
-          echo "Staged-change statuses: ${staged_statuses:-none}"
-
-          if [ -n "$api_instance_id" ]; then
-            echo "::error::DEV service instance is visible to the API token but not to the project token; deployment remains fail-closed pending credential-scope correction."
+          service_instance="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // empty')"
+          if [ -z "$service_instance" ]; then
+            echo "::error::The verigence-security service instance is missing from Railway DEV. Environment bootstrap must be repaired before deployment."
             exit 1
           fi
 
-          echo "::error::DEV service instance is absent. Staged-change structure was inspected without printing patch or variable values; no staged change was committed."
-          exit 1
+          instance_id="$(printf '%s' "$service_instance" | jq -r '.id')"
+          deployment_id="$(printf '%s' "$service_instance" | jq -r '.latestDeployment.id // empty')"
+          echo "instance_id=$instance_id" >> "$GITHUB_OUTPUT"
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "Railway DEV service instance: $instance_id"
+          echo "Previous deployment: ${deployment_id:-none}"
 
-      - name: Trigger Railway deployment from exact configured image
-        id: trigger
+      - name: Deploy exact immutable image through Railway DEV environment config
         shell: bash
         run: |
           set -euo pipefail
-          mutation='mutation ServiceInstanceDeploy($environmentId: String!, $serviceId: String!) { serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId) }'
+          image_ref="${{ steps.image.outputs.image_ref }}"
+          patch="$(jq -cn --arg service "$RAILWAY_SERVICE_ID" --arg image "$image_ref" '{services:{($service):{source:{image:$image}}}}')"
+          mutation='mutation EnvironmentPatchCommit($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }'
           variables="$(jq -cn \
             --arg environment "$RAILWAY_ENVIRONMENT_ID" \
-            --arg service "$RAILWAY_SERVICE_ID" \
-            '{environmentId:$environment,serviceId:$service}')"
+            --arg message "Deploy verigence-security ${GITHUB_SHA} immutable image" \
+            --argjson patch "$patch" \
+            '{environmentId:$environment,patch:$patch,commitMessage:$message}')"
           body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
           response="$(curl --fail-with-body --silent --show-error \
             --request POST \
@@ -301,28 +210,25 @@ jobs:
 
           if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
             printf '%s\n' "$response" | jq -c '.errors'
-            echo "::error::Railway rejected the explicit DEV deployment request."
+            echo "::error::Railway rejected the exact-image DEV environment update."
             exit 1
           fi
 
-          deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeployV2 // empty')"
-          if [ -z "$deployment_id" ]; then
-            echo "::error::Railway did not return a deployment ID."
-            exit 1
-          fi
+          echo "Railway accepted the exact immutable image on the DEV service instance."
 
-          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
-          echo "Triggered Railway deployment: $deployment_id"
-
-      - name: Wait for the exact Railway deployment to succeed
+      - name: Wait for exact Railway DEV deployment to succeed
         id: deployment
         shell: bash
         env:
-          DEPLOYMENT_ID: ${{ steps.trigger.outputs.id }}
+          PREVIOUS_DEPLOYMENT_ID: ${{ steps.before.outputs.deployment_id }}
+          EXPECTED_IMAGE: ${{ steps.image.outputs.image_ref }}
         run: |
           set -euo pipefail
-          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 20) { edges { node { id status createdAt } } } }'
-          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{projectId:$project,serviceId:$service}}')"
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { id serviceId source { image } latestDeployment { id status createdAt deploymentStopped instances { id status } } domains { serviceDomains { id domain targetPort } } } } } } }'
+          variables="$(jq -cn \
+            --arg project "$RAILWAY_PROJECT_ID" \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            '{projectId:$project,environmentId:$environment}')"
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
 
           for attempt in $(seq 1 120); do
@@ -335,25 +241,42 @@ jobs:
 
             if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
               printf '%s\n' "$response" | jq -c '.errors'
-              echo "::error::Unable to query Railway deployment status."
+              echo "::error::Unable to query Railway DEV deployment state."
               exit 1
             fi
 
-            status="$(printf '%s' "$response" | jq -r --arg id "$DEPLOYMENT_ID" '[.data.deployments.edges[].node | select(.id == $id)] | first | .status // empty')"
-            if [ -z "$status" ]; then
-              echo "Railway deployment $DEPLOYMENT_ID is not visible yet; waiting 5 seconds."
+            service_instance="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // empty')"
+            if [ -z "$service_instance" ]; then
+              echo "::error::Railway DEV service instance disappeared while deployment was in progress."
+              exit 1
+            fi
+
+            source_image="$(printf '%s' "$service_instance" | jq -r '.source.image // empty')"
+            deployment_id="$(printf '%s' "$service_instance" | jq -r '.latestDeployment.id // empty')"
+            status="$(printf '%s' "$service_instance" | jq -r '.latestDeployment.status // empty')"
+
+            if [ "$source_image" != "$EXPECTED_IMAGE" ]; then
+              echo "Railway has not applied the exact image yet; waiting 5 seconds."
               sleep 5
               continue
             fi
 
-            echo "Railway deployment $DEPLOYMENT_ID status=$status"
+            if [ -z "$deployment_id" ] || { [ -n "$PREVIOUS_DEPLOYMENT_ID" ] && [ "$deployment_id" = "$PREVIOUS_DEPLOYMENT_ID" ]; }; then
+              echo "Exact image is configured but a new deployment is not visible yet; waiting 5 seconds."
+              sleep 5
+              continue
+            fi
+
+            echo "Railway deployment $deployment_id status=${status:-unknown}"
             case "$status" in
               SUCCESS)
-                echo "id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+                instance_status="$(printf '%s' "$service_instance" | jq -r '[.latestDeployment.instances[].status] | unique | join(",")')"
+                echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+                echo "instance_status=$instance_status" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
               FAILED|CRASHED|REMOVED|SKIPPED)
-                echo "::error::Railway deployment $DEPLOYMENT_ID ended with status $status."
+                echo "::error::Railway deployment $deployment_id ended with status $status."
                 exit 1
                 ;;
               *)
@@ -362,7 +285,7 @@ jobs:
             esac
           done
 
-          echo "::error::Timed out waiting for Railway deployment $DEPLOYMENT_ID to reach SUCCESS."
+          echo "::error::Timed out waiting for Railway to deploy the exact immutable image."
           exit 1
 
       - name: Resolve or create Railway DEV public domain
@@ -370,8 +293,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { id domain } } }'
-          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId domains { serviceDomains { id domain targetPort } } } } } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
           response="$(curl --fail-with-body --silent --show-error \
             --request POST \
@@ -380,13 +303,7 @@ jobs:
             --header 'Content-Type: application/json' \
             --data "$body")"
 
-          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
-            printf '%s\n' "$response" | jq -c '.errors'
-            echo "::error::Unable to query Railway service domains."
-            exit 1
-          fi
-
-          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          domain="$(printf '%s' "$response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service) | .domains.serviceDomains[]?.domain] | first // empty')"
           if [ -z "$domain" ]; then
             mutation='mutation serviceDomainCreate($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }'
             mutation_variables="$(jq -cn --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{input:{environmentId:$environment,serviceId:$service}}')"
@@ -400,14 +317,14 @@ jobs:
 
             if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
               printf '%s\n' "$response" | jq -c '.errors'
-              echo "::error::Unable to create Railway-provided domain."
+              echo "::error::Unable to create Railway DEV public domain."
               exit 1
             fi
             domain="$(printf '%s' "$response" | jq -r '.data.serviceDomainCreate.domain // empty')"
           fi
 
           if [ -z "$domain" ]; then
-            echo "::error::Railway did not provide a public service domain."
+            echo "::error::Railway did not provide a DEV public domain."
             exit 1
           fi
 
@@ -419,16 +336,17 @@ jobs:
         run: |
           set -euo pipefail
           base_url="${{ steps.domain.outputs.base_url }}"
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 60); do
             code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$base_url/health/ready" || true)"
             if [ "$code" = "200" ]; then
               cat /tmp/ready.json
               exit 0
             fi
-            echo "Readiness attempt $attempt/30 returned HTTP ${code:-000}; waiting 5 seconds."
+            echo "Readiness attempt $attempt/60 returned HTTP ${code:-000}; waiting 5 seconds."
             sleep 5
           done
           echo "::error::Railway DEV readiness check failed after successful deployment."
+          cat /tmp/ready.json 2>/dev/null || true
           exit 1
 
       - name: Verify liveness and correlation ID over deployed HTTPS
@@ -454,7 +372,9 @@ jobs:
           set -euo pipefail
           echo "Source commit: $GITHUB_SHA"
           echo "Immutable image: ${{ steps.image.outputs.image_ref }}"
+          echo "Railway service instance: ${{ steps.before.outputs.instance_id }}"
           echo "Railway deployment: ${{ steps.deployment.outputs.id }}"
+          echo "Railway runtime instances: ${{ steps.deployment.outputs.instance_status }}"
           echo "Railway project: $RAILWAY_PROJECT_ID"
           echo "Railway environment: $RAILWAY_ENVIRONMENT_ID"
           echo "Railway service: $RAILWAY_SERVICE_ID"
