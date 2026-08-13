@@ -224,13 +224,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          railway service redeploy \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT_ID" \
-            --service "$RAILWAY_SERVICE_ID" \
-            --from-source \
-            --yes \
-            --json
+          mutation='mutation ServiceInstanceDeployLatestCommit($environmentId: String!, $serviceId: String!) { serviceInstanceDeploy(environmentId: $environmentId, serviceId: $serviceId, latestCommit: true) }'
+          variables="$(jq -cn --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Railway rejected the direct DEV deployment trigger."
+            exit 1
+          fi
+
+          deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeploy // empty')"
+          if [ -n "$deployment_id" ]; then
+            echo "Railway accepted deployment trigger: $deployment_id"
+          else
+            echo "Railway accepted the DEV deployment trigger."
+          fi
 
       - name: Wait for the new Railway deployment to succeed
         id: deployment
