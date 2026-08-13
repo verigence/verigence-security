@@ -30,7 +30,7 @@ PRIVILEGED_ROLE_KEYS = frozenset(
 
 
 class OnboardingService:
-    """Invitation and self-onboarding state machine for Admin Control Plane Increment F."""
+    """Human invitation and self-onboarding state transitions for Increment F."""
 
     def __init__(self, session: Session) -> None:
         self.s = session
@@ -59,7 +59,6 @@ class OnboardingService:
             raise ValueError("Invitation expiry must be in the future")
         if not self._tenant_exists(tenant_id):
             raise LookupError("Tenant not found")
-
         access, privileged_role_ids = self._validated_access(
             tenant_id=tenant_id,
             role_ids=role_ids,
@@ -68,54 +67,16 @@ class OnboardingService:
         )
         invitation_id = str(uuid4())
         user_id = str(uuid4())
-        membership_id = str(uuid4())
-        raw_token = secrets.token_urlsafe(32)
-        token_hash = _HASHER.hash(raw_token)
+        raw_value = secrets.token_urlsafe(32)
         try:
-            self.s.execute(
-                text(
-                    """
-                    INSERT INTO security.security_principals
-                    (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
-                    VALUES (:user_id,'USER',:display_name,'ACTIVE',:now,:now)
-                    """
-                ),
-                {"user_id": user_id, "display_name": display_name, "now": now},
-            )
-            self.s.execute(
-                text(
-                    """
-                    INSERT INTO security.users
-                    (user_id,display_name,primary_email,primary_mobile,status,
-                     created_at_utc,updated_at_utc)
-                    VALUES (:user_id,:display_name,:email,:mobile,'INVITED',:now,:now)
-                    """
-                ),
-                {
-                    "user_id": user_id,
-                    "display_name": display_name,
-                    "email": clean_email,
-                    "mobile": clean_mobile,
-                    "now": now,
-                },
-            )
-            self.s.execute(
-                text(
-                    """
-                    INSERT INTO security.tenant_memberships
-                    (membership_id,tenant_id,user_id,employee_code,status,
-                     authorization_version,created_at_utc,updated_at_utc)
-                    VALUES (:membership_id,:tenant_id,:user_id,:employee_code,'PENDING',
-                            1,:now,:now)
-                    """
-                ),
-                {
-                    "membership_id": membership_id,
-                    "tenant_id": tenant_id,
-                    "user_id": user_id,
-                    "employee_code": employee_code,
-                    "now": now,
-                },
+            self._create_invited_user(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                display_name=display_name,
+                email=clean_email,
+                mobile=clean_mobile,
+                employee_code=employee_code,
+                now=now,
             )
             self.s.execute(
                 text(
@@ -125,24 +86,24 @@ class OnboardingService:
                      employee_code,acceptance_token_hash,proposed_access_json,
                      requires_privileged_approval,status,invited_by_user_id,invited_at_utc,
                      expires_at_utc,correlation_id)
-                    VALUES (:invitation_id,:tenant_id,:user_id,:email,:mobile,:employee_code,
-                            :token_hash,CAST(:access_json AS jsonb),:requires_privileged,
-                            'PENDING',:actor_user_id,:now,:expires_at_utc,:correlation_id)
+                    VALUES (:id,:tenant_id,:user_id,:email,:mobile,:employee_code,
+                            :value_hash,CAST(:access_json AS jsonb),:privileged,'PENDING',
+                            :actor_id,:now,:expires_at,:correlation_id)
                     """
                 ),
                 {
-                    "invitation_id": invitation_id,
+                    "id": invitation_id,
                     "tenant_id": tenant_id,
                     "user_id": user_id,
                     "email": clean_email,
                     "mobile": clean_mobile,
                     "employee_code": employee_code,
-                    "token_hash": token_hash,
+                    "value_hash": _HASHER.hash(raw_value),
                     "access_json": json.dumps(access),
-                    "requires_privileged": bool(privileged_role_ids),
-                    "actor_user_id": actor_user_id,
+                    "privileged": bool(privileged_role_ids),
+                    "actor_id": actor_user_id,
                     "now": now,
-                    "expires_at_utc": expires_at_utc,
+                    "expires_at": expires_at_utc,
                     "correlation_id": correlation_id,
                 },
             )
@@ -153,7 +114,7 @@ class OnboardingService:
                 operation_key="security.member.invite",
                 resource_type="INVITATION",
                 resource_id=invitation_id,
-                after_state={
+                state={
                     "status": "PENDING",
                     "requiresPrivilegedApproval": bool(privileged_role_ids),
                 },
@@ -166,7 +127,7 @@ class OnboardingService:
         row = self.get_invitation(tenant_id=tenant_id, invitation_id=invitation_id)
         if row is None:
             raise RuntimeError("Created invitation could not be reloaded")
-        return row, raw_token
+        return row, raw_value
 
     def list_invitations(self, tenant_id: str) -> list[dict[str, Any]]:
         rows = self.s.execute(
@@ -222,8 +183,7 @@ class OnboardingService:
         row = self.s.execute(
             text(
                 """
-                SELECT invited_user_id,status
-                FROM security.tenant_invitations
+                SELECT invited_user_id,status FROM security.tenant_invitations
                 WHERE tenant_id=:tenant_id AND invitation_id=:invitation_id
                 FOR UPDATE
                 """
@@ -234,6 +194,7 @@ class OnboardingService:
             self.s.rollback()
             return False
         if row["status"] != "PENDING":
+            self.s.rollback()
             raise ValueError("Only a PENDING invitation can be cancelled")
         try:
             self.s.execute(
@@ -266,7 +227,7 @@ class OnboardingService:
                 operation_key="security.member.invitation.cancel",
                 resource_type="INVITATION",
                 resource_id=invitation_id,
-                after_state={"status": "CANCELLED"},
+                state={"status": "CANCELLED"},
                 now=now,
             )
             self.s.commit()
@@ -289,8 +250,7 @@ class OnboardingService:
             text(
                 """
                 SELECT * FROM security.tenant_invitations
-                WHERE invitation_id=:invitation_id
-                FOR UPDATE
+                WHERE invitation_id=:invitation_id FOR UPDATE
                 """
             ),
             {"invitation_id": invitation_id},
@@ -317,11 +277,10 @@ class OnboardingService:
                 identity_provider,
             )
             raise security_error("PERMISSION_DENIED")
-
         tenant_id = str(invitation["tenant_id"])
         invited_user_id = str(invitation["invited_user_id"])
         try:
-            subject_user_id = self._bind_invitation_identity(
+            user_id = self._bind_invitation_identity(
                 tenant_id=tenant_id,
                 invited_user_id=invited_user_id,
                 invitation_id=invitation_id,
@@ -334,18 +293,12 @@ class OnboardingService:
                 ),
                 now=now,
             )
-            proposed = dict(invitation["proposed_access_json"])
+            access = self._json_access(invitation["proposed_access_json"])
             access, privileged_role_ids = self._validated_access(
                 tenant_id=tenant_id,
-                role_ids=[str(value) for value in proposed.get("roleIds", [])],
-                group_ids=[str(value) for value in proposed.get("groupIds", [])],
-                location_assignments=[
-                    {
-                        "locationId": str(value["locationId"]),
-                        "scheduleId": str(value["scheduleId"]),
-                    }
-                    for value in proposed.get("locationAssignments", [])
-                ],
+                role_ids=[str(value) for value in access.get("roleIds", [])],
+                group_ids=[str(value) for value in access.get("groupIds", [])],
+                location_assignments=self._json_locations(access),
             )
             self.s.execute(
                 text(
@@ -356,7 +309,7 @@ class OnboardingService:
                     WHERE user_id=:user_id
                     """
                 ),
-                {"user_id": subject_user_id, "now": now},
+                {"user_id": user_id, "now": now},
             )
             self.s.execute(
                 text(
@@ -368,11 +321,11 @@ class OnboardingService:
                 ),
                 {"invitation_id": invitation_id, "now": now},
             )
-            pending_requests: list[str] = []
+            request_ids: list[str] = []
             if privileged_role_ids:
                 for role_id in privileged_role_ids:
                     request_id = str(uuid4())
-                    pending_requests.append(request_id)
+                    request_ids.append(request_id)
                     self.s.execute(
                         text(
                             """
@@ -388,7 +341,7 @@ class OnboardingService:
                         {
                             "request_id": request_id,
                             "tenant_id": tenant_id,
-                            "user_id": subject_user_id,
+                            "user_id": user_id,
                             "role_id": role_id,
                             "invitation_id": invitation_id,
                             "requested_by": str(invitation["invited_by_user_id"]),
@@ -400,7 +353,7 @@ class OnboardingService:
             else:
                 self._materialize_access(
                     tenant_id=tenant_id,
-                    user_id=subject_user_id,
+                    user_id=user_id,
                     actor_user_id=str(invitation["invited_by_user_id"]),
                     access=access,
                     now=now,
@@ -408,15 +361,15 @@ class OnboardingService:
                 membership_status = "ACTIVE"
             self._audit(
                 tenant_id=tenant_id,
-                actor_user_id=subject_user_id,
+                actor_user_id=user_id,
                 correlation_id=correlation_id,
                 operation_key="security.invitation.accept",
                 resource_type="INVITATION",
                 resource_id=invitation_id,
-                after_state={
+                state={
                     "status": "ACCEPTED",
                     "membershipStatus": membership_status,
-                    "privilegedRequestsPending": len(pending_requests),
+                    "privilegedRequestsPending": len(request_ids),
                 },
                 now=now,
             )
@@ -427,10 +380,10 @@ class OnboardingService:
         return {
             "invitationId": invitation_id,
             "tenantId": tenant_id,
-            "userId": subject_user_id,
+            "userId": user_id,
             "status": "ACCEPTED",
             "membershipStatus": membership_status,
-            "privilegedAccessRequestIds": pending_requests,
+            "privilegedAccessRequestIds": request_ids,
         }
 
     def submit_self_registration(
@@ -448,8 +401,7 @@ class OnboardingService:
         tenant = self.s.execute(
             text(
                 """
-                SELECT tenant_id,tenant_code,status FROM security.tenants
-                WHERE tenant_code=:tenant_code
+                SELECT tenant_id FROM security.tenants WHERE tenant_code=:tenant_code
                 """
             ),
             {"tenant_code": tenant_code},
@@ -477,7 +429,6 @@ class OnboardingService:
         ):
             self._log_self_denial(correlation_id, tenant_code, identity_provider)
             raise security_error("PERMISSION_DENIED")
-
         try:
             user_id, external_identity_id = self._resolve_or_create_identity_user(
                 identity_provider=identity_provider,
@@ -489,8 +440,7 @@ class OnboardingService:
                 text(
                     """
                     SELECT membership_id,status FROM security.tenant_memberships
-                    WHERE tenant_id=:tenant_id AND user_id=:user_id
-                    FOR UPDATE
+                    WHERE tenant_id=:tenant_id AND user_id=:user_id FOR UPDATE
                     """
                 ),
                 {"tenant_id": tenant_id, "user_id": user_id},
@@ -505,17 +455,7 @@ class OnboardingService:
                 }
             if membership is not None and membership["status"] in {"SUSPENDED", "ENDED"}:
                 raise ValueError("Existing Tenant membership cannot self-onboard")
-            pending = self.s.execute(
-                text(
-                    """
-                    SELECT self_onboarding_request_id,status
-                    FROM security.self_onboarding_requests
-                    WHERE tenant_id=:tenant_id AND user_id=:user_id
-                      AND status='PENDING_ADMIN_APPROVAL'
-                    """
-                ),
-                {"tenant_id": tenant_id, "user_id": user_id},
-            ).mappings().first()
+            pending = self._pending_self_request(tenant_id, user_id)
             if pending is not None:
                 self.s.commit()
                 return {
@@ -531,15 +471,10 @@ class OnboardingService:
                         INSERT INTO security.tenant_memberships
                         (membership_id,tenant_id,user_id,status,authorization_version,
                          created_at_utc,updated_at_utc)
-                        VALUES (:membership_id,:tenant_id,:user_id,'PENDING',1,:now,:now)
+                        VALUES (:id,:tenant_id,:user_id,'PENDING',1,:now,:now)
                         """
                     ),
-                    {
-                        "membership_id": str(uuid4()),
-                        "tenant_id": tenant_id,
-                        "user_id": user_id,
-                        "now": now,
-                    },
+                    {"id": str(uuid4()), "tenant_id": tenant_id, "user_id": user_id, "now": now},
                 )
             request_id = str(uuid4())
             self.s.execute(
@@ -548,13 +483,13 @@ class OnboardingService:
                     INSERT INTO security.self_onboarding_requests
                     (self_onboarding_request_id,tenant_id,user_id,external_identity_id,
                      status,submitted_at_utc,submitted_source_ip,correlation_id)
-                    VALUES (:request_id,:tenant_id,:user_id,:external_identity_id,
+                    VALUES (:id,:tenant_id,:user_id,:external_identity_id,
                             'PENDING_ADMIN_APPROVAL',:now,CAST(:source_ip AS inet),
                             :correlation_id)
                     """
                 ),
                 {
-                    "request_id": request_id,
+                    "id": request_id,
                     "tenant_id": tenant_id,
                     "user_id": user_id,
                     "external_identity_id": external_identity_id,
@@ -570,7 +505,7 @@ class OnboardingService:
                 operation_key="security.self_onboarding.submit",
                 resource_type="SELF_ONBOARDING_REQUEST",
                 resource_id=request_id,
-                after_state={"status": "PENDING_ADMIN_APPROVAL"},
+                state={"status": "PENDING_ADMIN_APPROVAL"},
                 now=now,
             )
             self.s.commit()
@@ -590,12 +525,10 @@ class OnboardingService:
                 """
                 SELECT r.self_onboarding_request_id,r.tenant_id,r.user_id,u.display_name,
                        u.primary_email,u.primary_mobile,r.status,r.submitted_at_utc,
-                       r.reviewed_by_user_id,r.reviewed_at_utc,r.review_reason,
-                       r.correlation_id
+                       r.reviewed_by_user_id,r.reviewed_at_utc,r.review_reason,r.correlation_id
                 FROM security.self_onboarding_requests r
                 JOIN security.users u ON u.user_id=r.user_id
-                WHERE r.tenant_id=:tenant_id
-                ORDER BY r.submitted_at_utc DESC
+                WHERE r.tenant_id=:tenant_id ORDER BY r.submitted_at_utc DESC
                 """
             ),
             {"tenant_id": tenant_id},
@@ -613,12 +546,10 @@ class OnboardingService:
                 """
                 SELECT r.self_onboarding_request_id,r.tenant_id,r.user_id,u.display_name,
                        u.primary_email,u.primary_mobile,r.status,r.submitted_at_utc,
-                       r.reviewed_by_user_id,r.reviewed_at_utc,r.review_reason,
-                       r.correlation_id
+                       r.reviewed_by_user_id,r.reviewed_at_utc,r.review_reason,r.correlation_id
                 FROM security.self_onboarding_requests r
                 JOIN security.users u ON u.user_id=r.user_id
-                WHERE r.tenant_id=:tenant_id
-                  AND r.self_onboarding_request_id=:request_id
+                WHERE r.tenant_id=:tenant_id AND r.self_onboarding_request_id=:request_id
                 """
             ),
             {"tenant_id": tenant_id, "request_id": request_id},
@@ -650,6 +581,7 @@ class OnboardingService:
         if request_row is None:
             raise LookupError("Self-onboarding request not found")
         if request_row["status"] != "PENDING_ADMIN_APPROVAL":
+            self.s.rollback()
             raise ValueError("Self-onboarding request is not pending approval")
         access, privileged_role_ids = self._validated_access(
             tenant_id=tenant_id,
@@ -665,8 +597,7 @@ class OnboardingService:
             text(
                 """
                 SELECT status FROM security.tenant_memberships
-                WHERE tenant_id=:tenant_id AND user_id=:user_id
-                FOR UPDATE
+                WHERE tenant_id=:tenant_id AND user_id=:user_id FOR UPDATE
                 """
             ),
             {"tenant_id": tenant_id, "user_id": user_id},
@@ -700,7 +631,7 @@ class OnboardingService:
                 operation_key="security.member.approve",
                 resource_type="SELF_ONBOARDING_REQUEST",
                 resource_id=request_id,
-                after_state={"status": "APPROVED", "userId": user_id},
+                state={"status": "APPROVED", "userId": user_id},
                 now=now,
             )
             self.s.commit()
@@ -761,7 +692,7 @@ class OnboardingService:
                 operation_key="security.member.reject",
                 resource_type="SELF_ONBOARDING_REQUEST",
                 resource_id=request_id,
-                after_state={"status": "REJECTED"},
+                state={"status": "REJECTED"},
                 now=now,
             )
             self.s.commit()
@@ -787,6 +718,62 @@ class OnboardingService:
             raise LookupError(f"Required Tenant role not found: {role_key}")
         return str(row[0])
 
+    def _create_invited_user(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        display_name: str,
+        email: str | None,
+        mobile: str | None,
+        employee_code: str | None,
+        now: datetime,
+    ) -> None:
+        self.s.execute(
+            text(
+                """
+                INSERT INTO security.security_principals
+                (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+                VALUES (:user_id,'USER',:display_name,'ACTIVE',:now,:now)
+                """
+            ),
+            {"user_id": user_id, "display_name": display_name, "now": now},
+        )
+        self.s.execute(
+            text(
+                """
+                INSERT INTO security.users
+                (user_id,display_name,primary_email,primary_mobile,status,
+                 created_at_utc,updated_at_utc)
+                VALUES (:user_id,:display_name,:email,:mobile,'INVITED',:now,:now)
+                """
+            ),
+            {
+                "user_id": user_id,
+                "display_name": display_name,
+                "email": email,
+                "mobile": mobile,
+                "now": now,
+            },
+        )
+        self.s.execute(
+            text(
+                """
+                INSERT INTO security.tenant_memberships
+                (membership_id,tenant_id,user_id,employee_code,status,
+                 authorization_version,created_at_utc,updated_at_utc)
+                VALUES (:id,:tenant_id,:user_id,:employee_code,'PENDING',1,:now,:now)
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "employee_code": employee_code,
+                "now": now,
+            },
+        )
+
     def _bind_invitation_identity(
         self,
         *,
@@ -801,8 +788,8 @@ class OnboardingService:
         identity = self.s.execute(
             text(
                 """
-                SELECT e.external_identity_id,e.user_id,e.status,
-                       u.status AS user_status,p.status AS principal_status
+                SELECT e.user_id,e.status,u.status AS user_status,
+                       p.status AS principal_status
                 FROM security.external_identities e
                 JOIN security.users u ON u.user_id=e.user_id
                 JOIN security.security_principals p ON p.principal_id=e.user_id
@@ -839,7 +826,7 @@ class OnboardingService:
         existing_membership = self.s.execute(
             text(
                 """
-                SELECT status FROM security.tenant_memberships
+                SELECT 1 FROM security.tenant_memberships
                 WHERE tenant_id=:tenant_id AND user_id=:user_id
                 """
             ),
@@ -851,19 +838,19 @@ class OnboardingService:
             text(
                 """
                 DELETE FROM security.tenant_memberships
-                WHERE tenant_id=:tenant_id AND user_id=:invited_user_id AND status='PENDING'
+                WHERE tenant_id=:tenant_id AND user_id=:user_id AND status='PENDING'
                 """
             ),
-            {"tenant_id": tenant_id, "invited_user_id": invited_user_id},
+            {"tenant_id": tenant_id, "user_id": invited_user_id},
         )
         self.s.execute(
             text(
                 """
-                UPDATE security.tenant_invitations SET invited_user_id=:existing_user_id
+                UPDATE security.tenant_invitations SET invited_user_id=:user_id
                 WHERE invitation_id=:invitation_id
                 """
             ),
-            {"existing_user_id": existing_user_id, "invitation_id": invitation_id},
+            {"user_id": existing_user_id, "invitation_id": invitation_id},
         )
         self.s.execute(
             text(
@@ -871,12 +858,11 @@ class OnboardingService:
                 INSERT INTO security.tenant_memberships
                 (membership_id,tenant_id,user_id,employee_code,status,
                  authorization_version,created_at_utc,updated_at_utc)
-                VALUES (:membership_id,:tenant_id,:user_id,:employee_code,'PENDING',
-                        1,:now,:now)
+                VALUES (:id,:tenant_id,:user_id,:employee_code,'PENDING',1,:now,:now)
                 """
             ),
             {
-                "membership_id": str(uuid4()),
+                "id": str(uuid4()),
                 "tenant_id": tenant_id,
                 "user_id": existing_user_id,
                 "employee_code": employee_code,
@@ -958,11 +944,11 @@ class OnboardingService:
                 """
                 INSERT INTO security.external_identities
                 (external_identity_id,user_id,provider,provider_subject,status,linked_at_utc)
-                VALUES (:external_identity_id,:user_id,:provider,:subject,'ACTIVE',:now)
+                VALUES (:external_id,:user_id,:provider,:subject,'ACTIVE',:now)
                 """
             ),
             {
-                "external_identity_id": external_identity_id,
+                "external_id": external_identity_id,
                 "user_id": user_id,
                 "provider": identity_provider,
                 "subject": identity_subject,
@@ -979,10 +965,10 @@ class OnboardingService:
         group_ids: list[str],
         location_assignments: list[dict[str, str]],
     ) -> tuple[dict[str, Any], list[str]]:
-        normalized_roles = list(dict.fromkeys(role_ids))
-        normalized_groups = list(dict.fromkeys(group_ids))
+        roles = list(dict.fromkeys(role_ids))
+        groups = list(dict.fromkeys(group_ids))
         privileged: list[str] = []
-        for role_id in normalized_roles:
+        for role_id in roles:
             row = self.s.execute(
                 text(
                     """
@@ -996,7 +982,7 @@ class OnboardingService:
                 raise ValueError("Role must belong to the Tenant and be ACTIVE")
             if str(row[0]) in PRIVILEGED_ROLE_KEYS:
                 privileged.append(role_id)
-        for group_id in normalized_groups:
+        for group_id in groups:
             row = self.s.execute(
                 text(
                     """
@@ -1008,20 +994,19 @@ class OnboardingService:
             ).first()
             if row is None:
                 raise ValueError("Group must belong to the Tenant and be ACTIVE")
-        normalized_locations: list[dict[str, str]] = []
-        seen_locations: set[tuple[str, str]] = set()
+        locations: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
         for assignment in location_assignments:
             location_id = str(assignment["locationId"])
             schedule_id = str(assignment["scheduleId"])
             pair = (location_id, schedule_id)
-            if pair in seen_locations:
+            if pair in seen:
                 continue
-            seen_locations.add(pair)
+            seen.add(pair)
             row = self.s.execute(
                 text(
                     """
-                    SELECT 1
-                    FROM security.tenant_locations l
+                    SELECT 1 FROM security.tenant_locations l
                     JOIN security.access_schedules s
                       ON s.tenant_id=l.tenant_id AND s.schedule_id=:schedule_id
                     WHERE l.tenant_id=:tenant_id AND l.location_id=:location_id
@@ -1038,17 +1023,8 @@ class OnboardingService:
                 raise ValueError(
                     "Location and schedule must belong to the Tenant and be ACTIVE"
                 )
-            normalized_locations.append(
-                {"locationId": location_id, "scheduleId": schedule_id}
-            )
-        return (
-            {
-                "roleIds": normalized_roles,
-                "groupIds": normalized_groups,
-                "locationAssignments": normalized_locations,
-            },
-            privileged,
-        )
+            locations.append({"locationId": location_id, "scheduleId": schedule_id})
+        return {"roleIds": roles, "groupIds": groups, "locationAssignments": locations}, privileged
 
     def _materialize_access(
         self,
@@ -1077,8 +1053,7 @@ class OnboardingService:
                     INSERT INTO security.user_role_assignments
                     (assignment_id,tenant_id,user_id,role_id,valid_from_utc,status,
                      assigned_by_user_id,assigned_at_utc)
-                    VALUES (:id,:tenant_id,:user_id,:role_id,:now,'ACTIVE',
-                            :actor_user_id,:now)
+                    VALUES (:id,:tenant_id,:user_id,:role_id,:now,'ACTIVE',:actor_id,:now)
                     ON CONFLICT DO NOTHING
                     """
                 ),
@@ -1086,8 +1061,8 @@ class OnboardingService:
                     "id": str(uuid4()),
                     "tenant_id": tenant_id,
                     "user_id": user_id,
-                    "role_id": role_id,
-                    "actor_user_id": actor_user_id,
+                    "role_id": str(role_id),
+                    "actor_id": actor_user_id,
                     "now": now,
                 },
             )
@@ -1098,17 +1073,16 @@ class OnboardingService:
                     INSERT INTO security.group_memberships
                     (group_membership_id,tenant_id,group_id,user_id,status,valid_from_utc,
                      added_by_user_id,added_at_utc)
-                    VALUES (:id,:tenant_id,:group_id,:user_id,'ACTIVE',:now,
-                            :actor_user_id,:now)
+                    VALUES (:id,:tenant_id,:group_id,:user_id,'ACTIVE',:now,:actor_id,:now)
                     ON CONFLICT DO NOTHING
                     """
                 ),
                 {
                     "id": str(uuid4()),
                     "tenant_id": tenant_id,
-                    "group_id": group_id,
+                    "group_id": str(group_id),
                     "user_id": user_id,
-                    "actor_user_id": actor_user_id,
+                    "actor_id": actor_user_id,
                     "now": now,
                 },
             )
@@ -1119,8 +1093,8 @@ class OnboardingService:
                     INSERT INTO security.user_location_assignments
                     (assignment_id,tenant_id,user_id,location_id,schedule_id,
                      valid_from_utc,status,assigned_by_user_id,assigned_at_utc)
-                    VALUES (:id,:tenant_id,:user_id,:location_id,:schedule_id,
-                            :now,'ACTIVE',:actor_user_id,:now)
+                    VALUES (:id,:tenant_id,:user_id,:location_id,:schedule_id,:now,
+                            'ACTIVE',:actor_id,:now)
                     ON CONFLICT DO NOTHING
                     """
                 ),
@@ -1128,9 +1102,9 @@ class OnboardingService:
                     "id": str(uuid4()),
                     "tenant_id": tenant_id,
                     "user_id": user_id,
-                    "location_id": assignment["locationId"],
-                    "schedule_id": assignment["scheduleId"],
-                    "actor_user_id": actor_user_id,
+                    "location_id": str(assignment["locationId"]),
+                    "schedule_id": str(assignment["scheduleId"]),
+                    "actor_id": actor_user_id,
                     "now": now,
                 },
             )
@@ -1153,9 +1127,7 @@ class OnboardingService:
         ).mappings().first()
         if row is None:
             return False
-        if not bool(row["configurable"]):
-            enabled = True
-        elif row["override_mode"] == "ENABLED":
+        if not bool(row["configurable"]) or row["override_mode"] == "ENABLED":
             enabled = True
         elif row["override_mode"] == "DISABLED":
             enabled = False
@@ -1165,14 +1137,51 @@ class OnboardingService:
             enabled = bool(row["default_enabled"])
         parent = row["parent_control_key"]
         if enabled and parent is not None:
-            enabled = self._effective_control(tenant_id, str(parent))
+            return self._effective_control(tenant_id, str(parent))
         return enabled
+
+    def _pending_self_request(self, tenant_id: str, user_id: str) -> dict[str, Any] | None:
+        row = self.s.execute(
+            text(
+                """
+                SELECT self_onboarding_request_id,status
+                FROM security.self_onboarding_requests
+                WHERE tenant_id=:tenant_id AND user_id=:user_id
+                  AND status='PENDING_ADMIN_APPROVAL'
+                """
+            ),
+            {"tenant_id": tenant_id, "user_id": user_id},
+        ).mappings().first()
+        return dict(row) if row else None
 
     def _tenant_exists(self, tenant_id: str) -> bool:
         return self.s.execute(
             text("SELECT 1 FROM security.tenants WHERE tenant_id=:tenant_id"),
             {"tenant_id": tenant_id},
         ).first() is not None
+
+    @staticmethod
+    def _json_access(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("Stored invitation access is invalid")
+        return {str(key): item for key, item in value.items()}
+
+    @staticmethod
+    def _json_locations(access: dict[str, Any]) -> list[dict[str, str]]:
+        raw = access.get("locationAssignments", [])
+        if not isinstance(raw, list):
+            raise ValueError("Stored invitation locations are invalid")
+        result: list[dict[str, str]] = []
+        for value in raw:
+            if not isinstance(value, dict):
+                raise ValueError("Stored invitation location is invalid")
+            result.append(
+                {
+                    "locationId": str(value["locationId"]),
+                    "scheduleId": str(value["scheduleId"]),
+                }
+            )
+        return result
 
     def _audit(
         self,
@@ -1183,7 +1192,7 @@ class OnboardingService:
         operation_key: str,
         resource_type: str,
         resource_id: str,
-        after_state: dict[str, Any],
+        state: dict[str, Any],
         now: datetime,
     ) -> None:
         self.s.execute(
@@ -1193,20 +1202,20 @@ class OnboardingService:
                 (admin_change_id,correlation_id,scope_type,tenant_id,actor_user_id,
                  operation_key,resource_type,resource_id,outcome,after_state_json,
                  occurred_at_utc)
-                VALUES (:id,:correlation_id,'TENANT',:tenant_id,:actor_user_id,
+                VALUES (:id,:correlation_id,'TENANT',:tenant_id,:actor_id,
                         :operation_key,:resource_type,:resource_id,'SUCCESS',
-                        CAST(:after_state AS jsonb),:now)
+                        CAST(:state AS jsonb),:now)
                 """
             ),
             {
                 "id": str(uuid4()),
                 "correlation_id": correlation_id,
                 "tenant_id": tenant_id,
-                "actor_user_id": actor_user_id,
+                "actor_id": actor_user_id,
                 "operation_key": operation_key,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
-                "after_state": json.dumps(after_state),
+                "state": json.dumps(state),
                 "now": now,
             },
         )
