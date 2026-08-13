@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     security_private_key_pem: str = ""
     security_public_key_pem: str = ""
 
+    platform_admin_token_audience: str = "verigence-admin-control-plane"
+    platform_admin_token_ttl_minutes: int = Field(default=15, gt=0, le=60)
+
     dev_mock_auth_enabled: bool = False
     dev_mock_signing_secret: str = ""
     dev_mock_token_ttl_minutes: int | None = Field(default=None, gt=0)
