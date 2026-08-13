@@ -1,131 +1,141 @@
 # Verigence Security Admin Control Plane and Cross-Module Authorization Design v1.4
 
-**Status:** APPROVED DIRECTION FOR IMPLEMENTATION  
+**Status:** APPROVED FOR IMPLEMENTATION  
 **Date:** 2026-08-13  
 **Repository:** `verigence/verigence-security`  
 **Security baseline reviewed:** `dev@ca3e0cd08ebb12040eefa911dfc147e3643e09ac`  
 **DI baseline reviewed:** `verigence/verigence-di dev@caf0dfab8d80357ab76568538b8f73f2d2e05fc0`  
-**Supersedes:** no Security v1.3 normative artifact. This is a versioned v1.4 control-plane extension.
+**Supersedes:** no Security v1.3 normative artifact; this is a versioned v1.4 control-plane extension.
 
 ---
 
-## 1. Purpose
+## 1. Purpose and authority
 
-This document is the implementation authority for the Verigence Security administration control plane,
-standard administrative roles, Tenant groups, cross-module permission registration, module role templates,
-Tenant/team-member onboarding, privileged-access approval, and Security-to-module authorization behavior.
+This document is the implementation authority for the new Verigence Security Admin Control Plane.
 
-It exists to remove the ambiguity that blocked public Security Admin APIs in Phase 5.
+It governs:
 
-This document does **not** silently reinterpret Security v1.3. It separates:
+- Platform administration and bootstrap;
+- direct Tenant creation;
+- standard Platform and Tenant administrator roles;
+- the canonical `security.*` administrator permission catalogue;
+- Tenant groups;
+- cross-module permission registration;
+- module role templates;
+- Tenant roles and effective RBAC;
+- team-member invitation and human acceptance;
+- privileged-access maker-checker;
+- Admin API routes;
+- v1.4 database extensions;
+- Security JWT/module integration rules;
+- Document Intelligence (DI) alignment;
+- implementation sequence and acceptance tests.
 
-1. existing Security v1.3 facts;
-2. behavior already implemented and validated in Security;
-3. behavior already implemented in Document Intelligence (DI);
-4. new v1.4 decisions explicitly adopted for the control plane.
+This document does **not** silently modify Security v1.3. It explicitly versions new control-plane decisions.
 
-If a future requirement conflicts with this document, the design must be versioned again before code changes.
+Where this document says an item is deferred or blocked, implementation MUST NOT infer the missing behavior.
 
 ---
 
-## 2. Grounded source facts
+## 2. Provenance: what is fact versus new v1.4 design
 
 ### 2.1 Existing Security v1.3 facts retained unchanged
 
-The current approved Security schema already establishes these facts:
+The existing Security schema already establishes:
 
-- Security is multi-Tenant.
-- Tenant lifecycle includes `CONFIGURING`, `ACTIVE`, `SUSPENDED`, `OFFBOARDING`, and `OFFBOARDED`.
-- Security Principal actor types are exactly:
-  - `USER`;
-  - `SYSTEM`;
-  - `SERVICE_INTEGRATION`.
-- USER status includes `INVITED` and `ACTIVE`.
-- Tenant membership status includes `PENDING` and `ACTIVE`.
-- permissions are globally registered with `module_key`, `resource_key`, and `action_key`.
-- roles are Tenant-scoped.
-- roles receive permissions through `security.role_permissions`.
-- users receive roles through `security.user_role_assignments`.
-- machine principals receive Tenant scope and permissions through the existing principal scope/grant model.
-- USER access tokens contain effective permissions and Tenant context.
-- Security remains the source of truth for identity, Tenant membership, access policy, RBAC, devices,
-  sessions, and Security JWT issuance.
+- Tenant lifecycle values:
+  `CONFIGURING`, `ACTIVE`, `SUSPENDED`, `OFFBOARDING`, `OFFBOARDED`;
+- Security Principal actor types:
+  `USER`, `SYSTEM`, `SERVICE_INTEGRATION`;
+- USER status including `INVITED` and `ACTIVE`;
+- Tenant membership status including `PENDING` and `ACTIVE`;
+- global permission records with `module_key`, `resource_key`, `action_key`;
+- Tenant-scoped roles;
+- role-permission grants;
+- direct user-role assignments;
+- Tenant-scoped machine-principal grants;
+- Tenant locations and schedules;
+- USER location/schedule assignments;
+- Security JWT issuance and effective-permission resolution.
 
-The immutable baseline migration remains `migrations/0001_security_baseline_v1.3.sql` and MUST NOT be
-rewritten to implement v1.4.
+The immutable migration remains:
+
+```text
+migrations/0001_security_baseline_v1.3.sql
+```
+
+It MUST remain byte-identical.
 
 ### 2.2 Existing Phase 5 implementation retained
 
-Phase 5 has already implemented and Neon-validated internal administration services for:
+The current Security code already implements and Neon-validates internal administration for:
 
 - Tenant Security Policy;
 - Security Retention Policy;
 - Tenant locations;
-- access schedules and schedule windows;
-- USER Security-side onboarding persistence;
+- schedules/windows;
+- USER Security-side onboarding records;
+- external identity mapping;
 - Tenant memberships;
-- employee-location assignments;
+- user-location/schedule assignments;
 - canonical permissions;
 - Tenant roles;
 - role-permission grants;
 - direct user-role assignments;
-- fail-closed Tenant activation-readiness foundation.
+- fail-closed activation-readiness foundation.
 
-The v1.4 Admin APIs will expose and extend these existing services rather than creating a parallel
-administration model.
+v1.4 exposes and extends this model. It does not create a parallel administration store.
 
 ### 2.3 Existing DI implementation facts retained
 
-The current DI implementation already follows the target runtime model in the important areas:
+The reviewed DI code already:
 
-- DI verifies Security-issued JWTs using the Security JWKS endpoint.
-- DI expects Security issuer `verigence-security`.
-- DI treats `permissions[]` as authoritative for authorization.
-- DI treats `roles[]` as informational/backward-compatible data.
-- DI has `require_permission()` and `require_tenant_permission()` dependencies.
-- DI already has a canonical `di.*` permission catalogue.
-- DI currently defines 28 `di.*` permissions.
-- DI currently has eight role bundles used mainly for defaults/mock behavior.
+- verifies Security-issued JWTs through Security JWKS;
+- expects issuer `verigence-security`;
+- consumes `tenant_id`, `actor_type`, `roles[]`, `permissions[]`, `device_id`,
+  `access_session_id`, and `location_id`;
+- treats `permissions[]` as authoritative;
+- treats role names as informational/backward-compatible;
+- has `require_permission()` and `require_tenant_permission()`;
+- defines 28 canonical `di.*` permissions;
+- defines eight current role bundles for defaults/mock behavior.
 
-The DI permission catalogue is therefore the first real module catalogue that will be synchronized into
-Security v1.4.
+These facts are used as the starting point for DI integration. They are not reconstructed from memory.
 
 ---
 
-## 3. Core authorization principles
-
-The following rules are normative for v1.4.
+## 3. Non-negotiable authorization principles
 
 ### RULE-AUTH-001 — Security is the authorization authority
 
 Security owns:
 
-- users and machine principals;
+- identities and Security Principals;
 - Tenant memberships;
-- platform administrators;
-- registered module catalogue;
+- Platform administrators;
+- module catalogue;
 - canonical permissions;
 - Tenant roles;
-- groups;
-- user/group role assignments;
-- effective permission calculation;
-- Security access tokens.
+- Tenant groups;
+- role/group/user assignments;
+- effective permissions;
+- access tokens.
 
-Application modules MUST NOT maintain a second authoritative user-role assignment store.
+A business module MUST NOT maintain a second authoritative user-role assignment system.
 
-### RULE-AUTH-002 — Modules own capability definitions, not user authorization
+### RULE-AUTH-002 — Modules own capabilities and templates
 
 A module such as DI or WPM owns:
 
 - the operations it exposes;
-- its canonical permission definitions;
-- optional standard role templates that bundle its own permissions.
+- the canonical permissions required by those operations;
+- optional standard role templates containing only that module's permissions.
 
-A module does **not** own the runtime Tenant roles assigned to users.
+A module does not own the runtime Tenant role assigned to a user.
 
 ### RULE-AUTH-003 — Permissions are the runtime contract
 
-Application modules MUST authorize on canonical permissions.
+Modules authorize by permission, not role name.
 
 Correct:
 
@@ -139,41 +149,33 @@ Incorrect:
 if role == "DOCUMENT_VERIFIER"
 ```
 
-Role names are never a stable contract between Security and a business module.
-
 ### RULE-AUTH-004 — Canonical permission namespace
 
-Permissions retain the existing module-prefixed form:
+Permissions use the existing form:
 
 ```text
 <module>.<resource>.<action>
 ```
 
-Examples already in use:
+Examples:
 
 ```text
 di.document.upload
 di.verification.write
-di.tenant_config.read
+security.member.invite
 ```
 
-Security administration permissions use the `security.*` namespace.
-
 ### RULE-AUTH-005 — Namespace ownership
-
-A registered module may only publish permissions and role templates within its own namespace.
-
-Examples:
 
 - DI owns `di.*`.
 - WPM owns `wpm.*`.
 - Security owns `security.*`.
 
-DI MUST NOT publish `wpm.*` or `security.*` entries.
+A module cannot register or change another module's namespace.
 
 ### RULE-AUTH-006 — Tenant roles are Security-owned
 
-A Tenant role may combine permissions originating from multiple modules.
+A Tenant role may combine permissions from multiple modules.
 
 Example:
 
@@ -185,33 +187,28 @@ Tenant Role: Process Consultant
   wpm.task.update
 ```
 
-The role is stored and assigned by Security, not DI or WPM.
+### RULE-AUTH-007 — Module role templates are templates, not live roles
 
-### RULE-AUTH-007 — Module role templates are templates only
+A module role template is a versioned convenience bundle.
 
-A module role template is a versioned convenience bundle of permissions published by a module.
+When applied to a Tenant role, Security materializes the selected permissions into that Tenant role and records
+template provenance.
 
-Applying a template to a Tenant role materializes the selected permissions into the Tenant role.
+A later module-template change MUST NOT silently change the Tenant role.
 
-A later change to the module template MUST NOT silently change existing Tenant roles.
+### RULE-AUTH-008 — No negative permission model in v1.4
 
-Template upgrades require an explicit Security Admin action after impact review.
+Effective permissions are additive.
 
-### RULE-AUTH-008 — No negative permissions in v1.4
+There is no permission-level `DENY` override in v1.4.
 
-v1.4 uses additive permissions only.
+### RULE-AUTH-009 — Platform administration does not imply business-data access
 
-Effective permissions are the union of permissions from effective roles.
+Platform Super Admin and other Platform roles control the Security control plane.
 
-There is no `DENY` permission override model in v1.4.
+They do not automatically receive `di.*`, `wpm.*`, or future business-module permissions.
 
-### RULE-AUTH-009 — Platform administration does not grant business-data access
-
-Platform Super Admin and other platform administrative roles control the Security control plane.
-
-They do not automatically receive `di.*`, `wpm.*`, or future module business permissions.
-
-A Platform Super Admin token MUST NOT be accepted as a normal DI/WPM Tenant business token.
+A Platform Admin token MUST NOT be accepted as a normal DI/WPM business token.
 
 ---
 
@@ -220,83 +217,79 @@ A Platform Super Admin token MUST NOT be accepted as a normal DI/WPM Tenant busi
 ```text
 Module
   |
-  +-- Permission definitions
+  +-- Permissions
   |
-  +-- Module role templates
+  +-- Module Role Templates
 
-Security Tenant
+Tenant
   |
-  +-- Tenant roles
+  +-- Tenant Roles
   |     |
-  |     +-- materialized permissions
+  |     +-- materialized registered permissions
   |     +-- optional template provenance
   |
   +-- Groups
   |     |
-  |     +-- Users
-  |     +-- Tenant roles
+  |     +-- USER memberships
+  |     +-- Tenant Role assignments
   |
-  +-- Direct user-role assignments
+  +-- Direct USER Role assignments
   |
-  +-- Explicit user-location/schedule assignments
+  +-- Explicit USER Location/Schedule assignments
 
-Effective USER roles
-  = direct Tenant roles
-  + roles inherited through active groups
+Effective USER Roles
+  = Direct ACTIVE Tenant Roles
+  + ACTIVE Tenant Roles inherited from ACTIVE Groups
 
-Effective USER permissions
-  = union of ACTIVE permissions on all effective ACTIVE roles
+Effective USER Permissions
+  = union of ACTIVE permissions on Effective USER Roles
 ```
 
-Groups and module templates are administration abstractions. Modules consume effective permissions from the
-Security JWT and do not need to understand groups or templates.
+Groups and module templates are Security administration concepts. Business modules do not need them in order to
+authorize a request.
 
 ---
 
-## 5. Standard administrative role catalogue
+## 5. Reserved standard administrative role catalogue
 
-Standard administrative role keys are reserved by Security.
+The following role keys are reserved by Security.
 
-Tenant administrators may create additional business roles but MUST NOT create another role using a reserved
-standard administrative role key.
+Tenant-created business roles MUST NOT use `platform.*` or the reserved `tenant.*` keys below.
 
 ### 5.1 Platform roles
 
-| Role key | Display name | Scope | Purpose |
-|---|---|---|---|
-| `platform.super_admin` | Platform Super Admin | Platform | Highest Security control-plane authority |
-| `platform.security_admin` | Platform Security Admin | Platform | Security platform configuration and security operations |
-| `platform.module_catalog_admin` | Module Catalog Admin | Platform | Module, permission and role-template catalogue administration |
-| `platform.auditor` | Platform Auditor | Platform | Read-only control-plane and cross-Tenant Security audit visibility |
+| Role key | Display name | Purpose |
+|---|---|---|
+| `platform.super_admin` | Platform Super Admin | Highest Security control-plane authority |
+| `platform.security_admin` | Platform Security Admin | Security platform configuration and security operations |
+| `platform.module_catalog_admin` | Module Catalog Admin | Module/permission/template catalogue administration |
+| `platform.auditor` | Platform Auditor | Read-only Platform and cross-Tenant Security audit visibility |
 
 ### 5.2 Tenant administrative roles
 
-| Role key | Display name | Scope | Purpose |
-|---|---|---|---|
-| `tenant.owner` | Tenant Owner | One Tenant | Highest authority inside one Tenant |
-| `tenant.admin` | Tenant Admin | One Tenant | Day-to-day Tenant administration |
-| `tenant.user_admin` | User Admin | One Tenant | Member invitation and lifecycle administration |
-| `tenant.rbac_admin` | Role & Group Admin | One Tenant | Roles, groups, permissions and assignments |
-| `tenant.access_admin` | Access Admin | One Tenant | Locations, schedules and devices |
-| `tenant.security_policy_admin` | Security Policy Admin | One Tenant | Security/retention policy administration |
-| `tenant.security_approver` | Security Approver | One Tenant | Maker-checker approval for privileged access |
-| `tenant.auditor` | Tenant Auditor | One Tenant | Read-only Tenant Security audit/review |
+| Role key | Display name | Purpose |
+|---|---|---|
+| `tenant.owner` | Tenant Owner | Highest authority inside one Tenant |
+| `tenant.admin` | Tenant Admin | Day-to-day Tenant Security administration |
+| `tenant.user_admin` | User Admin | Member invitation and lifecycle administration |
+| `tenant.rbac_admin` | Role & Group Admin | Roles, Groups and assignment administration |
+| `tenant.access_admin` | Access Admin | Locations, schedules and device administration |
+| `tenant.security_policy_admin` | Security Policy Admin | Tenant Security/retention policy administration |
+| `tenant.security_approver` | Security Approver | Maker-checker approval for privileged access |
+| `tenant.auditor` | Tenant Auditor | Read-only Tenant Security audit/review |
 
 ### 5.3 Business roles
 
-Business/application roles are Tenant-defined and are not part of the reserved Security administrative role
-catalogue.
+Business/application roles are Tenant-defined.
 
-Examples such as Process Consultant, Team Lead, Project Manager, Finance User, Delivery User, or business
-Auditor are created by a Tenant from registered module permissions/templates.
-
-Security MUST NOT hard-code these business role names into application authorization logic.
+Examples such as Process Consultant, Team Lead, Project Manager, Finance User, or Delivery User are not reserved
+Security roles and MUST NOT be hard-coded into module authorization logic.
 
 ---
 
-## 6. Security administration permission catalogue
+## 6. Canonical Security Admin permission catalogue
 
-The following `security.*` permission keys are the v1.4 control-plane contract.
+These permission keys are frozen for v1.4.
 
 ### 6.1 Platform permissions
 
@@ -317,8 +310,8 @@ security.permission.read
 security.audit.read
 ```
 
-`security.tenant.activate` is reserved by the catalogue but its mutation endpoint MUST remain disabled until the
-complete Tenant activation prerequisite contract is approved.
+`security.tenant.activate` is reserved, but its mutation endpoint remains disabled until the complete Tenant
+activation prerequisite catalogue is approved.
 
 ### 6.2 Tenant member permissions
 
@@ -350,7 +343,7 @@ security.role.assign
 security.permission.read
 ```
 
-### 6.5 Access-control administration permissions
+### 6.5 Location/schedule/device permissions
 
 ```text
 security.location.read
@@ -366,10 +359,10 @@ security.device.block
 security.device.revoke
 ```
 
-The business distinction between device `BLOCKED` and `REVOKED` remains separately open and MUST be frozen
-before the two mutation endpoints are implemented.
+`security.device.block` and `security.device.revoke` are reserved now, but the two mutations remain disabled until
+the separate BLOCKED-versus-REVOKED business-semantics decision is frozen.
 
-### 6.6 Policy and approval permissions
+### 6.6 Policy/approval/audit permissions
 
 ```text
 security.policy.read
@@ -382,38 +375,25 @@ security.audit.read
 
 ---
 
-## 7. Standard role permission bundles
+## 7. Exact standard role permission bundles
 
-### 7.1 Platform Super Admin
+### 7.1 `platform.super_admin`
 
-`platform.super_admin` receives every Platform `security.*` permission required to:
+Receives all Platform permissions from section 6.1.
 
-- manage platform administrators;
-- create/read/update/suspend Tenants;
-- bootstrap the first Tenant Owner/Admin invitation;
-- manage the module catalogue;
-- read Security audit information;
-- manage Security platform configuration.
+It does not receive business-module permissions automatically.
 
-It does not automatically receive module business permissions.
-
-### 7.2 Platform Security Admin
-
-`platform.security_admin` receives:
+### 7.2 `platform.security_admin`
 
 ```text
 security.security_config.read
 security.security_config.manage
-security.tenant.read
 security.platform_admin.read
+security.tenant.read
 security.audit.read
 ```
 
-It does not create Tenants or manage module catalogues unless separately granted.
-
-### 7.3 Module Catalog Admin
-
-`platform.module_catalog_admin` receives:
+### 7.3 `platform.module_catalog_admin`
 
 ```text
 security.module.read
@@ -422,93 +402,171 @@ security.permission.read
 security.audit.read
 ```
 
-### 7.4 Platform Auditor
+### 7.4 `platform.auditor`
 
-`platform.auditor` receives read-only Platform Security permissions only.
+```text
+security.platform_admin.read
+security.security_config.read
+security.tenant.read
+security.module.read
+security.permission.read
+security.audit.read
+```
 
 No mutation permission is included.
 
-### 7.5 Tenant Owner
+### 7.5 `tenant.owner`
 
-`tenant.owner` receives the full Tenant Security administration set, including policy administration and
-privileged-access approval.
+Receives every Tenant-scoped Security administration permission from sections 6.2 through 6.6.
 
-Self-approval is prohibited even for the Tenant Owner.
+Self-approval of privileged access is still prohibited.
 
-### 7.6 Tenant Admin
-
-`tenant.admin` receives day-to-day administration permissions for:
-
-- members;
-- groups;
-- roles;
-- locations;
-- schedules;
-- devices;
-- read-only policy visibility.
-
-It does not automatically receive `security.policy.update`, `security.retention.update`, or
-`security.privileged_access.approve`.
-
-### 7.7 User Admin
-
-`tenant.user_admin` receives member read/invite/update/suspend/end permissions.
-
-### 7.8 Role & Group Admin
-
-`tenant.rbac_admin` receives group, role, permission-read, and role/group assignment permissions.
-
-### 7.9 Access Admin
-
-`tenant.access_admin` receives location, schedule, and device administration permissions.
-
-### 7.10 Security Policy Admin
-
-`tenant.security_policy_admin` receives Security policy and retention read/update permissions.
-
-### 7.11 Security Approver
-
-`tenant.security_approver` receives:
+### 7.6 `tenant.admin`
 
 ```text
 security.member.read
-security.role.read
+security.member.invite
+security.member.update
+security.member.suspend
+security.member.end
 security.group.read
+security.group.create
+security.group.update
+security.group.assign
+security.role.read
+security.role.create
+security.role.update
+security.role.assign
+security.permission.read
+security.location.read
+security.location.create
+security.location.update
+security.location.assign
+security.schedule.read
+security.schedule.create
+security.schedule.update
+security.device.read
+security.device.approve
+security.device.block
+security.device.revoke
+security.policy.read
+security.retention.read
+security.audit.read
+```
+
+It does not receive:
+
+```text
+security.policy.update
+security.retention.update
+security.privileged_access.approve
+```
+
+### 7.7 `tenant.user_admin`
+
+```text
+security.member.read
+security.member.invite
+security.member.update
+security.member.suspend
+security.member.end
+```
+
+### 7.8 `tenant.rbac_admin`
+
+```text
+security.member.read
+security.group.read
+security.group.create
+security.group.update
+security.group.assign
+security.role.read
+security.role.create
+security.role.update
+security.role.assign
+security.permission.read
+security.audit.read
+```
+
+### 7.9 `tenant.access_admin`
+
+```text
+security.member.read
+security.location.read
+security.location.create
+security.location.update
+security.location.assign
+security.schedule.read
+security.schedule.create
+security.schedule.update
+security.device.read
+security.device.approve
+security.device.block
+security.device.revoke
+security.audit.read
+```
+
+### 7.10 `tenant.security_policy_admin`
+
+```text
+security.policy.read
+security.policy.update
+security.retention.read
+security.retention.update
+security.audit.read
+```
+
+### 7.11 `tenant.security_approver`
+
+```text
+security.member.read
+security.group.read
+security.role.read
+security.permission.read
 security.privileged_access.approve
 security.audit.read
 ```
 
-### 7.12 Tenant Auditor
+### 7.12 `tenant.auditor`
 
-`tenant.auditor` receives read-only Tenant Security permissions for members, groups, roles, permissions,
-locations, schedules, devices, policies, and audit evidence.
+```text
+security.member.read
+security.group.read
+security.role.read
+security.permission.read
+security.location.read
+security.schedule.read
+security.device.read
+security.policy.read
+security.retention.read
+security.audit.read
+```
 
 ---
 
 ## 8. Group model
 
-### RULE-GROUP-001 — Groups are Tenant-scoped
+### RULE-GROUP-001 — Tenant-scoped only
 
-Every group belongs to exactly one Tenant.
+Every Group belongs to exactly one Tenant.
 
-### RULE-GROUP-002 — Group names are Tenant-defined
+### RULE-GROUP-002 — Tenant-defined names
 
-v1.4 does not mandate group names such as Sales, Finance, or Delivery.
+No mandatory Group-name catalogue exists in v1.4.
 
-Examples are allowed, but there is no global standard group-name catalogue.
+Tenants may create names such as Sales Team, Delivery Team, Chandigarh Showroom, or any other organization-appropriate
+name.
 
-### RULE-GROUP-003 — No nested groups in v1.4
+### RULE-GROUP-003 — No nested Groups
 
-A group cannot contain another group.
+A Group cannot contain another Group in v1.4.
 
-This prevents recursive authorization resolution and circular memberships.
+### RULE-GROUP-004 — Group receives Roles, not Permissions
 
-### RULE-GROUP-004 — Groups receive roles, never permissions directly
-
-Correct:
+Allowed:
 
 ```text
-Group -> Tenant Role -> Permissions
+Group -> Tenant Role -> Permission
 ```
 
 Not allowed:
@@ -517,76 +575,69 @@ Not allowed:
 Group -> Permission
 ```
 
-### RULE-GROUP-005 — Location access remains explicit per USER
+### RULE-GROUP-005 — No Group-derived location/schedule access
 
-Groups do not grant locations or schedules in v1.4.
+Locations and schedules remain explicit USER assignments.
 
-The existing Security rule that a USER must be explicitly assigned to an approved Tenant location/schedule
-continues unchanged.
+Group membership cannot grant an approved location.
 
-### RULE-GROUP-006 — Effective authorization
+### RULE-GROUP-006 — Effective RBAC
 
-For an ACTIVE Tenant membership:
+For an effective Tenant membership:
 
 ```text
 Effective Roles
-  = ACTIVE direct user-role assignments
-  + ACTIVE roles assigned through ACTIVE group memberships
+  = ACTIVE direct USER Role assignments
+  + ACTIVE Role assignments from ACTIVE Group memberships
 
 Effective Permissions
-  = ACTIVE permissions on all Effective Roles
+  = union of ACTIVE permissions on all Effective Roles
 ```
 
 ---
 
-## 9. Authorization version semantics
+## 9. RBAC authorization-version semantics
 
-This document resolves the Phase 5 `authorization_version` ambiguity for RBAC changes.
+This section resolves the former Phase 5 `authorization_version` ambiguity for RBAC changes.
 
 ### RULE-AUTHVER-001
 
-`tenant_memberships.authorization_version` represents the version of the USER's effective Tenant RBAC
-authorization.
+`tenant_memberships.authorization_version` is the version of a USER's effective Tenant RBAC authorization.
 
 ### RULE-AUTHVER-002
 
-The value MUST increment transactionally when an administrative change affects a USER's effective permissions,
-including:
+It MUST increment transactionally when a change affects that USER's effective permissions:
 
-- direct user-role assignment added/ended;
-- group membership added/ended;
-- group-role assignment added/ended;
-- role status change affecting the USER;
-- role-permission grant added/ended for an effective role;
-- permission lifecycle change that removes an effective permission.
+- direct USER Role assignment added/ended;
+- Group membership added/ended;
+- Group Role assignment added/ended;
+- effective Role changed from ACTIVE to INACTIVE or vice versa;
+- Role Permission added/removed for an effective Role;
+- effective Permission lifecycle changed so it no longer grants access.
 
 ### RULE-AUTHVER-003
 
-If a role/group change affects multiple users, every affected ACTIVE/PENDING Tenant membership must receive the
-increment in the same logical administration transaction.
+If one Role/Group change affects multiple users, every affected Tenant membership receives an increment in the
+same logical administration transaction.
 
 ### RULE-AUTHVER-004
 
-Location, schedule, and device changes remain access-context controls and are not redefined as RBAC
-`authorization_version` events by this document.
-
-Their existing lifecycle enforcement remains separate.
+Location, schedule and device changes remain access-context controls. This document does not redefine them as
+RBAC authorization-version events.
 
 ---
 
-## 10. Module catalogue model
+## 10. Module catalogue and role-template model
 
-Security maintains the authoritative copy of every registered module's permissions and optional role templates.
+### 10.1 Ownership
 
-### 10.1 Module catalogue API
+Security stores the authoritative registered catalogue. Each module owns only its own namespace.
 
-Initial v1.4 operation:
+### 10.2 Initial module catalogue API
 
 ```text
 PUT /security/v1/platform/modules/{moduleKey}/catalog
 ```
-
-The update is atomic for one module catalogue version.
 
 Conceptual request:
 
@@ -599,13 +650,14 @@ Conceptual request:
     {
       "key": "di.document.upload",
       "name": "Upload Document",
-      "description": "Upload one document within an authorized Tenant context"
+      "description": "Upload a document inside an authorized Tenant context"
     }
   ],
   "roleTemplates": [
     {
       "key": "di.document_operator",
       "name": "Document Operator",
+      "description": "Standard DI document-intake template",
       "permissions": [
         "di.subject.create",
         "di.subject.read",
@@ -617,58 +669,60 @@ Conceptual request:
 }
 ```
 
-The exact OpenAPI schema will be generated from this design before route implementation.
+### 10.3 Catalogue rules
 
-### 10.2 Catalogue update rules
+1. `moduleKey` is immutable after registration.
+2. every permission key must belong to `{moduleKey}.*`.
+3. every template key must belong to `{moduleKey}.*`.
+4. a template may reference only the same module's permissions.
+5. duplicate permission/template keys are rejected.
+6. one module cannot mutate another namespace.
+7. update is atomic for one catalogue version.
+8. permission lifecycle is `ACTIVE -> DEPRECATED -> RETIRED`.
+9. a RETIRED permission cannot be assigned to a new/updated Tenant role.
+10. a permission referenced by effective Tenant roles cannot be retired silently.
+11. attempted retirement with active references is rejected and returns affected-role information.
+12. a template update never mutates existing Tenant roles automatically.
+13. applying/upgrading a template is an explicit Tenant/Platform administration action.
+14. Security records the template/version provenance used to construct a Tenant role.
+15. module catalogue synchronization never grants a permission directly to a user.
 
-1. `moduleKey` is immutable once registered.
-2. every published permission must belong to the same module namespace.
-3. every role template must contain only permissions owned by the same module.
-4. catalogue update is atomic.
-5. duplicate permission keys are rejected.
-6. a module cannot overwrite Security or another module's catalogue.
-7. removal from a new manifest does not silently delete a permission used by Tenant roles.
-8. permissions follow lifecycle `ACTIVE -> DEPRECATED -> RETIRED`.
-9. `RETIRED` cannot become effective in new role configuration.
-10. existing Tenant roles do not automatically change when a template changes.
-11. template changes produce impact information for administrators.
-12. template upgrade of a Tenant role is an explicit administration action.
+### 10.4 Initial caller model
 
-### 10.3 Initial caller model
+First implementation allows catalogue mutation by:
 
-The first implementation allows catalogue mutation by Platform Super Admin or Module Catalog Admin.
+- Platform Super Admin; or
+- Module Catalog Admin.
 
-Future SYSTEM/SERVICE_INTEGRATION-based CI synchronization may be added after the machine-principal phase. It is
-not required for the first Admin Control Plane release.
+Automated SYSTEM/SERVICE_INTEGRATION CI synchronization is deferred until the machine-principal phase.
 
-### 10.4 Runtime independence
+### 10.5 Runtime independence
 
-DI/WPM do not call the module catalogue API for each business request.
+No business request requires a DI/WPM-to-Security catalogue call.
 
-Catalogue synchronization is a deployment/administration concern.
-
-Runtime authorization remains local JWT verification:
+Runtime remains:
 
 ```text
-Security JWT -> module JWKS verification -> permissions[] check -> business operation
+Security JWT
+   -> local module JWKS verification
+   -> permissions[] check
+   -> module business operation
 ```
 
 ---
 
-## 11. DI catalogue mapping
+## 11. DI initial catalogue mapping
 
-At the reviewed DI baseline, `backend/src/verigence/di/auth/permissions.py` defines 28 canonical permissions and
+At the reviewed DI baseline, `backend/src/verigence/di/auth/permissions.py` contains 28 `di.*` permissions and
 eight role bundles.
 
-### 11.1 DI permissions
+### 11.1 Permission manifest
 
-The existing 28 `di.*` values are the initial DI permission manifest. They are not renamed by Security v1.4.
+The existing 28 `di.*` values are the initial DI permission manifest. Security does not rename them.
 
-### 11.2 DI human role templates to publish
+### 11.2 Human-facing module role templates
 
-The following existing DI bundles become module role templates:
-
-| Current DI bundle | Security module template key |
+| Current DI bundle | v1.4 module template key |
 |---|---|
 | `DOCUMENT_OPERATOR` | `di.document_operator` |
 | `DOCUMENT_VERIFIER` | `di.document_verifier` |
@@ -676,29 +730,27 @@ The following existing DI bundles become module role templates:
 | `UNASSIGNED_INTAKE_OPERATOR` | `di.unassigned_intake_operator` |
 | `CONFIGURATION_ADMIN` | `di.configuration_admin` |
 
-### 11.3 DI bundles that do not become Tenant business-role authority
+### 11.3 Existing DI bundles not imported as Tenant USER role authority
 
-- DI `TENANT_ADMIN` is not imported as the authoritative Tenant Admin role. Tenant administration belongs to
-  Security standard roles.
-- DI `SERVICE_INTEGRATION` is treated as a machine permission profile, not a USER Tenant role template.
-- DI `PLATFORM_ADMIN` is treated as a platform/system permission profile, not a USER Tenant role template.
+- `TENANT_ADMIN`: not imported as the authoritative Tenant Admin role. Security owns Tenant administration.
+- `SERVICE_INTEGRATION`: treated as a future machine permission profile, not a USER Tenant-role template.
+- `PLATFORM_ADMIN`: treated as a platform/system profile, not a USER Tenant-role template.
 
 ### 11.4 DI runtime rule
 
-DI continues checking `permissions[]` and MUST NOT require a DI role name for authorization.
+DI continues authorizing on `permissions[]`. Role names remain informational only.
 
 ---
 
 ## 12. Required DI alignment changes
 
-These are implementation tasks discovered from the actual DI `dev` code and are part of the cross-module
-integration plan.
+These items are grounded in the reviewed DI `dev` code.
 
-### DI-ALIGN-001 — Actor type alignment
+### DI-ALIGN-001 — Exact actor types
 
 DI currently models `SERVICE`; Security models `SERVICE_INTEGRATION`.
 
-DI must use the exact Security actor-type values:
+DI must use:
 
 ```text
 USER
@@ -706,22 +758,22 @@ SYSTEM
 SERVICE_INTEGRATION
 ```
 
-An unknown Security actor type MUST fail closed. It MUST NOT default to `USER`.
+Unknown actor types MUST fail closed. They MUST NOT default to USER.
 
-### DI-ALIGN-002 — SYSTEM Tenant scope
+### DI-ALIGN-002 — Tenant-scoped SYSTEM
 
-Security's Tenant operational SYSTEM model is Tenant-scoped.
+Security's operational SYSTEM model is Tenant-scoped.
 
-DI must not reject a legitimate Tenant-scoped SYSTEM token merely because `tenant_id` exists.
+DI must not reject a legitimate SYSTEM token merely because it carries `tenant_id`.
 
-Platform Super Admin authentication is a separate control-plane token and is not a SYSTEM actor token.
+Platform Admin authentication is separate and is not a SYSTEM token.
 
 ### DI-ALIGN-003 — Tenant path consistency
 
-DI currently contains both `{tenantId}` and `{tenant_id}` route parameter styles while the shared Tenant
-dependency expects `tenantId`.
+DI currently contains `{tenantId}` and `{tenant_id}` path styles while its shared Tenant dependency expects
+`tenantId`.
 
-All public DI Tenant routes must be normalized to the approved OpenAPI path parameter naming, and CI must prove:
+Public Tenant routes must be normalized to the approved DI OpenAPI naming and CI must prove:
 
 ```text
 JWT Tenant A + URL Tenant B -> 403
@@ -729,90 +781,93 @@ JWT Tenant A + URL Tenant B -> 403
 
 for every Tenant-scoped router.
 
-### DI-ALIGN-004 — Endpoint permission completeness
+### DI-ALIGN-004 — Exact endpoint permission coverage
 
-Some older DI read routes currently verify Tenant identity without enforcing their specific read permission.
+Every DI operation must be checked against DI OpenAPI `x-required-permissions`.
 
-Every DI operation must be audited against the DI OpenAPI `x-required-permissions` contract.
+Older read endpoints that currently verify only Tenant identity must also enforce their canonical read permission
+when the DI contract specifies one.
 
-Examples that require correction include basic Subject/Document reads where a canonical read permission already
-exists.
+### DI-ALIGN-005 — Recovery-document alignment
 
-### DI-ALIGN-005 — Documentation alignment
-
-DI recovery documentation must be updated to remove obsolete Clerk-direct authorization guidance where current
-code already expects Security-issued JWT + Security JWKS.
+DI recovery documents containing obsolete Clerk-direct authorization guidance must be updated to the actual
+Security JWT/JWKS model.
 
 ---
 
-## 13. Platform Super Admin bootstrap
+## 13. Platform Super Admin bootstrap and authentication
 
-A Platform Super Admin is required before any Tenant exists.
+### RULE-BOOT-001 — Separate from Tenant RBAC
 
-Tenant RBAC cannot bootstrap Tenant creation because there is no Tenant membership yet.
+The Platform Super Admin is a Security USER principal with a Platform role assignment. It is not assigned to a
+fake/bootstrap Tenant.
 
-### RULE-BOOT-001 — Platform Super Admin is outside Tenant RBAC
-
-The Platform Super Admin is a Security USER principal with a Platform role assignment, not a role inside an
-arbitrary Tenant.
-
-### RULE-BOOT-002 — No bootstrap credential in source control
+### RULE-BOOT-002 — Temporary DEV password remains a secret
 
 The operator has selected a temporary DEV bootstrap password.
 
-The literal credential MUST NOT be committed to Git, documentation, test fixtures, logs, or container images.
+The literal value MUST NOT appear in:
 
-It must be supplied through environment/secret configuration and stored only as an Argon2id password hash.
+- Git;
+- this document;
+- `.env.example`;
+- tests/fixtures;
+- logs;
+- container images;
+- database plaintext.
 
-### RULE-BOOT-003 — No hard-coded login identifier
+It is supplied through the deployment secret/environment configuration and stored only as an Argon2id hash.
+
+### RULE-BOOT-003 — Login identifier is explicit input
 
 No default username/email is invented by this design.
 
-The bootstrap login identifier is supplied explicitly through deployment configuration.
+Deployment must provide an explicit bootstrap login identifier.
 
-### RULE-BOOT-004 — Bootstrap is DEV-controlled and idempotent
+### RULE-BOOT-004 — Startup bootstrap is idempotent
 
-Initial implementation uses a startup/bootstrap service controlled by environment configuration.
+Initial implementation uses deployment-controlled bootstrap logic, not a permanent unauthenticated bootstrap
+HTTP endpoint.
 
-It creates the first Platform Super Admin only when:
+The bootstrap service creates the first Platform Super Admin only when:
 
-- the environment permits bootstrap; and
-- no Platform Super Admin exists.
+- bootstrap is permitted in the current environment; and
+- no Platform Super Admin assignment exists.
 
-It MUST NOT reset an existing administrator's password on subsequent starts.
+Restarting the service MUST NOT reset an existing password.
 
-### RULE-BOOT-005 — First-login password change
+### RULE-BOOT-005 — Mandatory first password change
 
-The bootstrap credential is temporary.
+The bootstrap credential is created with:
 
-The created local credential is marked `must_change_password=true`.
+```text
+must_change_password = true
+```
 
-Before normal control-plane mutations are allowed, the bootstrap administrator must set a replacement password.
+Successful initial login may only be used to complete the password change before normal mutation APIs are
+available.
 
-### RULE-BOOT-006 — Platform admin token
+### RULE-BOOT-006 — Dedicated Platform Admin JWT
 
-Platform admin login issues a dedicated Security control-plane JWT with a separate audience from ordinary Tenant
-business tokens.
-
-Target audience:
+Platform login issues a dedicated control-plane token with audience:
 
 ```text
 verigence-security-admin
 ```
 
-The token contains Platform role/permission claims and no Tenant business context.
+It contains Platform roles/permissions and no Tenant business access context.
 
-DI/WPM MUST reject this token as a normal business token.
+DI/WPM business APIs MUST reject it.
 
 ---
 
-## 14. Tenant creation and activation
+## 14. Tenant creation and first administrator
 
-### RULE-TENANT-001 — Tenant creation is direct Platform administration
+### RULE-TENANT-001 — Direct Platform creation
 
-For the current release, Tenant creation is performed directly by Platform Super Admin.
+Tenant creation is performed directly by Platform Super Admin.
 
-There is no Tenant-creation request/approval workflow.
+There is no Tenant-creation request/approval workflow in this release.
 
 ### RULE-TENANT-002 — New Tenant starts CONFIGURING
 
@@ -820,86 +875,122 @@ There is no Tenant-creation request/approval workflow.
 POST /security/v1/platform/tenants
 ```
 
-creates the Tenant in `CONFIGURING` state.
+creates:
 
-### RULE-TENANT-003 — Tenant activation is not bypassed
+```text
+status = CONFIGURING
+```
 
-Direct Tenant creation does not imply automatic activation.
+### RULE-TENANT-003 — Standard Tenant Admin roles are seeded on creation
 
-`security.tenant.activate` is reserved, but actual activation remains fail-closed until the complete approved
-activation prerequisite catalogue is frozen.
+The eight reserved Tenant administrative roles from section 5.2 and their bundles from section 7 are created for
+the new Tenant in the same Tenant-provisioning transaction.
 
-This design does not introduce a hidden `CONFIGURING -> ACTIVE` bypass.
+No business role is created automatically.
 
-### RULE-TENANT-004 — First Tenant Owner is invited
+### RULE-TENANT-004 — Activation remains fail-closed
 
-After Tenant creation, Platform Super Admin can initiate the first Tenant Owner invitation.
+Direct Tenant creation does not bypass SEC-032 readiness.
 
-The person must explicitly accept membership before the Tenant Owner role becomes effective.
+The actual `CONFIGURING -> ACTIVE` mutation remains disabled until the complete activation prerequisite catalogue
+is approved.
+
+### RULE-TENANT-005 — First Tenant Owner uses invitation/acceptance
+
+Platform Super Admin creates the first Tenant Owner invitation.
+
+The Owner role becomes effective only after recipient acceptance and the required privileged-access approval
+rule. For the first Owner, Platform Super Admin is the authorized approver and cannot be the invitee/subject.
 
 ---
 
 ## 15. Team-member onboarding and human acceptance
 
-Human acceptance remains mandatory for Tenant team-member onboarding.
+### 15.1 Invitation request model
 
-### 15.1 Normal onboarding flow
+Conceptual Tenant Admin request:
 
-```text
-Authorized Tenant Admin
-        |
-        | creates invitation
-        v
-USER status = INVITED
-Tenant membership = PENDING
-Invitation = PENDING
-        |
-        | recipient authenticates and explicitly accepts
-        v
-Security binds/validates external identity
-        |
-        v
-Membership -> ACTIVE
-User -> ACTIVE (when appropriate)
-Approved roles/groups/locations become effective
+```json
+{
+  "displayName": "Employee Name",
+  "email": "employee@example.com",
+  "mobile": null,
+  "employeeCode": "E123",
+  "roleIds": ["<tenant-role-uuid>"],
+  "groupIds": ["<tenant-group-uuid>"],
+  "locationAssignments": [
+    {
+      "locationId": "<location-uuid>",
+      "scheduleId": "<schedule-uuid>"
+    }
+  ]
+}
 ```
 
-### RULE-ONBOARD-001
+At least one delivery/contact channel is required by the final OpenAPI, but identity is never proven by the
+email/mobile string alone.
 
-An administrator cannot silently activate a new person's Tenant membership without recipient acceptance.
+### 15.2 State before acceptance
 
-### RULE-ONBOARD-002
+Security creates:
 
-An invitation may contain proposed:
+```text
+USER status          = INVITED
+Tenant membership    = PENDING
+Invitation status    = PENDING
+```
 
-- Tenant role assignments;
-- group memberships;
-- explicit location/schedule assignments.
+Proposed roles/groups/locations are not effective.
 
-They do not become effective until the invitation reaches the required acceptance/approval state.
+### 15.3 Acceptance endpoint
 
-### RULE-ONBOARD-003
+```text
+POST /security/v1/onboarding/invitations/{invitationId}/accept
+```
 
-Email/mobile is invitation/contact data, not sufficient proof of user identity.
+Acceptance requires:
 
-Security binds an accepted invitation to the authenticated external identity; it does not infer identity only from
-an email string.
+- an authenticated external identity through the Security identity adapter; and
+- the one-time invitation acceptance token.
 
-### RULE-ONBOARD-004
+Only a hash of the one-time acceptance token is stored.
 
-Live Clerk invitation/provider orchestration remains a separate provider-integration task.
+### 15.4 Normal non-privileged acceptance
 
-The Admin API contract and Security-side state machine are not dependent on Clerk being the only future provider.
+After successful acceptance and revalidation of all referenced Tenant resources:
+
+```text
+Invitation        -> ACCEPTED
+Tenant membership -> ACTIVE
+USER               -> ACTIVE when appropriate
+Approved assignments are materialized
+```
+
+### RULE-ONBOARD-001 — Human acceptance is mandatory
+
+An administrator cannot silently activate a new person's Tenant membership.
+
+### RULE-ONBOARD-002 — Invitation data is proposed access only
+
+Role, Group and location/schedule selections on the invitation are inert until acceptance/approval is complete.
+
+### RULE-ONBOARD-003 — Email/mobile is not identity proof
+
+Security binds an accepted invitation to the authenticated external identity. It does not infer the Security USER
+solely from an email/mobile match.
+
+### RULE-ONBOARD-004 — Provider-neutral state machine
+
+Clerk is the current USER identity provider direction, but the invitation state model is a Security contract and
+must not be coupled to a Clerk-only database schema.
 
 ---
 
 ## 16. Privileged-access maker-checker
 
-Privileged Security administrative assignments require separation of duties.
+### 16.1 Privileged Tenant roles
 
-### 16.1 Privileged standard Tenant roles
-
-The following standard role assignments are privileged in v1.4:
+The following standard role keys require maker-checker:
 
 ```text
 tenant.owner
@@ -910,16 +1001,17 @@ tenant.security_policy_admin
 tenant.security_approver
 ```
 
-`tenant.user_admin` and `tenant.auditor` remain administrative roles but are not automatically placed in the
-maker-checker set by this rule.
+`tenant.user_admin` and `tenant.auditor` are not automatically in the maker-checker set in v1.4.
 
-### RULE-PRIV-001 — Requester cannot approve own request
+### RULE-PRIV-001 — No self-approval
 
-The user who creates a privileged-access request cannot be its approver.
+The requester cannot approve their own privileged-access request.
+
+The subject of the role assignment cannot approve their own request.
 
 ### RULE-PRIV-002 — Approver permission
 
-Approver must hold:
+Tenant approver must hold:
 
 ```text
 security.privileged_access.approve
@@ -927,34 +1019,42 @@ security.privileged_access.approve
 
 within the same Tenant.
 
-### RULE-PRIV-003 — New-member privileged onboarding
+### RULE-PRIV-003 — New privileged member
 
-If an invitation includes a privileged role, the membership/privileged assignments become effective only after:
+For a new-member invitation containing one or more privileged roles:
 
-1. recipient acceptance; and
-2. approval by a different authorized Security Approver/Tenant Owner.
+1. recipient accepts invitation;
+2. a separate privileged-access request exists for each privileged Role assignment;
+3. a different authorized approver approves each required request;
+4. membership/assignments become effective only when all required approvals succeed.
 
-### RULE-PRIV-004 — Existing-member privileged assignment
+### RULE-PRIV-004 — Existing member
 
-Adding a privileged role to an existing member creates a pending privileged-access request. The role assignment
-is materialized only after approval.
+Adding a privileged Role to an existing member creates a pending privileged-access request. No active Role
+assignment is created before approval.
 
 ---
 
-## 17. Admin API surface
+## 17. Admin API contract plan
 
-The API is split into Platform and Tenant control planes.
+The exact OpenAPI file will be generated from these frozen operations before route implementation.
 
 ### 17.1 Platform authentication
 
-| Method | Path | Purpose |
+| Method | Path | Authentication |
 |---|---|---|
-| POST | `/security/v1/platform/auth/login` | Local Platform Admin login |
-| POST | `/security/v1/platform/auth/change-password` | Mandatory/normal password change |
-| GET | `/security/v1/platform/me` | Current Platform admin identity/permissions |
+| POST | `/security/v1/platform/auth/login` | login name + password |
+| POST | `/security/v1/platform/auth/change-password` | Platform bootstrap/admin token |
+| GET | `/security/v1/platform/me` | Platform Admin JWT |
 
-Bootstrap account creation is deployment-controlled and is not exposed as a permanent unauthenticated public
-endpoint.
+Conceptual login request:
+
+```json
+{
+  "loginName": "<deployment-configured-login>",
+  "password": "<secret>"
+}
+```
 
 ### 17.2 Platform Tenant APIs
 
@@ -966,8 +1066,16 @@ endpoint.
 | PATCH | `/security/v1/platform/tenants/{tenantId}` | `security.tenant.update` |
 | POST | `/security/v1/platform/tenants/{tenantId}/owner-invitations` | `security.tenant.bootstrap_admin` |
 
-A future activation endpoint uses `security.tenant.activate` but is not enabled until activation prerequisites are
-frozen.
+Conceptual create-Tenant request:
+
+```json
+{
+  "tenantCode": "ABC-MOTORS",
+  "tenantName": "ABC Motors"
+}
+```
+
+No default Tenant code/name is invented.
 
 ### 17.3 Module catalogue APIs
 
@@ -977,7 +1085,7 @@ frozen.
 | GET | `/security/v1/platform/modules/{moduleKey}` | `security.module.read` |
 | PUT | `/security/v1/platform/modules/{moduleKey}/catalog` | `security.module.manage` |
 
-### 17.4 Tenant membership/onboarding APIs
+### 17.4 Member/invitation APIs
 
 | Method | Path | Permission / rule |
 |---|---|---|
@@ -989,9 +1097,7 @@ frozen.
 | PATCH | `/security/v1/admin/tenants/{tenantId}/members/{userId}` | `security.member.update` |
 | POST | `/security/v1/admin/tenants/{tenantId}/members/{userId}/suspend` | `security.member.suspend` |
 | POST | `/security/v1/admin/tenants/{tenantId}/members/{userId}/end` | `security.member.end` |
-
-Recipient acceptance is a separate authenticated onboarding operation and does not require an administrator
-permission.
+| POST | `/security/v1/onboarding/invitations/{invitationId}/accept` | authenticated invitee + one-time token |
 
 ### 17.5 Group APIs
 
@@ -1006,6 +1112,18 @@ permission.
 | PUT | `/security/v1/admin/tenants/{tenantId}/groups/{groupId}/roles/{roleId}` | `security.group.assign` |
 | DELETE | `/security/v1/admin/tenants/{tenantId}/groups/{groupId}/roles/{roleId}` | `security.group.assign` |
 
+Conceptual create-Group request:
+
+```json
+{
+  "groupKey": "CHANDIGARH-SALES",
+  "groupName": "Chandigarh Sales Team",
+  "description": null
+}
+```
+
+Group keys/names are Tenant inputs, not standard global values.
+
 ### 17.6 Role APIs
 
 | Method | Path | Permission |
@@ -1018,8 +1136,26 @@ permission.
 | DELETE | `/security/v1/admin/tenants/{tenantId}/roles/{roleId}/permissions/{permissionKey}` | `security.role.update` |
 | PUT | `/security/v1/admin/tenants/{tenantId}/members/{userId}/roles/{roleId}` | `security.role.assign` |
 | DELETE | `/security/v1/admin/tenants/{tenantId}/members/{userId}/roles/{roleId}` | `security.role.assign` |
+| POST | `/security/v1/admin/tenants/{tenantId}/roles/{roleId}/template-upgrades` | `security.role.update` |
 
-Privileged standard roles use the maker-checker flow rather than immediate assignment.
+Conceptual create-Role request:
+
+```json
+{
+  "roleKey": "PROCESS_CONSULTANT",
+  "roleName": "Process Consultant",
+  "description": null,
+  "templateKeys": [
+    "di.document_operator"
+  ],
+  "permissionKeys": [
+    "wpm.task.read",
+    "wpm.task.update"
+  ]
+}
+```
+
+Only registered ACTIVE permissions/templates can be used.
 
 ### 17.7 Permission/template discovery
 
@@ -1028,14 +1164,7 @@ Privileged standard roles use the maker-checker flow rather than immediate assig
 | GET | `/security/v1/admin/tenants/{tenantId}/permissions` | `security.permission.read` |
 | GET | `/security/v1/admin/tenants/{tenantId}/module-role-templates` | `security.permission.read` |
 
-### 17.8 Location/schedule/device/policy APIs
-
-These public routes expose the existing Phase 5 internal administration services.
-
-They MUST use the exact permission keys defined in section 6 and MUST preserve current validated persistence
-behavior rather than introducing a new read/write model.
-
-### 17.9 Privileged approval APIs
+### 17.8 Privileged approval APIs
 
 | Method | Path | Permission |
 |---|---|---|
@@ -1043,155 +1172,286 @@ behavior rather than introducing a new read/write model.
 | POST | `/security/v1/admin/tenants/{tenantId}/privileged-access-requests/{requestId}/approve` | `security.privileged_access.approve` |
 | POST | `/security/v1/admin/tenants/{tenantId}/privileged-access-requests/{requestId}/reject` | `security.privileged_access.approve` |
 
+### 17.9 Existing Phase 5 administration APIs to expose
+
+v1.4 will expose the existing validated internal services for:
+
+- Tenant Security Policy;
+- Security Retention Policy;
+- Tenant locations;
+- schedules/windows;
+- explicit user-location/schedule assignments;
+- device list/approval.
+
+The exact paths follow the same `/security/v1/admin/tenants/{tenantId}/...` control-plane convention and the
+permissions in section 6.
+
+Device block/revoke mutation routes remain disabled until their business distinction is frozen.
+
 ---
 
-## 18. Database extension plan
+## 18. Exact v1.4 logical data contract
 
-Create a new migration. Do not edit v1.3 baseline migration.
-
-Target migration:
+Implementation adds a new migration:
 
 ```text
 migrations/0002_security_admin_control_plane_v1.4.sql
 ```
 
-### 18.1 Platform role/authentication tables
+The final SQL types/lengths must follow the existing v1.3 conventions. The logical columns and relationships
+below are mandatory.
 
-Add:
+### 18.1 `security.platform_roles`
 
 ```text
-security.platform_roles
-security.platform_role_permissions
-security.platform_user_role_assignments
-security.local_user_credentials
+role_key                PK
+role_name
+ description            nullable
+status                  ACTIVE | INACTIVE
+created_at_utc
+updated_at_utc
 ```
 
-`local_user_credentials` stores only a password hash, never plaintext.
+The four Platform roles in section 5.1 are seeded by migration.
 
-### 18.2 Module catalogue tables
-
-Add:
+### 18.2 `security.platform_role_permissions`
 
 ```text
-security.modules
-security.module_role_templates
-security.module_role_template_permissions
-security.role_template_bindings
+role_key                FK -> platform_roles
+permission_key          FK -> permissions
+assigned_at_utc
+PK(role_key, permission_key)
 ```
 
-Extend permission lifecycle to support:
+### 18.3 `security.platform_user_role_assignments`
 
 ```text
-ACTIVE
-DEPRECATED
-RETIRED
+assignment_id           PK
+user_id                 FK -> users
+role_key                FK -> platform_roles
+status                  ACTIVE | ENDED
+assignment_source       BOOTSTRAP | ADMIN
+assigned_by_user_id     nullable FK -> users
+assigned_at_utc
+ended_at_utc            nullable
 ```
 
-The migration may add catalogue display/version metadata to `security.permissions` as required by the final DDL.
+Only one ACTIVE assignment for the same user/Platform role is allowed.
 
-### 18.3 Group tables
+`assigned_by_user_id` may be null only for the initial BOOTSTRAP assignment.
 
-Add:
+### 18.4 `security.local_user_credentials`
 
 ```text
-security.groups
-security.group_memberships
-security.group_role_assignments
+credential_id           PK
+user_id                 FK -> users, unique for v1.4 local-admin auth
+login_name              unique
+password_hash           Argon2id encoded hash
+status                  ACTIVE | REVOKED
+must_change_password    boolean
+password_changed_at_utc nullable
+created_at_utc
+updated_at_utc
 ```
 
-Recommended state values:
+No plaintext password, reset token, or bearer token is stored in this table.
+
+### 18.5 `security.modules`
 
 ```text
-groups: ACTIVE | INACTIVE
-group memberships: ACTIVE | ENDED
-group role assignments: ACTIVE | ENDED
+module_key              PK
+module_name
+catalog_version
+status                  ACTIVE | INACTIVE
+created_at_utc
+updated_at_utc
+updated_by_user_id      FK -> users
 ```
 
-No nested-group relationship table is created.
+### 18.6 `security.permissions` v1.4 extension
 
-### 18.4 Invitation/onboarding tables
+Existing `permission_key`, `module_key`, `resource_key`, `action_key`, and description remain.
 
-Add:
+Add/extend:
 
 ```text
-security.tenant_invitations
+display_name            nullable for migrated legacy rows, required for new catalogue entries
+catalog_version         nullable for migrated legacy rows
+status                  ACTIVE | DEPRECATED | RETIRED
+updated_at_utc          nullable for migrated legacy rows
 ```
 
-The invitation stores an immutable proposed-access snapshot sufficient to materialize roles/groups/location
-assignments after acceptance/approval.
+Existing v1.3 permission keys are not renamed.
 
-Invitation lifecycle:
+### 18.7 `security.module_role_templates`
 
 ```text
-PENDING
-ACCEPTED
-CANCELLED
-EXPIRED
-REJECTED
+template_id             PK
+module_key              FK -> modules
+template_key            unique within module
+template_name
+description             nullable
+catalog_version
+status                  ACTIVE | DEPRECATED | RETIRED
+created_at_utc
+updated_at_utc
 ```
 
-### 18.5 Privileged-access tables
-
-Add:
+### 18.8 `security.module_role_template_permissions`
 
 ```text
-security.privileged_access_requests
+template_id             FK -> module_role_templates
+permission_key          FK -> permissions
+assigned_at_utc
+PK(template_id, permission_key)
 ```
 
-Lifecycle:
+The permission's `module_key` must match the template module.
+
+### 18.9 `security.role_template_bindings`
+
+This is provenance only; runtime authorization still uses `security.role_permissions`.
 
 ```text
-PENDING
-APPROVED
-REJECTED
-CANCELLED
-EXPIRED
+binding_id              PK
+tenant_id               FK -> tenants
+role_id                 FK -> roles
+template_id             FK -> module_role_templates
+applied_catalog_version
+status                  CURRENT | SUPERSEDED
+applied_by_user_id      FK -> users
+applied_at_utc
+superseded_at_utc       nullable
 ```
 
-The record stores requester, subject user, Tenant, requested privileged role(s), approver, decision timestamp,
-and correlation ID.
-
-### 18.6 Structured administration audit
-
-Add a structured administration change record rather than inventing uncontrolled free-text
-`security_events.event_type` values.
-
-Target table:
+### 18.10 `security.groups`
 
 ```text
-security.admin_change_records
+group_id                PK
+tenant_id               FK -> tenants
+group_key
+group_name
+description             nullable
+status                  ACTIVE | INACTIVE
+created_by_user_id      FK -> users
+created_at_utc
+updated_at_utc
+UNIQUE(tenant_id, group_key)
 ```
 
-Minimum fields:
+### 18.11 `security.group_memberships`
 
 ```text
-admin_change_id
+group_membership_id     PK
+tenant_id
+group_id                FK within same Tenant
+user_id                 FK -> users
+status                  ACTIVE | ENDED
+valid_from_utc          nullable
+valid_to_utc            nullable
+added_by_user_id        FK -> users
+added_at_utc
+ended_at_utc            nullable
+```
+
+Only one ACTIVE membership for the same Tenant/Group/USER is allowed.
+
+### 18.12 `security.group_role_assignments`
+
+```text
+assignment_id           PK
+tenant_id
+group_id                FK within same Tenant
+role_id                 FK within same Tenant
+status                  ACTIVE | ENDED
+assigned_by_user_id     FK -> users
+assigned_at_utc
+ended_at_utc            nullable
+```
+
+Only one ACTIVE Group/Role assignment is allowed for the same Tenant/Group/Role.
+
+### 18.13 `security.tenant_invitations`
+
+```text
+invitation_id                 PK
+tenant_id                     FK -> tenants
+invited_user_id               FK -> users
+invitee_email                 nullable
+invitee_mobile                nullable
+employee_code                 nullable
+acceptance_token_hash         unique, never raw token
+proposed_access_json          immutable JSON snapshot
+requires_privileged_approval  boolean
+status                        PENDING | ACCEPTED | CANCELLED | EXPIRED | REJECTED
+invited_by_user_id            FK -> users
+invited_at_utc
+expires_at_utc
+accepted_at_utc               nullable
 correlation_id
-scope_type              PLATFORM | TENANT
-tenant_id               nullable for Platform scope
-actor_user_id
+```
+
+`proposed_access_json` contains only IDs/keys required to materialize the proposed Role, Group and explicit
+location/schedule assignments. All references are revalidated before activation.
+
+### 18.14 `security.privileged_access_requests`
+
+One request represents one privileged Role assignment.
+
+```text
+request_id               PK
+tenant_id                FK -> tenants
+subject_user_id          FK -> users
+role_id                  FK within same Tenant
+source_invitation_id     nullable FK -> tenant_invitations
+status                   PENDING | APPROVED | REJECTED | CANCELLED | EXPIRED
+requested_by_user_id     FK -> users
+requested_at_utc
+approved_by_user_id      nullable FK -> users
+decided_at_utc           nullable
+decision_reason          nullable
+correlation_id
+```
+
+Requester and subject cannot satisfy their own approval requirement.
+
+### 18.15 `security.admin_change_records`
+
+This structured table avoids inventing uncontrolled free-text `security_events.event_type` values.
+
+```text
+admin_change_id          PK
+correlation_id
+scope_type               PLATFORM | TENANT
+tenant_id                nullable FK -> tenants
+actor_user_id            FK -> users
 operation_key
 resource_type
-resource_id
-outcome                 SUCCESS | DENIED | FAILED
-before_state_json
- after_state_json
+resource_id              nullable
+outcome                   SUCCESS | DENIED | FAILED
+before_state_json         nullable
+after_state_json          nullable
 occurred_at_utc
 ```
 
-Every successful Security Admin mutation must have a corresponding structured change record.
+Audit state snapshots MUST redact/exclude:
 
-Denied/failed administrative authorization must remain traceable by correlation ID.
+- passwords;
+- password hashes;
+- invitation raw tokens;
+- JWTs;
+- client secrets;
+- other credentials/secrets.
 
 ---
 
-## 19. JWT contracts
+## 19. Platform/Tenant token contracts
 
-### 19.1 Tenant USER token
+### 19.1 Tenant business/Admin USER token
 
-Existing Verigence Tenant access JWT remains the runtime business token.
+The existing Tenant USER Security JWT remains the token for business modules and Tenant Admin APIs.
 
-Important claims include:
+Relevant claims include:
 
 ```text
 sub
@@ -1205,353 +1465,371 @@ location_id
 authorization_version
 ```
 
-`permissions[]` is authoritative for DI/WPM authorization.
+`permissions[]` is authoritative.
 
-Groups and module templates do not need to be exposed to business modules as authorization claims.
+Group IDs and module-template IDs are not required by modules in JWT claims.
 
 ### 19.2 Platform Admin token
 
-Platform Admin token uses a separate audience:
+Platform Admin token:
 
 ```text
-verigence-security-admin
+issuer   = verigence-security
+audience = verigence-security-admin
 ```
 
-It contains Platform roles and Platform `security.*` permissions.
+It contains Platform roles/permissions and no Tenant business access context.
 
-It contains no Tenant business access context.
+### 19.3 Cross-module acceptance
 
-### 19.3 Cross-module rule
+DI/WPM business APIs accept only the normal business-token audience they are designed to validate.
 
-DI/WPM must accept only the appropriate normal Security business token for business APIs.
-
-They must not treat a Platform Admin token as a substitute for a Tenant business token.
+A Platform Admin token cannot substitute for a Tenant business token.
 
 ---
 
-## 20. Tenant isolation rules for Admin APIs
+## 20. Tenant isolation and relationship rules
 
 1. every Tenant Admin route includes `{tenantId}`;
-2. caller's Security token Tenant must match `{tenantId}`;
-3. Platform token is not accepted on Tenant USER Admin routes unless an explicitly designed Platform endpoint
-   performs that operation;
-4. all Tenant repository mutations are Tenant-scoped;
-5. cross-Tenant identifiers must not be accepted merely because the UUID exists;
-6. group, role, user, location, schedule, device, and invitation relationships must be validated inside the same
+2. Tenant USER token `tenant_id` must equal route `{tenantId}`;
+3. Platform tokens are not accepted on Tenant USER Admin routes;
+4. Group, Role, USER, location, schedule, device, invitation and approval relationships are validated inside one
    Tenant;
-7. CI must include negative cross-Tenant tests for every administration resource family.
+5. knowing a UUID from another Tenant never authorizes its use;
+6. module catalogue is Platform-scoped, not Tenant-scoped;
+7. CI must contain cross-Tenant negative tests for every Tenant Admin resource family.
 
 ---
 
-## 21. Security rules for module catalogue changes
+## 21. Administration audit rules
 
-1. catalogue update requires `security.module.manage`;
-2. request is correlated and audited;
-3. module namespace is validated before DB mutation;
-4. template references must exist in the submitted/current module permission catalogue;
-5. active Tenant roles are not silently changed;
-6. retirement of a permission referenced by effective Tenant roles is rejected or held at `DEPRECATED` until
-   explicit migration;
-7. Security reports affected Tenant roles before template/permission retirement;
-8. module catalogue updates never grant a permission directly to a user;
-9. Tenant Admins may consume registered permissions/templates but cannot create arbitrary new permission keys;
-10. module catalogue history/version must remain traceable.
+### RULE-AUDIT-001
+
+Every successful Admin mutation creates one structured `admin_change_records` entry in the same logical
+transaction where possible.
+
+### RULE-AUDIT-002
+
+Denied and failed administrative operations remain traceable by correlation ID.
+
+### RULE-AUDIT-003
+
+Audit records never contain credential material.
+
+### RULE-AUDIT-004
+
+Module catalogue changes record the module/catalog version and operation in structured before/after state.
+
+### RULE-AUDIT-005
+
+Privileged-access request and decision records remain queryable independently from general Admin change records.
 
 ---
 
 ## 22. No-silent-change rules
 
-The following are explicitly prohibited:
+The following are prohibited:
 
-- changing effective Tenant permissions because a module template changed upstream;
-- adding new permissions to existing Tenant roles without a Tenant/Platform administration action;
-- assigning a privileged admin role without maker-checker approval;
-- activating an invited Tenant member without human acceptance;
-- granting a location through group membership;
-- accepting a Platform Admin token as DI/WPM Tenant access;
-- module runtime authorization based on role names;
+- module template changes silently changing Tenant Roles;
+- module catalogue synchronization directly granting USER permissions;
+- Tenant Admin creating arbitrary unregistered permission keys;
+- direct Group-to-Permission assignment;
+- nested Groups;
+- Group-derived location/schedule access;
+- privileged Role activation without maker-checker;
+- self-approval of privileged access;
+- invited member activation without human acceptance;
 - plaintext password storage;
-- hard-coding the DEV bootstrap password in Git or an image;
-- mutating the immutable v1.3 baseline migration;
-- inventing device BLOCKED/REVOKED semantics before that decision is frozen;
-- enabling Tenant activation before the activation prerequisite catalogue is complete.
+- committing the temporary bootstrap password;
+- Platform Admin token being used for DI/WPM business access;
+- module authorization based on Role names;
+- unknown actor type becoming USER;
+- changing immutable migration `0001_security_baseline_v1.3.sql`;
+- enabling Tenant activation before SEC-032 prerequisites are complete;
+- implementing device BLOCKED/REVOKED mutation semantics by assumption.
 
 ---
 
 ## 23. Implementation sequence
 
-The current Phase 5 internal services are retained. The next implementation is the Admin Control Plane, not Phase
-6 machine actors.
+The Admin Control Plane remains the primary workstream before Phase 6 machine actors.
 
-### Increment A — v1.4 schema and standard catalogue
+### Increment A — v1.4 schema + standard catalogues
 
 Implement:
 
-- migration `0002_security_admin_control_plane_v1.4.sql`;
-- `security.*` permission seeds;
-- standard Platform roles;
-- standard Tenant administrative role seeding logic;
-- group/module/invitation/approval/audit persistence.
+- `0002_security_admin_control_plane_v1.4.sql`;
+- `security.*` permissions from section 6;
+- standard Platform Role seeds/bundles;
+- standard Tenant Admin Role definitions/seeding service;
+- module/template persistence;
+- Groups persistence;
+- invitation persistence;
+- privileged request persistence;
+- structured Admin audit persistence.
 
 Definition of done:
 
-- migration passes on real Neon;
-- baseline v1.3 remains byte-identical;
-- all FK/unique/check constraints validated;
-- rollback/duplicate safety covered.
+- v1.3 migration checksum unchanged;
+- migration succeeds on real Neon;
+- constraints/uniqueness/cross-Tenant FK behavior tested;
+- standard permission/Role bundles match sections 6/7 exactly.
 
-### Increment B — Platform Super Admin bootstrap and login
+### Increment B — Platform Super Admin bootstrap + direct Tenant creation
 
 Implement:
 
-- environment-secret bootstrap;
-- Argon2id password hashing;
-- first-login password change;
+- deployment-secret bootstrap;
+- Argon2id credential hashing;
+- mandatory first password change;
 - Platform Admin JWT;
-- Platform Tenant create/list/get/update;
-- first Tenant Owner invitation creation.
+- Platform login/me/change-password APIs;
+- Tenant create/list/get/update APIs;
+- standard Tenant Admin Role seed transaction;
+- first Owner invitation API.
 
 Definition of done:
 
-- plaintext bootstrap password absent from repo, DB, logs, test snapshots;
-- bootstrap cannot overwrite existing account;
+- literal bootstrap credential absent from Git/DB/logs;
+- bootstrap cannot overwrite an existing administrator;
 - wrong password fails closed;
-- Platform Admin token rejected by DI business API;
-- Tenant created as `CONFIGURING`.
+- Platform token rejected by DI business API;
+- new Tenant is `CONFIGURING`.
 
-### Increment C — Module catalogue API + DI initial synchronization
-
-Implement:
-
-- module registration/catalogue APIs;
-- DI 28-permission import;
-- DI five USER role templates;
-- template provenance/version;
-- atomic update and namespace validation;
-- impact calculation.
-
-Definition of done:
-
-- DI cannot publish outside `di.*`;
-- existing Tenant role is unchanged by a template update;
-- explicit template upgrade changes role permissions and affected USER authorization versions;
-- real Neon validation.
-
-### Increment D — Groups and effective RBAC
+### Increment C — Module catalogue API + DI synchronization
 
 Implement:
 
-- group CRUD;
-- group membership;
-- group-role assignment;
-- direct + group role resolution;
-- authorization-version increments.
+- Platform module APIs;
+- DI 28-permission manifest synchronization;
+- five DI USER role templates;
+- namespace/version validation;
+- permission lifecycle;
+- template provenance;
+- reference/impact checks.
 
 Definition of done:
 
-- no nested groups;
-- no direct group permission;
-- no group-derived location;
-- effective permissions equal union of direct/group roles;
-- cross-Tenant group relationships rejected.
+- DI cannot register outside `di.*`;
+- template update does not mutate an existing Tenant Role;
+- permission retirement with active Role references is blocked/reported;
+- explicit template upgrade changes Role permissions and affected USER authorization versions.
 
-### Increment E — Tenant role Admin APIs
+### Increment D — Groups + effective RBAC
 
-Expose:
+Implement:
 
-- role CRUD;
-- permission assignment/removal;
+- Group CRUD;
+- Group membership;
+- Group Role assignment;
+- direct + Group Role resolution;
+- authorization-version bumping.
+
+Definition of done:
+
+- no nested Group;
+- no direct Group permission;
+- no Group-derived location;
+- cross-Tenant relationships rejected;
+- effective permissions match the direct+Group Role union.
+
+### Increment E — Tenant Role Admin APIs
+
+Implement:
+
+- Role CRUD;
+- registered Permission add/remove;
 - template application/upgrade;
-- direct user-role assignment.
+- direct USER Role assignment;
+- reserved standard Role protection;
+- authorization-version bumping;
+- maker-checker routing for privileged standard Roles.
 
-Definition of done:
-
-- reserved admin role keys protected;
-- only registered ACTIVE permissions assignable;
-- privileged role assignments route through maker-checker;
-- affected authorization versions increment.
-
-### Increment F — Team-member invitation and acceptance
+### Increment F — Team-member invitation + acceptance
 
 Implement:
 
-- invitation creation/cancel/list;
-- recipient acceptance;
+- invitation create/list/cancel;
+- one-time acceptance token hashing;
+- authenticated recipient acceptance;
 - external identity binding;
-- PENDING -> ACTIVE membership transition;
-- materialization of approved roles/groups/locations.
+- PENDING -> ACTIVE membership;
+- materialization of approved assignments.
 
-Definition of done:
-
-- no membership activation before acceptance;
-- invitation cannot be claimed twice;
-- cross-user/external-identity rebinding blocked;
-- expired/cancelled invitation cannot activate membership.
-
-### Increment G — Privileged-access maker-checker
+### Increment G — Privileged maker-checker
 
 Implement:
 
 - privileged request creation;
 - approve/reject;
-- no self-approval;
-- role materialization after approval;
-- audit records.
+- no requester/subject self-approval;
+- Role activation only after approval;
+- Admin audit.
 
-### Increment H — Expose existing Phase 5 policy/access Admin services
+### Increment H — Existing policy/access Admin services
 
-Expose the already-tested internal services for:
+Expose existing validated services for:
 
 - Security Policy;
 - Retention Policy;
 - locations;
 - schedules/windows;
-- explicit user-location assignment;
-- device listing/approval.
+- explicit USER location/schedule assignment;
+- device read/approval.
 
-Device block/revoke mutations remain gated on the separate semantics decision.
+Block/revoke mutations remain deferred until semantics are frozen.
 
 ### Increment I — DI alignment
 
 In `verigence/verigence-di`:
 
-- align actor type with `SERVICE_INTEGRATION`;
-- fail closed on unknown actor type;
-- align Tenant-scoped SYSTEM token handling;
-- normalize Tenant path parameters;
-- enforce exact permissions on all 54 operations;
-- add cross-Tenant negative authorization tests;
-- update stale Clerk-direct documentation.
+- `SERVICE` -> `SERVICE_INTEGRATION`;
+- unknown actor fails closed;
+- Tenant-scoped SYSTEM token handling aligned;
+- Tenant path parameter handling normalized;
+- all 54 operations audited against DI permission contract;
+- cross-Tenant negative tests added;
+- stale Clerk-direct recovery docs corrected.
 
-### Increment J — Security -> DI E2E
+### Increment J — deployed Security -> DI E2E
 
 Prove:
 
 ```text
-Platform Super Admin
-  -> creates Tenant
-  -> synchronizes DI catalogue
-  -> invites Tenant Owner
-  -> Owner accepts
-  -> Tenant role/group configured
-  -> user receives Security JWT
-  -> DI verifies Security JWKS
-  -> DI allows operation with required di.* permission
-  -> DI denies operation without permission
-  -> DI denies cross-Tenant URL
+Platform Super Admin login
+  -> direct Tenant creation
+  -> DI catalogue synchronization
+  -> first Tenant Owner invitation
+  -> Owner human acceptance + approval
+  -> Tenant Group/Role configuration
+  -> USER effective Security JWT permissions
+  -> DI verifies Security JWKS/JWT
+  -> allowed DI operation succeeds with required di.* permission
+  -> same operation fails without permission
+  -> cross-Tenant URL fails
 ```
 
-Railway/Neon deployed E2E is required before this control-plane phase is marked complete.
+Railway/Neon deployed E2E is mandatory before the Admin Control Plane phase is marked complete.
 
 ---
 
 ## 24. Required test matrix
 
-At minimum, CI/Neon/deployed tests must prove:
+At minimum, automated tests must prove:
 
-1. Platform bootstrap occurs only when permitted and no Super Admin exists.
-2. bootstrap password is hashed and never logged/stored plaintext.
-3. first-login password change is enforced.
-4. Platform Admin JWT cannot be used as DI Tenant JWT.
-5. non-Super-Admin cannot create a Tenant.
-6. new Tenant is `CONFIGURING`.
-7. module namespace ownership is enforced.
-8. DI catalogue sync registers the exact reviewed permission set.
-9. template update does not silently mutate Tenant roles.
-10. Tenant Admin cannot create an arbitrary unregistered permission.
-11. group cannot contain a group.
-12. group cannot assign location.
-13. direct + group role permissions resolve correctly.
-14. RBAC changes increment affected authorization versions.
-15. invitation does not activate before recipient acceptance.
-16. cancelled/expired invitation cannot activate.
-17. privileged role cannot activate without second-person approval.
-18. requester cannot approve own privileged request.
-19. cross-Tenant role/group/member relationships are rejected.
-20. every admin mutation records correlation/audit evidence.
-21. DI fails closed on unknown Security actor type.
-22. DI accepts the canonical `SERVICE_INTEGRATION` actor type where applicable.
-23. DI enforces token Tenant == URL Tenant for every Tenant router.
-24. every DI route enforces its declared permission contract.
-25. end-to-end Security JWT permissions drive DI authorization without a runtime Security DB/API lookup.
+1. v1.3 baseline migration is unchanged.
+2. v1.4 migration applies to real Neon.
+3. standard permission keys and Role bundles are exact.
+4. Platform bootstrap occurs only when enabled and no Super Admin exists.
+5. bootstrap restart does not reset credentials.
+6. password is Argon2id-hashed and plaintext never persisted/logged.
+7. first password change is required.
+8. Platform token cannot authorize DI/WPM business API.
+9. non-authorized Platform user cannot create Tenant.
+10. direct Tenant creation results in `CONFIGURING`.
+11. standard Tenant Admin Roles are seeded once.
+12. module namespace ownership is enforced.
+13. DI initial manifest registers exactly the reviewed DI permissions.
+14. module template update does not silently mutate Tenant Roles.
+15. Tenant Admin cannot create an unregistered Permission.
+16. Group cannot contain Group.
+17. Group cannot directly receive Permission.
+18. Group cannot grant location/schedule.
+19. direct + Group Roles calculate correct effective permissions.
+20. RBAC-effective changes bump every affected authorization version.
+21. invitation cannot activate membership before acceptance.
+22. raw invitation acceptance token is never stored.
+23. expired/cancelled invitation cannot activate.
+24. external identity cannot be rebound incorrectly.
+25. privileged Role cannot activate before approval.
+26. requester/subject cannot self-approve.
+27. cross-Tenant identifiers are rejected for all Admin resources.
+28. every successful Admin mutation creates structured audit evidence.
+29. Admin audit state never contains credentials.
+30. DI unknown actor type fails closed.
+31. DI accepts canonical `SERVICE_INTEGRATION` where applicable.
+32. DI Tenant path mismatch returns 403 for every Tenant router.
+33. every DI operation enforces its declared permission contract.
+34. DI authorizes from Security JWT permissions without per-request Security API/DB lookup.
+35. deployed Security -> DI E2E passes on immutable validated artifacts.
 
 ---
 
-## 25. Explicitly deferred items
+## 25. Explicitly deferred / still blocked
 
-The following are not silently solved by this document:
+This document does not invent:
 
-- final `BLOCKED` versus `REVOKED` device business distinction;
-- complete Tenant activation prerequisite catalogue;
-- live Clerk invitation/provider API orchestration;
-- SYSTEM/SERVICE_INTEGRATION machine credential issuance/synchronization automation;
-- WPM permission/template catalogue until WPM is reviewed;
-- nested groups;
+- device `BLOCKED` versus `REVOKED` mutation semantics;
+- the complete SEC-032 Tenant activation prerequisite catalogue;
+- persistent cross-replica idempotency storage;
+- live Clerk invitation/provider API orchestration details;
+- automated module synchronization by machine principal;
+- WPM catalogue contents before WPM is separately reviewed;
+- nested Groups;
 - negative/deny permissions;
-- group-derived location/schedule access;
-- automatic mutation of existing Tenant roles when a module template changes;
-- production bootstrap credential/value.
-
-Each requires either an already-approved source or a later versioned decision.
+- Group-derived location/schedule access;
+- automatic mutation of Tenant Roles when a module template changes;
+- a production bootstrap password/value;
+- old v1.3 lifecycle route shapes still gated by the unavailable v1.3 OpenAPI.
 
 ---
 
-## 26. Implementation recovery rule
+## 26. Context-reset recovery
 
-After a context reset, read in this order before Admin Control Plane implementation:
+After reset, read in this order:
 
 1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`;
 2. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`;
 3. `docs/IMPLEMENTATION_PROGRESS_TRACKER.md`;
-4. `docs/PHASE_5_SECURITY_ADMINISTRATION.md`;
+4. `docs/IMPLEMENTATION_STATUS.md`;
 5. `docs/NEXT_STEPS_AND_CONTEXT_RECOVERY.md`;
-6. current Security `dev` HEAD and active PRs;
-7. for DI integration, current DI `dev` HEAD and:
+6. current Security `dev` and open Security PRs;
+7. for DI integration, current DI `dev` and:
+   - `DI_MASTER_REFERENCE.md`;
    - `backend/src/verigence/di/auth/permissions.py`;
    - `backend/src/verigence/di/auth/verifier.py`;
-   - `backend/src/verigence/di/auth/dependencies.py`;
-   - `DI_MASTER_REFERENCE.md`.
+   - `backend/src/verigence/di/auth/dependencies.py`.
 
-Do not reconstruct this control-plane design from chat history after the document is merged.
+Do not reconstruct the Admin Control Plane from chat history after this design is merged.
 
 ---
 
-## 27. Final design summary
+## 27. Final model
 
 ```text
-                            VERIGENCE SECURITY
-                                   |
-               +-------------------+-------------------+
-               |                                       |
-        PLATFORM CONTROL PLANE                   TENANT CONTROL PLANE
-               |                                       |
-     Platform Super Admin                         Tenant Owner/Admins
-     Platform Security Admin                            |
-     Module Catalog Admin                               +-- Members
-     Platform Auditor                                   +-- Groups
-               |                                        +-- Tenant Roles
-               |                                        +-- Locations/Schedules
-        Module Catalogue                                +-- Devices/Policies
-               |                                              |
-       +-------+-------+                                      |
-       |               |                                      |
-      DI              WPM                              Effective Roles
- Permissions      Permissions                                |
- Templates        Templates                                 v
-       |               |                             Effective Permissions
-       +-------+-------+                                      |
-               |                                              v
-               +-------------------------------------- Security USER JWT
-                                                              |
-                                            +-----------------+----------------+
-                                            |                                  |
-                                            v                                  v
-                                           DI                                 WPM
-                                    checks di.* permission             checks wpm.* permission
+                         VERIGENCE SECURITY
+                                |
+            +-------------------+-------------------+
+            |                                       |
+     PLATFORM CONTROL PLANE                  TENANT CONTROL PLANE
+            |                                       |
+ Platform Super Admin                         Tenant Owner/Admins
+ Platform Security Admin                            |
+ Module Catalog Admin                               +-- Members/Invitations
+ Platform Auditor                                   +-- Groups
+            |                                       +-- Tenant Roles
+            |                                       +-- Locations/Schedules
+       Module Catalogue                             +-- Devices/Policies
+            |                                             |
+     +------+------+                                      |
+     |             |                                      v
+    DI            WPM                             Effective Tenant Roles
+Permissions    Permissions                                |
+Templates      Templates                                  v
+     |             |                              Effective Permissions
+     +------+------+                                      |
+            |                                             v
+            +------------------------------------- Security USER JWT
+                                                          |
+                                      +-------------------+-------------------+
+                                      |                                       |
+                                      v                                       v
+                                     DI                                      WPM
+                              checks di.* permission                  checks wpm.* permission
 ```
 
-The central rule is simple:
+The governing rule is:
 
-> Modules define capabilities and optional templates. Security owns authoritative Tenant roles, groups,
-> assignments, effective permissions, administrators, onboarding, and tokens. Modules authorize locally from
-> the Security JWT permissions claim.
+> Modules define capabilities and optional module role templates. Security owns authoritative Platform/Tenant
+> administrators, Tenant Roles, Groups, assignments, effective permissions, onboarding, approvals and tokens.
+> Modules authorize locally from the Security JWT `permissions[]` claim.
