@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     security_private_key_pem: str = ""
     security_public_key_pem: str = ""
 
+    # v1.4.1 Clerk bootstrap. This replaces the local-password bootstrap runtime path.
+    security_bootstrap_enabled: bool = False
+    security_bootstrap_super_admin_clerk_user_id: str = ""
+
+    # Increment-B local bootstrap configuration is retained only as migration debt.
+    # The v1.4.1 runtime no longer invokes the local bootstrap/login path.
     platform_bootstrap_enabled: bool = False
     platform_bootstrap_login: str = ""
     platform_bootstrap_password: str = ""
@@ -69,6 +75,9 @@ class Settings(BaseSettings):
                 raise ValueError("DEV mock signing secret is required when mock auth is enabled")
             if self.dev_mock_token_ttl_minutes is None:
                 raise ValueError("DEV mock token TTL is required when mock auth is enabled")
+
+        # Transitional Increment-B validation is intentionally retained for historical/local use.
+        # No application runtime route or startup hook consumes it after the v1.4.1 cutover.
         if self.platform_bootstrap_enabled:
             allowed_bootstrap_envs = {
                 AppEnvironment.LOCAL,
@@ -76,18 +85,29 @@ class Settings(BaseSettings):
                 AppEnvironment.DEV,
             }
             if self.app_env not in allowed_bootstrap_envs:
-                raise ValueError("Platform bootstrap is prohibited in UAT/production")
+                raise ValueError("Legacy Platform bootstrap is prohibited in UAT/production")
             if not self.platform_bootstrap_login.strip():
                 raise ValueError(
-                    "Platform bootstrap login is required when bootstrap is enabled"
+                    "Platform bootstrap login is required when legacy bootstrap is enabled"
                 )
             if not self.platform_bootstrap_password:
                 raise ValueError(
-                    "Platform bootstrap password is required when bootstrap is enabled"
+                    "Platform bootstrap password is required when legacy bootstrap is enabled"
+                )
+
+        if self.security_bootstrap_enabled:
+            if not self.database_url:
+                raise ValueError("DATABASE_URL is required when Clerk bootstrap is enabled")
+            if not self.clerk_issuer or not self.clerk_jwt_key:
+                raise ValueError("Clerk issuer and public key are required for Clerk bootstrap")
+            if not self.security_bootstrap_super_admin_clerk_user_id.strip():
+                raise ValueError(
+                    "Security bootstrap Super Admin Clerk user ID is required "
+                    "when bootstrap is enabled"
                 )
             if self.platform_admin_token_ttl_minutes is None:
                 raise ValueError(
-                    "Platform Admin token TTL is required when bootstrap is enabled"
+                    "Platform Admin token TTL is required when Clerk bootstrap is enabled"
                 )
         return self
 

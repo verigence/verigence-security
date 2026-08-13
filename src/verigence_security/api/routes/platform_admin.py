@@ -2,42 +2,42 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from verigence_security.adapters.identity import ClerkJwtIdentityProvider
+from verigence_security.api.dependencies import bearer_token
 from verigence_security.api.platform_dependencies import (
     platform_claims,
     platform_session,
     require_platform_permission,
 )
 from verigence_security.api.platform_schemas import (
-    PlatformLoginRequest,
     PlatformMeResponse,
-    PlatformPasswordChangeRequest,
     PlatformTenantCreateRequest,
     PlatformTenantResponse,
     PlatformTenantUpdateRequest,
     PlatformTokenResponse,
 )
 from verigence_security.config import Settings, get_settings
-from verigence_security.services.platform_admin import (
-    PlatformAuthenticationService,
-    PlatformTenantService,
-)
+from verigence_security.services.platform_admin import PlatformTenantService
+from verigence_security.services.platform_identity import PlatformIdentityService
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
 
 
-@router.post("/auth/login", response_model=PlatformTokenResponse)
-def platform_login(
-    body: PlatformLoginRequest,
+@router.post("/bootstrap/claim", response_model=PlatformTokenResponse)
+def claim_platform_super_admin(
+    request: Request,
+    authorization_token: str = Depends(bearer_token),
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    result = PlatformAuthenticationService(session, settings).login(
-        login_name=body.loginName,
-        password=body.password,
+    identity = ClerkJwtIdentityProvider(settings).verify(authorization_token)
+    result = PlatformIdentityService(session, settings).bootstrap_claim(
+        identity=identity,
+        correlation_id=request.state.correlation_id,
     )
     return {
         "accessToken": result.access_token,
@@ -45,24 +45,28 @@ def platform_login(
         "userId": result.user_id,
         "roles": list(result.roles),
         "permissions": list(result.permissions),
-        "mustChangePassword": result.must_change_password,
+        "mustChangePassword": False,
     }
 
 
-@router.post("/auth/change-password", status_code=status.HTTP_204_NO_CONTENT)
-def platform_change_password(
-    body: PlatformPasswordChangeRequest,
-    request: Request,
-    claims: dict[str, Any] = Depends(platform_claims),
+@router.post("/auth/login", response_model=PlatformTokenResponse)
+def platform_login(
+    authorization_token: str = Depends(bearer_token),
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
-) -> Response:
-    PlatformAuthenticationService(session, settings).change_password(
-        user_id=str(claims["sub"]),
-        new_password=body.newPassword,
-        correlation_id=request.state.correlation_id,
-    )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+) -> dict[str, object]:
+    """Exchange a Clerk-authenticated human identity for a Security Platform Admin JWT."""
+
+    identity = ClerkJwtIdentityProvider(settings).verify(authorization_token)
+    result = PlatformIdentityService(session, settings).login(identity=identity)
+    return {
+        "accessToken": result.access_token,
+        "expiresAtUtc": result.expires_at_utc,
+        "userId": result.user_id,
+        "roles": list(result.roles),
+        "permissions": list(result.permissions),
+        "mustChangePassword": False,
+    }
 
 
 @router.get("/me", response_model=PlatformMeResponse)

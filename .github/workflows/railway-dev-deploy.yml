@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 20
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
 
     steps:
       - name: Wait for successful Security CI on exact commit
@@ -115,12 +116,16 @@ jobs:
           docker pull "$image_ref" >/dev/null
           docker run --rm "$image_ref" python --version 2>&1 | grep -E '^Python 3\.12\.'
 
-      - name: Verify Railway token and exact DEV scope
+      - name: Verify Railway tokens and exact DEV project scope
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "${RAILWAY_TOKEN:-}" ]; then
             echo "::error::RAILWAY_TOKEN is not configured."
+            exit 1
+          fi
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_API_TOKEN is not configured."
             exit 1
           fi
 
@@ -140,7 +145,7 @@ jobs:
           token_environment_id="$(printf '%s' "$response" | jq -r '.data.projectToken.environmentId // empty')"
           [ "$token_project_id" = "$RAILWAY_PROJECT_ID" ] || { echo "::error::RAILWAY_TOKEN project scope mismatch."; exit 1; }
           [ "$token_environment_id" = "$RAILWAY_ENVIRONMENT_ID" ] || { echo "::error::RAILWAY_TOKEN environment scope mismatch."; exit 1; }
-          echo "Railway Project Token scope matches DEV."
+          echo "Railway Project Token scope matches DEV; workspace token is present for source mutation."
 
       - name: Snapshot current Railway DEV deployment
         id: before
@@ -188,7 +193,7 @@ jobs:
           response="$(curl --fail-with-body --silent --show-error \
             --request POST \
             --url 'https://backboard.railway.com/graphql/v2' \
-            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
             --header 'Content-Type: application/json' \
             --data "$body")"
 

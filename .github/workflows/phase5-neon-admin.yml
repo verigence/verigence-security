@@ -5,6 +5,7 @@ on:
     branches:
       - feature/phase5-*
       - feature/admin-control-plane-*
+      - feature/clerk-*
   workflow_dispatch:
 
 permissions:
