@@ -160,6 +160,29 @@ class DeviceSessionLifecycleRepository:
         decided_by_user_id: str,
         decided_at: datetime,
     ) -> bool:
+        request_row = self.s.execute(
+            text(
+                """
+                SELECT enrollment_request_id
+                FROM security.device_enrollment_requests
+                WHERE enrollment_request_id=:enrollment_request_id
+                  AND tenant_id=:tenant_id
+                  AND user_id=:user_id
+                  AND device_id=:device_id
+                  AND status='PENDING'
+                FOR UPDATE
+                """
+            ),
+            {
+                "enrollment_request_id": enrollment_request_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "device_id": device_id,
+            },
+        ).first()
+        if request_row is None:
+            return False
+
         device_row = self.s.execute(
             text(
                 """
@@ -185,7 +208,7 @@ class DeviceSessionLifecycleRepository:
         if device_row is None:
             return False
 
-        request_row = self.s.execute(
+        updated_request = self.s.execute(
             text(
                 """
                 UPDATE security.device_enrollment_requests
@@ -209,7 +232,7 @@ class DeviceSessionLifecycleRepository:
                 "decided_at": decided_at,
             },
         ).first()
-        return request_row is not None
+        return updated_request is not None
 
     def user_session_for_update(
         self,
