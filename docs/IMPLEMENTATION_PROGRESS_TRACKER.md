@@ -4,7 +4,7 @@
 **Repository:** `verigence/verigence-security`  
 **Integration branch:** `dev`  
 **Approved baseline:** Security Solution v1.3 + explicitly recorded Phase 4 clarifications  
-**Current `dev` implementation commit:** `83907593ced34a1788306e41942299c1e4a2f7b3`  
+**Current `dev` implementation commit:** `c4c00614af41f83fc13225b676b445366d2d5bbd`  
 **Last updated:** 2026-08-13
 
 ---
@@ -17,10 +17,10 @@ Implementation follows `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`:
 
 - approved Security artifacts and explicitly recorded clarifications are authoritative;
 - do not reconstruct requirements from chat memory when approved source exists;
-- do not invent APIs, fields, permissions, errors, statuses, schema objects, thresholds or provider behavior;
+- do not invent APIs, fields, permissions, errors, statuses, schema objects, thresholds, event taxonomies or provider behavior;
 - do not silently edit original v1.3 normative artifacts;
 - unresolved behavior is recorded before code chooses a path;
-- code is `DONE` only after applicable tests/review/deployment evidence pass.
+- code is `DONE` only after applicable tests, review and deployment evidence pass.
 
 Status values: **DONE**, **PARTIAL**, **PENDING**, **BLOCKED**, **NOT STARTED**.
 
@@ -30,68 +30,72 @@ Status values: **DONE**, **PARTIAL**, **PENDING**, **BLOCKED**, **NOT STARTED**.
 
 | Area | Status | Current position |
 |---|---|---|
-| Security v1.3 design alignment | DONE | Initial reviewed baseline remains protected by design-integrity checks |
-| GitHub branch / PR / CI model | DONE | Feature → PR → `dev`; immutable Railway deployment gated by exact-commit Security CI |
+| Security v1.3 design alignment | DONE | Initial reviewed baseline protected by design-integrity checks |
+| GitHub branch / PR / CI model | DONE | Feature → PR → `dev`; Railway deploy gated by exact-commit Security CI |
 | Core USER access path | DONE | Identity → Tenant → device → geo → schedule → network → RBAC → JWT |
 | Phase 1 — CI quality gate | DONE | Design/static, compile, Ruff, strict Mypy, Pytest, build and dependency consistency |
 | Phase 2 — Neon DEV | DONE | Approved schema deployed and real PostgreSQL behavior validated |
 | Phase 3 — Railway DEV | DONE | Immutable deployment, readiness/liveness/correlation and deployed USER E2E |
-| Phase 4 — USER device/session lifecycle | PARTIAL | Internal lifecycle through refresh context movement and concurrency hardening is implemented/validated |
+| Phase 4 — USER device/session lifecycle | PARTIAL | Internal lifecycle through refresh/revoke, approved location movement, concurrency hardening and refresh denial evidence is implemented/validated |
 | USER session refresh internal service | DONE | Full re-evaluation, approved-location context move, evidence, token issuance and canonical lock order |
-| USER session revoke internal service | DONE | Scoped transactional ACTIVE→REVOKED; existing JWT remains valid until `exp` |
+| USER session revoke internal service | DONE | Scoped transactional ACTIVE→REVOKED; issued JWT remains valid only to existing `exp` |
 | Device active-limit enforcement | DONE | Concurrent approvals serialized and Tenant-configured limit enforced |
-| Public Phase 4 lifecycle routes | BLOCKED BY SOURCE | Exact approved OpenAPI request/response/security shapes are unavailable; do not invent them |
-| Persistent cross-replica idempotency | BLOCKED | Approved persistence model is still required |
-| Lifecycle denial/security-event evidence | PARTIAL | Success access-context evidence exists; denial evidence remains to be completed without inventing event taxonomy |
-| Security administration APIs | PENDING | Exact endpoint permission catalogue remains incomplete |
+| USER refresh denial evidence | DONE | 4xx refresh denials persisted in `access_context_evaluations` using existing normative reason codes |
+| Broader lifecycle denial evidence | PARTIAL | Refresh denials done; remaining device/admin lifecycle denial evidence depends on deterministic lifecycle contracts |
+| Public Phase 4 lifecycle routes | BLOCKED BY SOURCE | Exact approved OpenAPI request/response/security shapes unavailable; do not invent them |
+| Persistent cross-replica idempotency | BLOCKED | Approved persistence model required |
+| Security-event taxonomy | OPEN | `security_events.event_type` is free text; do not invent event names |
+| Security administration APIs | PENDING | Exact endpoint permission catalogue incomplete |
 | SYSTEM actor runtime | PENDING | Machine credential/token runtime pending |
 | SERVICE_INTEGRATION runtime | PENDING | Machine credential/token runtime pending |
-| Tenant operational lifecycle | PENDING | Activation readiness, retention execution and offboarding application service pending |
+| Tenant operational lifecycle | PENDING | Activation readiness, retention execution and offboarding service pending |
 | JWKS/key rotation hardening | PARTIAL | Single-key baseline exists; overlapping rotation pending |
 | Clerk live integration | PARTIAL | Verification adapter exists; live integration not yet proven |
 | DI/WPM integration | PENDING | Must consume stable Security contracts/JWKS |
-| UAT / Production readiness | NOT STARTED | Production deployment is not approved |
+| UAT / Production readiness | NOT STARTED | Production deployment not approved |
 
 ---
 
 ## 3. Major completed capabilities
 
-The following list describes implementation evidence; it does not create new requirements.
-
 | ID | Capability | Status | Evidence / note |
 |---|---|---|---|
 | SEC-IMP-001 | FastAPI/Railway service foundation | DONE | Reviewed baseline |
 | SEC-IMP-002 | Environment safety for DEV mocks | DONE | UAT/Production fail closed against mock auth |
-| SEC-IMP-003 | `X-Correlation-ID` middleware | DONE | Preserve/generate/reject/echo + 500 traceability |
+| SEC-IMP-003 | `X-Correlation-ID` handling | DONE | Preserve/generate/reject/echo + 500 traceability |
 | SEC-IMP-004 | Clerk USER identity verification adapter | DONE | Public-key JWT verification boundary |
 | SEC-IMP-005 | DEV mock identity | DONE | Cannot inject Tenant roles/permissions |
 | SEC-IMP-006 | Security Principal USER validation | DONE | Actor type/status enforced |
-| SEC-IMP-007 | Security Access JWT + single-key JWKS | DONE / PARTIAL | JWT complete; overlapping rotation pending |
-| SEC-IMP-008 | Canonical permission validation | DONE | Module-prefixed dot notation |
-| SEC-IMP-009 | USER geo validation | DONE | Freshness, accuracy, integrity and radius |
-| SEC-IMP-010 | Schedule/time evaluation | DONE | Includes overnight windows/overrides |
-| SEC-IMP-011 | Provider-neutral network-risk adapter | DONE | External call kept outside DB row-lock window |
-| SEC-IMP-012 | PostgreSQL repository foundation | DONE | Neon SQLAlchemy runtime |
-| SEC-IMP-013 | Core USER access-session creation/reuse | DONE | Same-context reuse, conflict handling, session max cap |
-| SEC-IMP-014 | Success access-context evidence | DONE | Persisted before successful commit |
-| SEC-IMP-015 | Token/DB atomicity | DONE | Signing failure rolls back session/evidence writes |
-| SEC-IMP-016 | Health/readiness | DONE | DB + signing key fail-closed readiness |
-| SEC-IMP-017 | Approved v1.3 PostgreSQL baseline | DONE | Byte-identical initial migration source |
-| SEC-IMP-018 | Normative Security error catalogue | DONE | 42/42 aligned |
-| SEC-IMP-019 | Neon schema validation | DONE | 27 tables / 7 explicit indexes / 56 FKs / 57 CHECKs |
-| SEC-IMP-020 | Railway immutable deployment | DONE | Exact validated GHCR image attached to DEV |
-| SEC-IMP-021 | Deployed DEV USER E2E | DONE | Mock identity → real policy/RBAC → JWT against Neon |
-| SEC-IMP-022 | PENDING device enrollment persistence | DONE | Device + enrollment request remain PENDING until approval |
-| SEC-IMP-023 | Device approval persistence | DONE | PENDING→ACTIVE / PENDING→APPROVED transaction |
-| SEC-IMP-024 | Active-device-limit serialization | DONE | Tenant/user membership row lock |
-| SEC-IMP-025 | Tenant-configured device limit | DONE | Concurrent limit=1 test gives one approval + one `DEVICE_LIMIT_REACHED` |
-| SEC-IMP-026 | One ACTIVE USER session invariant | DONE | PostgreSQL partial unique index |
-| SEC-IMP-027 | USER session revoke service | DONE | Scoped transactional ACTIVE→REVOKED |
-| SEC-IMP-028 | USER refresh mandatory geo | DONE | Missing geo → normative `GEO_REQUIRED` |
-| SEC-IMP-029 | USER refresh full internal re-evaluation | DONE | Tenant/membership/device/geo/location/schedule/network/RBAC/expiry/evidence/JWT |
-| SEC-IMP-030 | Approved refresh location transition | DONE | Same location stays; different assigned location moves context; unapproved geo denies |
-| SEC-IMP-031 | Refresh session-max preservation | DONE | Location move cannot extend original session max duration |
-| SEC-IMP-032 | Refresh canonical lock ordering | DONE | Session discovery read → device lock → session `FOR UPDATE`; avoids device↔session lock cycle |
+| SEC-IMP-007 | Security Access JWT | DONE | Locally validated short-lived JWT |
+| SEC-IMP-008 | Single-key JWKS | PARTIAL | Works; overlapping rotation remains |
+| SEC-IMP-009 | Canonical permission validation | DONE | Module-prefixed dot notation |
+| SEC-IMP-010 | USER geo validation | DONE | Freshness, accuracy, integrity and radius |
+| SEC-IMP-011 | Schedule/time evaluation | DONE | Includes overnight windows/overrides |
+| SEC-IMP-012 | Provider-neutral network-risk adapter | DONE | Provider call outside DB row-lock window |
+| SEC-IMP-013 | PostgreSQL repository foundation | DONE | Neon SQLAlchemy runtime |
+| SEC-IMP-014 | Core USER access-session creation/reuse | DONE | Same-context reuse, conflict handling, session max cap |
+| SEC-IMP-015 | Successful access-context evidence | DONE | Persisted atomically with successful issuance |
+| SEC-IMP-016 | Token/DB atomicity | DONE | Signing failure rolls back session/evidence writes |
+| SEC-IMP-017 | Health/readiness | DONE | DB + signing-key fail-closed readiness |
+| SEC-IMP-018 | Approved v1.3 PostgreSQL baseline | DONE | Byte-identical initial migration source |
+| SEC-IMP-019 | Normative Security error catalogue | DONE | 42/42 aligned |
+| SEC-IMP-020 | Neon schema validation | DONE | 27 tables / 7 explicit indexes / 56 FKs / 57 CHECKs |
+| SEC-IMP-021 | Railway immutable deployment | DONE | Exact validated GHCR image attached to DEV |
+| SEC-IMP-022 | Deployed DEV USER E2E | DONE | Mock identity → real policy/RBAC → JWT against Neon |
+| SEC-IMP-023 | PENDING device enrollment persistence | DONE | Device + enrollment request remain PENDING until approval |
+| SEC-IMP-024 | Device approval persistence | DONE | PENDING→ACTIVE / PENDING→APPROVED transaction |
+| SEC-IMP-025 | Active-device-limit serialization | DONE | Tenant/user membership row lock |
+| SEC-IMP-026 | Tenant-configured device limit | DONE | Concurrent limit=1 gives one approval + one `DEVICE_LIMIT_REACHED` |
+| SEC-IMP-027 | One ACTIVE USER session invariant | DONE | PostgreSQL partial unique index |
+| SEC-IMP-028 | USER session revoke service | DONE | Scoped transactional ACTIVE→REVOKED |
+| SEC-IMP-029 | USER refresh mandatory geo | DONE | Missing geo → `GEO_REQUIRED` |
+| SEC-IMP-030 | USER refresh full internal re-evaluation | DONE | Tenant/membership/device/geo/location/schedule/network/RBAC/expiry/evidence/JWT |
+| SEC-IMP-031 | Approved refresh location transition | DONE | Same approved location stays; different assigned location moves; unapproved geo denies |
+| SEC-IMP-032 | Refresh session-max preservation | DONE | Location move cannot extend original session maximum duration |
+| SEC-IMP-033 | Refresh canonical lock order | DONE | Discovery read → device lock → session `FOR UPDATE` |
+| SEC-IMP-034 | Refresh denial access-context evidence | DONE | 4xx denials persisted after rollback in separate evidence transaction |
+| SEC-IMP-035 | Missing-geo denial evidence | DONE | `GEO_REQUIRED` persisted without fabricating session/location/geo context |
+| SEC-IMP-036 | Unapproved-location denial evidence | DONE | `LOCATION_NOT_ALLOWED` persisted without session mutation or token issuance |
 
 ---
 
@@ -99,25 +103,22 @@ The following list describes implementation evidence; it does not create new req
 
 ### Phase 1 — CI
 
-**DONE**
-
-- Post-merge CI: `31627855570` — PASS.
+**DONE** — post-merge CI `31627855570` PASS.
 
 ### Phase 2 — Neon DEV
 
-**DONE**
-
-- Approved schema validation and real PostgreSQL integration: `31630275529` — PASS.
-- Detailed evidence: `docs/PHASE_2_NEON_INTEGRATION.md`.
+**DONE** — `31630275529` PASS.  
+Detailed evidence: `docs/PHASE_2_NEON_INTEGRATION.md`.
 
 ### Phase 3 — Railway DEV
 
 **DONE**
 
-- Runtime/health: `31668584825` — PASS.
-- Deployed USER E2E: `31668795264` — PASS.
-- Phase 3 promotion: PR #18.
-- Detailed evidence: `docs/PHASE_3_RAILWAY_DEV_VALIDATION.md`.
+- runtime/health: `31668584825` PASS;
+- deployed USER E2E: `31668795264` PASS;
+- promotion: PR #18.
+
+Detailed evidence: `docs/PHASE_3_RAILWAY_DEV_VALIDATION.md`.
 
 ### Phase 4 — USER device/session lifecycle
 
@@ -125,57 +126,55 @@ The following list describes implementation evidence; it does not create new req
 
 #### Increment 1 — persistence / locking foundations
 
-**DONE** — PR #19
-
-- Neon final validation: `31671140316` — PASS.
-- Promoted commit: `7846bb7965fc109ae2570e13b3ef215777388783`.
+**DONE** — PR #19  
+Neon `31671140316` PASS.  
+Promoted commit `7846bb7965fc109ae2570e13b3ef215777388783`.
 
 #### Increment 2 — concurrent active-device-limit enforcement
 
 **DONE** — PR #20
 
-- Neon: `31671542390` — **7/7 PASS**.
-- Post-merge Security CI: `31671820069` — PASS.
-- Railway: `31671820060` — PASS.
-- Promoted commit: `8aaa74b589be618b741507420c6255dda75fa10a`.
+- Neon `31671542390`: **7/7 PASS**;
+- post-merge Security CI `31671820069`: PASS;
+- Railway `31671820060`: PASS;
+- promoted commit `8aaa74b589be618b741507420c6255dda75fa10a`.
 
 #### Increment 3 — refresh geo boundary + USER revoke service
 
 **DONE** — PR #22
 
-- Neon: `31672322586` — **8/8 PASS**.
-- PR Security CI: `31672417249` — PASS.
-- Post-merge Security CI: `31672476255` — PASS.
-- Railway: `31672476267` — PASS.
-- Promoted commit: `26d0a951dfd1c4bd575b1d7c39c538496dc6a9c4`.
+- Neon `31672322586`: **8/8 PASS**;
+- PR Security CI `31672417249`: PASS;
+- post-merge Security CI `31672476255`: PASS;
+- Railway `31672476267`: PASS;
+- promoted commit `26d0a951dfd1c4bd575b1d7c39c538496dc6a9c4`.
 
 #### Increment 4 — approved refresh location transition + full internal refresh
 
-**DONE** — PR #24
-
+**DONE** — PR #24  
 Approved clarification: `docs/PHASE_4_APPROVED_CLARIFICATIONS.md`, `CLAR-004-001`.
 
 Behavior:
 
 - same approved/assigned location → refresh same ACTIVE session;
-- different approved/assigned location → re-evaluate all USER gates and move same ACTIVE session to the newly approved location;
+- different approved/assigned location → re-evaluate all USER gates and move same ACTIVE session to newly approved location;
 - geo outside all approved/assigned locations → deny using existing location errors;
-- refreshed token/evidence/session use the location that passed the current evaluation;
+- refreshed token/evidence/session use current approved location;
 - original session maximum-duration cap remains authoritative.
 
 Validation:
 
-- Neon: `31673792244` — **9/9 PASS**.
-- PR #24 Security CI: `31673953419` — PASS.
-- Promoted commit: `a42ba20dc74f2c57f5b4444efd044d562c4c76f7`.
-- Post-merge Security CI: `31674014588` — PASS.
-- Railway: `31674014592` — PASS through immutable deploy, readiness, liveness and correlation.
+- Neon `31673792244`: **9/9 PASS**;
+- PR Security CI `31673953419`: PASS;
+- promoted commit `a42ba20dc74f2c57f5b4444efd044d562c4c76f7`;
+- post-merge Security CI `31674014588`: PASS;
+- Railway `31674014592`: PASS.
 
 #### Increment 4 hardening — canonical refresh lock order
 
 **DONE** — PR #25
 
-A review found the first refresh implementation could lock session→device while create/reuse uses device→session. Refresh was hardened to the canonical order:
+Canonical order:
 
 ```text
 non-locking scoped session read (device discovery)
@@ -191,11 +190,35 @@ refresh policy evaluation/update
 
 Validation:
 
-- final-head Neon: `31674228808` — PASS.
-- PR #25 Security CI: `31674296848` — PASS.
-- Promoted commit: `83907593ced34a1788306e41942299c1e4a2f7b3`.
-- Post-merge Security CI: `31674380079` — PASS.
-- Railway: `31674380089` — PASS through exact image deployment, readiness, liveness and correlation.
+- Neon `31674228808`: PASS;
+- PR Security CI `31674296848`: PASS;
+- promoted commit `83907593ced34a1788306e41942299c1e4a2f7b3`;
+- post-merge Security CI `31674380079`: PASS;
+- Railway `31674380089`: PASS.
+
+#### Increment 5 — USER refresh denial evidence
+
+**DONE** — PR #27
+
+Implementation:
+
+- existing `security.access_context_evaluations` is used for refresh `ALLOW` and `DENY` evidence;
+- existing normative Security error code becomes `decision_reason_code` for DENY;
+- the failed refresh transaction is rolled back before denial evidence is written in a separate transaction;
+- missing geo records `GEO_REQUIRED` without fabricating a session/location/geo context;
+- unapproved geo records `LOCATION_NOT_ALLOWED` without updating the session or issuing a token;
+- only facts actually resolved are included in evidence;
+- 5xx infrastructure/service errors are not mislabeled as policy DENY;
+- evidence persistence is best effort and cannot mask the original denial;
+- no free-form `security_events.event_type` taxonomy was invented.
+
+Validation:
+
+- final-head Neon `31675178770`: PASS;
+- PR #27 Security CI `31675181857`: PASS;
+- promoted commit `c4c00614af41f83fc13225b676b445366d2d5bbd`;
+- post-merge Security CI `31675264715`: PASS;
+- Railway `31675264724`: PASS through exact immutable image deploy, readiness, liveness and correlation.
 
 Detailed Phase 4 evidence: `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
 
@@ -203,8 +226,14 @@ Detailed Phase 4 evidence: `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
 
 ## 5. Remaining Phase 4 work
 
-- denial evidence for failed device/session lifecycle evaluations;
-- internal device block/revoke lifecycle where behavior is deterministic from approved statuses/decisions;
+Internal work still requires source grounding before implementation:
+
+- device BLOCKED/REVOKED lifecycle semantics and associated active-session handling;
+- denial evidence for additional device/session lifecycle flows once their transitions are deterministic;
+- any required `security_events` records only after an event taxonomy is explicitly frozen.
+
+Source-gated work:
+
 - public device-enrollment route wiring;
 - public/admin device approval/block/revoke route wiring;
 - public USER refresh/revoke route wiring;
@@ -217,7 +246,7 @@ Detailed Phase 4 evidence: `docs/PHASE_4_DEVICE_SESSION_LIFECYCLE.md`.
 
 `07f2be9acdf0638647a42d9536bb4575bfdbc72111d9d0b285af64162da98c37`
 
-Repository history confirms the OpenAPI was never committed to this repository; there is no repository delete/change history for that file. The exact source is also not available through the active File Library/context or wider Verigence GitHub code search.
+Repository history confirms the OpenAPI was never committed to this repository; there is no repository delete/change history for the file. The exact source is also unavailable through the active File Library/context and wider Verigence GitHub code search.
 
 **Rule:** do not infer public request/response/security contracts. Continue deterministic internal implementation from approved decisions/schema/clarifications.
 
@@ -234,13 +263,14 @@ Repository history confirms the OpenAPI was never committed to this repository; 
 | OPEN-005 | Generic malformed-request 400 vs framework 422 | BLOCKED | Do not invent new Security error code |
 | OPEN-006 | Authoritative v1.3 OpenAPI unavailable | BLOCKED BY SOURCE | Public lifecycle route shapes remain gated |
 | OPEN-007 | Refresh to another approved location | **RESOLVED** | `CLAR-004-001`: move same session after complete re-evaluation; unapproved geo denies |
-| OPEN-008 | Free-form `security_events.event_type` taxonomy | OPEN | Do not invent event names merely because schema accepts free text; use deterministic access-context denial evidence where possible and record event taxonomy separately if required |
+| OPEN-008 | Free-form `security_events.event_type` taxonomy | OPEN | Do not invent event names merely because schema accepts free text |
+| OPEN-009 | Device `BLOCKED` vs `REVOKED` transition semantics | OPEN | Do not implement state transitions/session side-effects until approved source or explicit clarification determines the distinction |
 
 ---
 
 ## 7. Current execution pointer
 
-**NOW:** Phase 4 lifecycle denial evidence and other deterministic internal lifecycle behavior that does not depend on the missing OpenAPI or unfrozen event taxonomy.
+**NOW:** inspect/resolve deterministic device block/revoke lifecycle semantics and continue only where approved source is sufficient.
 
 **NEXT:** recover/version the authoritative public lifecycle contract; wire exact enrollment/approval/block/revoke/refresh/revoke routes; execute deployed Railway lifecycle E2E.
 
@@ -253,7 +283,8 @@ Phase 4 Increment 2                DONE
 Phase 4 Increment 3                DONE
 Phase 4 Increment 4                DONE — full internal refresh
 Phase 4 refresh lock hardening     DONE
-Phase 4 denial evidence            NOW
+Phase 4 Increment 5                DONE — refresh denial evidence
+Device block/revoke semantics      OPEN-009 / NOW
 Phase 4 public route wiring        BLOCKED BY OPENAPI SOURCE
 Phase 4 deployed lifecycle E2E     PENDING PUBLIC ROUTES
 Phase 5 Admin APIs                 PENDING
@@ -280,8 +311,9 @@ Phase 12 UAT/Production            NOT STARTED
 | 2026-08-13 | PR #19 / `31671140316` | Phase 4 Increment 1 | DONE |
 | 2026-08-13 | PR #20 / `31671542390` | Phase 4 Increment 2 | DONE |
 | 2026-08-13 | PR #22 / `31672322586` | Phase 4 Increment 3 | DONE |
-| 2026-08-13 | PR #24 / `31673792244` | Phase 4 Increment 4 approved refresh-context movement | DONE |
-| 2026-08-13 | PR #25 / `31674228808` | Refresh device→session lock-order hardening | DONE |
+| 2026-08-13 | PR #24 / `31673792244` | Phase 4 Increment 4 refresh-context movement | DONE |
+| 2026-08-13 | PR #25 / `31674228808` | Refresh lock-order hardening | DONE |
+| 2026-08-13 | PR #27 / `31675178770` | Refresh denial access-context evidence | DONE |
 
 ---
 
