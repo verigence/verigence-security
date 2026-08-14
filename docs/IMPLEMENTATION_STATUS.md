@@ -14,18 +14,14 @@ docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md
 ## 1. Current promoted runtime baseline
 
 ```text
-951a7694b31c195ccbde45d13346e0eea8ae9f14
+7765e72a6078a15981cffb42c0d7e3bdbdc269de
 ```
 
-The promoted DEV runtime includes global one-time USER identity, Security-owned lifecycle, Tenant authorization without Tenant-membership dependency, built-in full-authority `platform.super_admin`, controlled initial administrator provisioning, and immutable exact-digest Railway deployment.
+The DEV runtime includes global one-time USER identity, Security-owned lifecycle, Phase 1 self-onboarding through Clerk Backend user creation, Tenant authorization without Tenant-membership dependency, built-in full-authority `platform.super_admin`, controlled initial administrator provisioning, and immutable exact-digest Railway deployment.
 
-Phase 1 normal self-onboarding v1.4.5 is currently being validated in PR #54 before promotion.
+## 2. Phase 1 normal USER onboarding v1.4.5 — DONE / DEPLOYED
 
-## 2. Phase 1 normal USER onboarding — v1.4.5 authority
-
-Normal human USER onboarding remains Platform-global and one-time. v1.4.5 supersedes the invitation/bind registration sequence from v1.4.2.
-
-Phase 1 registration is:
+Normal human USER onboarding is Platform-global and one-time. v1.4.5 supersedes the invitation/bind registration sequence from v1.4.2.
 
 ```text
 one self-registration request to Security
@@ -54,25 +50,34 @@ Clerk Backend user creation receives only first name, last name, email and passw
 
 If Clerk creation succeeds but Security persistence fails, Security attempts compensating Clerk user deletion. Security remains fail-closed if compensation itself fails because no usable local USER mapping is committed.
 
-## 3. Identity and authorization ownership
+## 3. v1.4.5 evidence
+
+```text
+Feature head:             fd72e24d833ad28c129cff185656719b699177c8
+Feature Security CI:      31779990307 — PASS
+Feature Neon/PostgreSQL:  31779986825 — PASS
+PR #54:                   MERGED
+Promoted DEV commit:      7765e72a6078a15981cffb42c0d7e3bdbdc269de
+Post-merge Security CI:   31780116228 — PASS
+Railway DEV:              31780116188 — PASS
+readiness/liveness/correlation: PASS
+```
+
+Detailed report:
+
+```text
+docs/PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_TEST_REPORT_v1.4.5.md
+```
+
+## 4. Identity and authorization ownership
 
 Clerk owns human credentials and authentication sessions. Phase 1 does not require MFA.
 
-Security owns:
-
-- global USER record and status;
-- email/mobile uniqueness and profile data;
-- Clerk-to-Security mapping;
-- Platform/Tenant authorization;
-- device/access controls;
-- Security access tokens;
-- administrator activation/deactivation decisions.
+Security owns global USER status, email/mobile uniqueness and profile data, Clerk-to-Security mapping, Platform/Tenant authorization, device/access controls, Security access tokens, and administrator activation/deactivation decisions.
 
 Tenant membership is not a human access prerequisite. An ACTIVE USER can receive different authorization in multiple Tenants without another onboarding event.
 
-## 4. Initial Super Admin v1.4.4 — DONE / PROVISIONED / DEPLOYED
-
-DEV selected Clerk identity:
+## 5. Initial Super Admin v1.4.4 — DONE / PROVISIONED / DEPLOYED
 
 ```text
 Clerk User ID:     user_3HtNkIWp32cD9HC7KzDbZdJkr2h
@@ -83,25 +88,15 @@ Role:              platform.super_admin
 
 Verified state: principal ACTIVE, global USER ACTIVE, CLERK mapping ACTIVE, Super Admin ACTIVE and zero missing ACTIVE Security permissions.
 
-## 5. Current execution direction
+## 6. Current execution direction
 
 ```text
-feature/phase1-self-onboarding-clerk-v1.4.5 / PR #54
+Phase 1 self-onboarding v1.4.5  DONE / DEPLOYED
        ↓
-exact-head Security CI + real Neon/PostgreSQL
-       ↓
-merge to dev
-       ↓
-exact-commit Security CI
-       ↓
-immutable Railway DEV deployment + readiness/liveness/correlation
-       ↓
-record v1.4.5 evidence
-       ↓
-resume Increment G maker-checker
+Increment G maker-checker       NEXT
 ```
 
-## 6. Deferred work
+## 7. Deferred work
 
 Still unresolved unless a later tracker says otherwise:
 
