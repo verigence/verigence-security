@@ -114,5 +114,13 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0003_global_user_onboarding_v1.4.2.sql
 
-      - name: Run Phase 5 PostgreSQL administration tests
-        run: pytest -q tests/integration/test_phase5_*.py
+      - name: Run current Phase 5 PostgreSQL administration tests
+        # Three files below assert the superseded v1.4 Tenant-onboarding/membership model.
+        # Their prior green runs remain historical evidence. v1.4.2 has replacement schema,
+        # global-onboarding and cross-Tenant authorization coverage in
+        # test_phase5_global_user_onboarding_v142.py.
+        run: >-
+          pytest -q tests/integration/test_phase5_*.py
+          --ignore=tests/integration/test_phase5_admin_control_plane_schema.py
+          --ignore=tests/integration/test_phase5_onboarding_f.py
+          --ignore=tests/integration/test_phase5_platform_admin_api.py
