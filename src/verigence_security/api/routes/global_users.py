@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
 from verigence_security.adapters.identity import ClerkJwtIdentityProvider
 from verigence_security.api.dependencies import bearer_token, source_ip
-from verigence_security.api.platform_dependencies import platform_session, require_platform_permission
+from verigence_security.api.platform_dependencies import (
+    platform_session,
+    require_platform_permission,
+)
 from verigence_security.config import Settings, get_settings
 from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
 
