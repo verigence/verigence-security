@@ -13,11 +13,19 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
       RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
       RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+
     steps:
-      - name: Print relevant Railway variable names only
+      - name: Railway API token available
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ]
+
+      - name: Clerk secret present in Railway DEV
         shell: bash
         run: |
           set -euo pipefail
@@ -29,5 +37,41 @@ jobs:
             --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
             --header 'Content-Type: application/json' \
             --data "$body")"
-          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
-          printf '%s\n' "$response" | jq -r '.data.variables | keys[]' | grep -E '^(CLERK|SECURITY_USER_ONBOARDING|DATABASE)' || true
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ]
+          [ -n "$(printf '%s' "$response" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')" ]
+
+      - name: Database URL present in Railway DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ]
+          [ -n "$(printf '%s' "$response" | jq -r '.data.variables.DATABASE_URL // empty')" ]
+
+      - name: Railway project token available
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ]
+
+      - name: Public service domain resolves from Railway
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ]
+          [ -n "$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')" ]
