@@ -234,19 +234,21 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
 
         compensation_email = f"v145-comp-{uuid4()}@example.invalid"
         clerk.next_user_id = clerk_user_id
-        with Session(engine) as session:
-            with pytest.raises(ValueError, match="Email or mobile number is already registered"):
-                Phase1SelfOnboardingService(session).register(
-                    first_name="Compensation",
-                    last_name="Check",
-                    email=compensation_email,
-                    mobile="+918123456789",
-                    password="safe-password-999",
-                    onboarding_key="VGN-PHASE845",
-                    source_ip="127.0.0.1",
-                    correlation_id=str(uuid4()),
-                    clerk=clerk,  # type: ignore[arg-type]
-                )
+        with (
+            Session(engine) as session,
+            pytest.raises(ValueError, match="Email or mobile number is already registered"),
+        ):
+            Phase1SelfOnboardingService(session).register(
+                first_name="Compensation",
+                last_name="Check",
+                email=compensation_email,
+                mobile="+918123456789",
+                password="safe-password-999",
+                onboarding_key="VGN-PHASE845",
+                source_ip="127.0.0.1",
+                correlation_id=str(uuid4()),
+                clerk=clerk,  # type: ignore[arg-type]
+            )
         assert clerk_user_id in clerk.deleted
         with engine.connect() as conn:
             assert conn.execute(
