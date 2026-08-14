@@ -1,0 +1,2 @@
+Trigger live Phase 1 onboarding E2E after configuring CLERK_SECRET_KEY in Railway DEV.
+Timestamp: 2026-08-14 13:36 Asia/Kolkata
