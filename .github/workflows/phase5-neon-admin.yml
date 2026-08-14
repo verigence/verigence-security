@@ -8,6 +8,7 @@ on:
       - feature/clerk-*
       - feature/global-user-*
       - feature/super-admin-*
+      - feature/phase1-self-*
   workflow_dispatch:
 
 permissions:
@@ -133,13 +134,25 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0005_super_admin_full_authority.sql
 
+      - name: Apply Phase 1 self-onboarding v1.4.5 migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$ADMIN_MIGRATION_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/0006_phase1_self_onboarding_v1.4.5.sql
+
       - name: Run v1.4.2 schema/control-registry PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142_schema.py
 
-      - name: Run v1.4.2 global onboarding lifecycle PostgreSQL test
+      - name: Run v1.4.2 historical global onboarding/Tenant authorization regression
         run: >-
           pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
           -k global_user_onboards_once_then_authorizes_across_tenants
+
+      - name: Run v1.4.5 Phase 1 self-onboarding PostgreSQL acceptance
+        run: pytest -q tests/integration/test_phase5_self_onboarding_v145.py
 
       - name: Run Platform Super Admin full-authority PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_super_admin_full_authority.py
@@ -156,6 +169,7 @@ jobs:
               tests/integration/test_phase5_global_user_onboarding_v142_schema.py|\
               tests/integration/test_phase5_onboarding_f.py|\
               tests/integration/test_phase5_platform_admin_api.py|\
+              tests/integration/test_phase5_self_onboarding_v145.py|\
               tests/integration/test_phase5_super_admin_full_authority.py)
                 continue
                 ;;

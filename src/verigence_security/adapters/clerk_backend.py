@@ -12,11 +12,11 @@ class ClerkBackendError(RuntimeError):
 
 
 class ClerkBackendClient:
-    """Narrow Clerk Backend API adapter used only for human lifecycle operations.
+    """Narrow Clerk Backend API adapter for Verigence human identity lifecycle.
 
-    Clerk remains the authentication provider. This adapter never reads or verifies passwords;
-    it only creates application invitations, reads the authenticated Clerk user profile for
-    binding, and synchronizes Security lifecycle status through Clerk ban/unban operations.
+    Phase 1 self-onboarding transports the submitted password to Clerk only for backend user
+    creation. Verigence never stores, hashes, authenticates, logs, or audits that password.
+    Mobile numbers remain Verigence-only and are never sent to Clerk by this adapter.
     """
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
@@ -26,6 +26,31 @@ class ClerkBackendClient:
         self._secret_key = settings.clerk_secret_key.strip()
         self._client = client
 
+    def create_user(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        email: str,
+        password: str,
+    ) -> str:
+        payload = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "email_address": [email],
+            "password": password,
+        }
+        data = self._request("POST", "/users", json=payload)
+        clerk_user_id = data.get("id")
+        if not isinstance(clerk_user_id, str) or not clerk_user_id.startswith("user_"):
+            raise ClerkBackendError("Clerk user response did not contain an immutable user ID")
+        return clerk_user_id
+
+    def delete_user(self, clerk_user_id: str) -> None:
+        self._request("DELETE", f"/users/{clerk_user_id}")
+
+    # Historical v1.4.2 compatibility only. The active Phase 1 onboarding API no longer uses
+    # Clerk invitations or a later identity-binding route.
     def create_invitation(
         self,
         *,
