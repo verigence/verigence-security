@@ -11,6 +11,19 @@ class ScheduleAdminRepository:
     def __init__(self, session: Session) -> None:
         self.s = session
 
+    def list_schedules(self, *, tenant_id: str) -> list[dict[str, Any]]:
+        rows = self.s.execute(
+            text(
+                """
+                SELECT * FROM security.access_schedules
+                WHERE tenant_id=:tenant_id
+                ORDER BY schedule_key,schedule_id
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
     def upsert_schedule(
         self,
         *,
