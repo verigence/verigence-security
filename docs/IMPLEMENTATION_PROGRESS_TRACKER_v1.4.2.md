@@ -3,7 +3,7 @@
 **Status:** CURRENT CANONICAL EXECUTION TRACKER  
 **Repository:** `verigence/verigence-security`  
 **Integration branch:** `dev`  
-**Current promoted runtime code commit:** `7765e72a6078a15981cffb42c0d7e3bdbdc269de`  
+**Current promoted runtime code commit:** `7765e72a6078a15981cffb42c0d7e3bdbdc269de` (v1.4.5 until v1.4.6 promotion completes)  
 **Date:** 2026-08-14
 
 ## 1. Implementation authorities
@@ -11,29 +11,33 @@
 Read/apply in this order when decisions conflict:
 
 1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`;
-2. `docs/SECURITY_PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_DESIGN_v1.4.5.md` for normal Phase 1 human self-registration and Verigence <-> Clerk API integration;
-3. `docs/SECURITY_INITIAL_SUPER_ADMIN_PROVISIONING_DESIGN_v1.4.4.md` for fresh-environment initial administrator provisioning;
-4. `docs/SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md` for built-in Super Admin authority;
-5. `docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md` for unchanged global USER lifecycle and Tenant authorization rules not superseded by v1.4.5;
-6. `docs/SECURITY_CLERK_IDENTITY_BOUNDARY_DESIGN_v1.4.1.md` for unchanged Clerk authentication ownership;
-7. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md` for unchanged Admin Control Plane scope;
-8. Security v1.3 normative artifacts for unchanged runtime scope;
-9. this tracker for current execution/evidence.
+2. `docs/SECURITY_PHASE1_CLERK_EMAIL_OTP_DESIGN_v1.4.6.md` for active Phase 1 human self-registration;
+3. `docs/CLERK_EMAIL_OTP_INTEGRATION_CONTRACT_v1.4.6.md` for the concrete Verigence <-> Clerk integration;
+4. `docs/SECURITY_INITIAL_SUPER_ADMIN_PROVISIONING_DESIGN_v1.4.4.md` for fresh-environment initial administrator provisioning;
+5. `docs/SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md` for built-in Super Admin authority;
+6. `docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md` for unchanged global USER lifecycle and Tenant authorization rules;
+7. `docs/SECURITY_CLERK_IDENTITY_BOUNDARY_DESIGN_v1.4.1.md` for unchanged Clerk authentication ownership;
+8. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md` for unchanged Admin Control Plane scope;
+9. Security v1.3 normative artifacts for unchanged runtime scope;
+10. this tracker for current execution/evidence.
+
+`SECURITY_PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_DESIGN_v1.4.5.md` and its test report remain historical evidence. Their backend Clerk `POST /v1/users` signup path is superseded by v1.4.6.
 
 ## 2. Executive status
 
 | Area | Status | Current position |
 |---|---|---|
 | Phase 1 CI quality gate | DONE | Static/design, compile, Ruff, Mypy, tests, build and dependency checks enforced |
-| Phase 2 Neon DEV | DONE | Real PostgreSQL regression suite green through v1.4.5 |
-| Phase 3 Railway DEV | DONE | Exact-commit immutable deployment with readiness/liveness/correlation proof |
+| Phase 2 Neon DEV | GREEN ON v1.4.6 FEATURE | Real PostgreSQL v1.4.6 acceptance + historical regressions green |
+| Phase 3 Railway DEV | v1.4.5 DEPLOYED / v1.4.6 PENDING | Merge and exact-commit promotion still required |
 | Admin Control Plane A–F | DONE / HISTORICAL F IDENTITY SUPERSEDED | A–E active; F Tenant identity onboarding superseded by global onboarding |
 | Clerk identity boundary v1.4.1 | BACKEND IMPLEMENTED / DEPLOYED | Clerk remains the human credential/authentication provider |
-| Global USER onboarding v1.4.2 | DONE / DEPLOYED / FLOW AMENDED BY v1.4.5 | USER onboarding remains Platform-global and one-time |
-| Phase 1 self-onboarding + Clerk integration v1.4.5 | DONE / DEPLOYED | Single-submit Security validation -> Clerk create -> Security PENDING USER |
+| Global USER onboarding v1.4.2 | DONE / FLOW AMENDED | USER onboarding remains Platform-global and one-time |
+| Phase 1 self-onboarding v1.4.5 | HISTORICAL DEPLOYED BASELINE | Backend Clerk create-user path superseded by v1.4.6 |
+| Clerk email OTP onboarding v1.4.6 | FEATURE GATES GREEN / PROMOTION PENDING | Password + OTP owned by Clerk; Security creates USER only after verified email |
 | Built-in Platform Super Admin authority v1.4.3 | DONE / DEPLOYED | Full current/future permission authority and Tenant provisioning authority validated |
 | Initial Super Admin system provisioning v1.4.4 | DONE / PROVISIONED / DEPLOYED | Selected Clerk identity is ACTIVE Security Super Admin in DEV |
-| Increment G maker-checker | NEXT | v1.4.5 onboarding correction is promoted; proceed with maker-checker |
+| Increment G maker-checker | NEXT AFTER v1.4.6 LIVE E2E | Do not start until onboarding correction is promoted and live-proven |
 | Increment H Control Registry/runtime Admin APIs | PENDING | After G unless sequencing is explicitly changed |
 | Increment I DI authorization alignment | PENDING | Recorded corrections remain |
 | Increment J Security -> DI deployed E2E | PENDING | Final Admin Control Plane integration proof |
@@ -46,6 +50,9 @@ Normal human onboarding  = Platform-global, one time per person
 Phase 1 registration     = self-onboarding with shared Platform onboarding key
 Sign-in identifier       = email address; no separate username
 Indian mobile            = Verigence-only; never sent to Clerk in Phase 1
+Password                 = sent client-to-Clerk only; never to Security
+Email OTP                = generated/delivered/verified by Clerk
+Security USER creation   = only after exact pre-authorized Clerk email is verified
 MFA                      = deferred to Phase 2
 Tenant access             = authorization assignment, not identity onboarding
 Clerk                     = credential/authentication provider
@@ -55,86 +62,100 @@ Tenant membership         = not a USER-access prerequisite
 
 The same ACTIVE global Security USER may receive different Tenant-scoped roles/groups/locations/schedules in multiple Tenants without another onboarding event.
 
-## 4. Phase 1 self-onboarding v1.4.5 — DONE / DEPLOYED
+## 4. Phase 1 Clerk email OTP onboarding v1.4.6 — FEATURE VALIDATED / PROMOTION PENDING
 
 Authoritative registration sequence:
 
 ```text
-User submits onboarding key + first name + last name + email + Indian mobile + password
-  -> Security validates key and global email/mobile uniqueness
-  -> Security calls Clerk POST /v1/users with name + email + password only
-  -> Clerk returns immutable user_...
-  -> Security creates global USER=PENDING + CLERK mapping + PENDING_ADMIN_APPROVAL request
+UI -> Security start:
+  onboarding key + first name + last name + email + Indian mobile
+  -> validate key and global email/mobile uniqueness
+  -> create 30-minute signupAttemptId
+  -> NO Security USER exists
+
+UI -> Clerk:
+  email + password
+  -> Clerk sends email OTP
+  -> user enters OTP to Clerk
+  -> Clerk verifies email and finalizes session
+
+UI -> Security complete:
+  signupAttemptId + Clerk session JWT
+  -> Security validates Clerk JWT
+  -> Security GETs Clerk user and requires exact email verification.status=verified
+  -> Security creates global USER=PENDING + CLERK mapping + PENDING_ADMIN_APPROVAL
   -> user receives pending-approval response
   -> Security Admin/Super Admin later activates USER
 ```
-
-There is no active Clerk invitation or later `/onboarding/users/{requestId}/bind` step. No Tenant data is collected during onboarding.
 
 Active API contract:
 
 ```text
 POST /security/v1/onboarding/users
 X-Onboarding-Key: <global key>
+body: firstName, lastName, email, mobile
+response: HTTP 202 + signupAttemptId + CLERK_EMAIL_VERIFICATION_REQUIRED + expiresAt
 
-body:
-  firstName
-  lastName
-  email
-  mobile
-  password
+POST /security/v1/onboarding/users/{signupAttemptId}/complete
+Authorization: Bearer <Clerk session JWT>
+response: HTTP 201 + PENDING_ADMIN_APPROVAL
 ```
-
-The password is transient transport data only: HTTPS, never stored/hashed/logged/audited by Security, and forwarded only to Clerk Backend user creation.
 
 Implementation includes:
 
-- `ClerkBackendClient.create_user()` using `POST /v1/users`;
-- `ClerkBackendClient.delete_user()` for compensation;
-- additive migration `0006_phase1_self_onboarding_v1.4.5.sql`;
-- `security.users.first_name` and `last_name`;
-- database-level normalized Indian mobile uniqueness;
-- dedicated single-submit onboarding service;
-- active retirement of the `/bind` route;
-- unit and real Neon/PostgreSQL acceptance tests.
+- additive migration `0007_clerk_email_otp_onboarding_v1.4.6.sql`;
+- `security.platform_user_signup_attempts` with 30-minute pre-authorization;
+- exact email/mobile duplicate gating before Clerk signup;
+- Clerk JWT completion gate;
+- Clerk Backend `GET /v1/users/{user_id}` exact verified-email check;
+- names-only Clerk profile synchronization;
+- no active Security password transport;
+- no Clerk phone/username/Tenant/RBAC payload;
+- dedicated unit and real Neon/PostgreSQL acceptance tests.
 
-## 5. v1.4.5 promotion/test evidence
+## 5. v1.4.6 feature validation evidence
 
 ```text
-Feature head:             fd72e24d833ad28c129cff185656719b699177c8
-Feature Security CI:      31779990307 — PASS
-Feature Neon/PostgreSQL:  31779986825 — PASS
-PR #54:                   MERGED
-Promoted DEV commit:      7765e72a6078a15981cffb42c0d7e3bdbdc269de
-Post-merge Security CI:   31780116228 — PASS
-Railway DEV:              31780116188 — PASS
-readiness:                PASS
-liveness:                 PASS
-correlation ID:           PASS
+Exact feature head:       e9cf8326b1e0a49b164dac028a218b2f016eb77d
+Security CI #186:         PASS
+Neon/PostgreSQL #171:     PASS
+PR #56:                   OPEN / DRAFT / NOT YET MERGED
+Post-merge Security CI:   PENDING
+Railway DEV:              PENDING
+Live Clerk OTP E2E:       PENDING
 ```
 
 Validated acceptance includes:
 
-- invalid onboarding key -> no Clerk call/no USER;
-- duplicate email -> no Clerk call;
-- duplicate normalized mobile -> no Clerk call;
-- Clerk payload contains first name/last name/email/password and no phone/username;
-- successful Clerk creation -> exactly one Security USER=PENDING + CLERK mapping;
+- invalid onboarding key -> no signup attempt/no USER;
+- valid start -> short-lived signup attempt and still no USER;
+- duplicate live email/mobile attempt -> denied;
+- unverified Clerk email -> completion denied and no USER;
+- verified exact Clerk email -> exactly one Security USER=PENDING + CLERK mapping;
 - onboarding request -> PENDING_ADMIN_APPROVAL;
-- post-Clerk Security persistence collision -> Clerk delete compensation;
+- completed attempt -> cannot replay;
 - PENDING USER precheck remains false;
-- active OpenAPI contains no `/onboarding/users/{requestId}/bind`;
+- v1.4.5 active backend-create `register()` path is retired;
 - historical global USER/cross-Tenant authorization remains green;
 - Platform Super Admin regression remains green;
 - retained Phase 5 PostgreSQL administration suite remains green.
 
-Detailed report:
+## 6. Live E2E requirement before closure
 
-```text
-docs/PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_TEST_REPORT_v1.4.5.md
-```
+After v1.4.6 is promoted to Railway DEV, perform one real Clerk OTP registration using a unique Gmail alias routed to `gigsinopensource@gmail.com`.
 
-## 6. Initial DEV Super Admin — COMPLETED
+The test must:
+1. pre-authorize via deployed Security API;
+2. have Clerk send the email OTP;
+3. have the user supply the OTP to Clerk, never Security;
+4. finalize Clerk session;
+5. complete Security registration to USER=PENDING;
+6. verify Clerk email `verification.status=verified` and Security `PENDING_ADMIN_APPROVAL`;
+7. **pause before deletion so the user can inspect the Clerk Dashboard user**;
+8. only after explicit user confirmation, delete Clerk and all associated Security signup/onboarding/audit/identity/principal rows;
+9. prove zero residual records.
+
+## 7. Initial DEV Super Admin — COMPLETED
 
 ```text
 Clerk User ID:     user_3HtNkIWp32cD9HC7KzDbZdJkr2h
@@ -145,16 +166,14 @@ Platform role:     platform.super_admin
 
 Verified Security principal/USER/CLERK mapping/Super Admin role are ACTIVE with zero missing ACTIVE permissions.
 
-## 7. Environment prerequisite for live Clerk creation
-
-The deployed Phase 1 onboarding endpoint requires backend-only `CLERK_SECRET_KEY` for the same Clerk application instance. The value must remain in deployment-secret configuration and must never be committed to Git or returned to clients.
-
 ## 8. Current execution pointer
 
 ```text
-v1.4.5 self-onboarding      DONE / DEPLOYED
+v1.4.6 email OTP onboarding    FEATURE GATES GREEN
        ↓
-Increment G maker-checker   NEXT
+merge -> Railway -> live E2E   NEXT
+       ↓
+Increment G maker-checker
        ↓
 Increment H
        ↓
@@ -163,4 +182,4 @@ Increment I
 Increment J
 ```
 
-Do not reintroduce Clerk invitations, Tenant-scoped human onboarding, Tenant membership for USER onboarding, a separate Phase 1 username, dummy Clerk phone numbers, or Phase 1 MFA.
+Do not reintroduce Clerk invitations, Tenant-scoped human onboarding, Tenant membership for USER onboarding, a separate Phase 1 username, dummy Clerk phone numbers, backend Clerk create-user as normal signup, Security-proxied passwords, or Phase 1 MFA.
