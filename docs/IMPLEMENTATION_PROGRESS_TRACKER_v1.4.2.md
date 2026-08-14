@@ -4,7 +4,7 @@
 **Repository:** `verigence/verigence-security`  
 **Integration branch:** `dev`  
 **Current promoted runtime code commit:** `7765e72a6078a15981cffb42c0d7e3bdbdc269de` (v1.4.5 until v1.4.6 promotion completes)  
-**Date:** 2026-08-14
+**Date:** 2026-08-15
 
 ## 1. Implementation authorities
 
@@ -37,10 +37,10 @@ Read/apply in this order when decisions conflict:
 | Clerk email OTP onboarding v1.4.6 | FEATURE GATES GREEN / PROMOTION PENDING | Password + OTP owned by Clerk; Security creates USER only after verified email |
 | Built-in Platform Super Admin authority v1.4.3 | DONE / DEPLOYED | Full current/future permission authority and Tenant provisioning authority validated |
 | Initial Super Admin system provisioning v1.4.4 | DONE / PROVISIONED / DEPLOYED | Selected Clerk identity is ACTIVE Security Super Admin in DEV |
-| Increment G maker-checker | NEXT AFTER v1.4.6 LIVE E2E | Do not start until onboarding correction is promoted and live-proven |
-| Increment H Control Registry/runtime Admin APIs | PENDING | After G unless sequencing is explicitly changed |
-| Increment I DI authorization alignment | PENDING | Recorded corrections remain |
-| Increment J Security -> DI deployed E2E | PENDING | Final Admin Control Plane integration proof |
+| Increment G maker-checker | COMPLETED / MERGED | PR #58 merged to Security `dev`; privileged-access maker-checker implemented |
+| Increment H Control Registry/runtime Admin APIs | TRACKED SEPARATELY | Existing H work remains governed by its own branch/PR status; do not infer completion from I |
+| Increment I DI authorization alignment | DONE / MERGED | DI PR #1 merged; canonical actor, Tenant and permission alignment completed |
+| Increment J Security -> DI deployed E2E | DEFERRED / NOT STARTED | Resume later only on explicit user direction; final deployed integration proof remains outstanding |
 | SYSTEM/SERVICE_INTEGRATION | PENDING | Separate machine-identity phase |
 
 ## 3. Frozen Phase 1 identity/onboarding model
@@ -166,20 +166,67 @@ Platform role:     platform.super_admin
 
 Verified Security principal/USER/CLERK mapping/Super Admin role are ACTIVE with zero missing ACTIVE permissions.
 
-## 8. Current execution pointer
+## 8. Increment I — COMPLETED
+
+Increment I aligned DI authorization with the Security contract and is complete via merged DI PR #1.
+
+Recorded completion scope:
 
 ```text
-v1.4.6 email OTP onboarding    FEATURE GATES GREEN
+canonical actor types: USER / SYSTEM / SERVICE_INTEGRATION
+missing or unknown actor_type: fail closed
+Tenant path isolation: enforced
+canonical DI read permissions: enforced
+Security JWT/JWKS is the DI authorization trust boundary
+wrong Tenant: 403
+missing required permission: 403
+```
+
+Increment I is closed. Do not reopen or modify DI as part of Increment J unless the explicit approval gate below is satisfied.
+
+## 9. Increment J — DEFERRED / RESUME LATER
+
+Increment J is the final deployed Security -> DI integration proof. It is **not started and not complete**.
+
+When explicitly resumed, the acceptance target is:
+
+1. obtain a JWT issued by the deployed Security service;
+2. prove DI validates that JWT through the Security JWKS trust boundary;
+3. prove an operation succeeds with the required canonical `di.*` permission;
+4. prove the same operation returns HTTP 403 without that permission;
+5. prove a cross-Tenant attempt returns HTTP 403.
+
+No completion claim may be made until deployed evidence exists.
+
+### Mandatory DI change-approval gate
+
+`verigence/verigence-di` is a protected work boundary for this Security workstream.
+
+**No DI file, branch, workflow, configuration, documentation or runtime code may be changed without explicit user approval first.**
+
+If Increment J reveals that a DI change is required, stop and present the user with:
+
+```text
+Repository: verigence/verigence-di
+Exact file(s) proposed for change: <path(s)>
+Why each file needs to change: <reason>
+Exact intended change: <summary>
+Expected effect/risk: <impact>
+```
+
+Only after the user explicitly approves that proposal may the DI change be made. Reading/inspection of DI is allowed for diagnosis; write operations are not.
+
+## 10. Current execution pointer
+
+```text
+Increment I DI authorization alignment    DONE
        ↓
-merge -> Railway -> live E2E   NEXT
+Increment J Security -> DI deployed E2E  DEFERRED / NOT STARTED
        ↓
-Increment G maker-checker
+Resume J only on explicit user direction
        ↓
-Increment H
-       ↓
-Increment I
-       ↓
-Increment J
+If DI modification appears necessary:
+STOP -> disclose exact file(s) + reason + intended change -> obtain explicit approval -> only then modify
 ```
 
 Do not reintroduce Clerk invitations, Tenant-scoped human onboarding, Tenant membership for USER onboarding, a separate Phase 1 username, dummy Clerk phone numbers, backend Clerk create-user as normal signup, Security-proxied passwords, or Phase 1 MFA.
