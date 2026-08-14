@@ -48,26 +48,26 @@ jobs:
           fi
 
           case "$raw" in
-            postgresql+psycopg://*)
-              psql_url="postgresql://${raw#postgresql+psycopg://}"
-              sqlalchemy_url="$raw"
-              ;;
-            postgresql+asyncpg://*)
-              psql_url="postgresql://${raw#postgresql+asyncpg://}"
-              sqlalchemy_url="postgresql+psycopg://${raw#postgresql+asyncpg://}"
-              ;;
-            postgresql://*)
-              psql_url="$raw"
-              sqlalchemy_url="postgresql+psycopg://${raw#postgresql://}"
-              ;;
-            postgres://*)
-              psql_url="postgresql://${raw#postgres://}"
-              sqlalchemy_url="postgresql+psycopg://${raw#postgres://}"
-              ;;
-            *)
-              echo "::error::Configured DEV database secret is not a PostgreSQL URL."
-              exit 1
-              ;;
+          postgresql+psycopg://*)
+            psql_url="postgresql://${raw#postgresql+psycopg://}"
+            sqlalchemy_url="$raw"
+            ;;
+          postgresql+asyncpg://*)
+            psql_url="postgresql://${raw#postgresql+asyncpg://}"
+            sqlalchemy_url="postgresql+psycopg://${raw#postgresql+asyncpg://}"
+            ;;
+          postgresql://*)
+            psql_url="$raw"
+            sqlalchemy_url="postgresql+psycopg://${raw#postgresql://}"
+            ;;
+          postgres://*)
+            psql_url="postgresql://${raw#postgres://}"
+            sqlalchemy_url="postgresql+psycopg://${raw#postgres://}"
+            ;;
+          *)
+            echo "::error::Configured DEV database secret is not a PostgreSQL URL."
+            exit 1
+            ;;
           esac
 
           echo "::add-mask::$psql_url"
@@ -115,12 +115,18 @@ jobs:
             -f migrations/0003_global_user_onboarding_v1.4.2.sql
 
       - name: Run current Phase 5 PostgreSQL administration tests
-        # Three files below assert the superseded v1.4 Tenant-onboarding/membership model.
-        # Their prior green runs remain historical evidence. v1.4.2 has replacement schema,
-        # global-onboarding and cross-Tenant authorization coverage in
-        # test_phase5_global_user_onboarding_v142.py.
-        run: >-
-          pytest -q tests/integration/test_phase5_*.py
-          --ignore=tests/integration/test_phase5_admin_control_plane_schema.py
-          --ignore=tests/integration/test_phase5_onboarding_f.py
-          --ignore=tests/integration/test_phase5_platform_admin_api.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=()
+          for test_file in tests/integration/test_phase5_*.py; do
+            case "$test_file" in
+              tests/integration/test_phase5_admin_control_plane_schema.py|\
+              tests/integration/test_phase5_onboarding_f.py|\
+              tests/integration/test_phase5_platform_admin_api.py)
+                continue
+                ;;
+            esac
+            tests+=("$test_file")
+          done
+          pytest -q "${tests[@]}"
