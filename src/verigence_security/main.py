@@ -12,6 +12,7 @@ from verigence_security.api.routes import (
     platform_admin,
     platform_modules,
     tenant_groups,
+    tenant_privileged_access,
     tenant_roles,
 )
 from verigence_security.config import get_settings
@@ -38,6 +39,7 @@ app.include_router(jwks.router)
 app.include_router(access.router)
 app.include_router(tenant_groups.router)
 app.include_router(tenant_roles.router)
+app.include_router(tenant_privileged_access.router)
 app.include_router(platform_admin.router)
 app.include_router(platform_modules.router)
 app.include_router(global_users.router)

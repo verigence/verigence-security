@@ -2,12 +2,25 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import NoReturn
+from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from verigence_security.core.errors import ERRORS, SecurityError
 from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.tenant_rbac_admin import TenantRbacAdminService
+
+PRIVILEGED_TENANT_ROLE_KEYS = frozenset(
+    {
+        "tenant.owner",
+        "tenant.admin",
+        "tenant.rbac_admin",
+        "tenant.access_admin",
+        "tenant.security_policy_admin",
+        "tenant.security_approver",
+    }
+)
 
 
 def _deny(code: str) -> NoReturn:
@@ -46,16 +59,119 @@ class TenantRbacGateService(TenantRbacAdminService):
         if state["user_status"] != "ACTIVE":
             _deny("USER_NOT_ACTIVE")
 
-        # Tenant access is established by effective Tenant-scoped authorization only. No
-        # tenant_memberships row is required in v1.4.2.
         roles, permissions = effective_user_permissions(self.s, tenant_id, user_id, now)
         if permission_key not in permissions:
             _deny("PERMISSION_DENIED")
         return roles, permissions
 
-    # The inherited v1.4 RBAC administration methods intentionally call these helper methods.
-    # Overriding them removes the membership prerequisite without duplicating the entire
-    # administration implementation.
+    def assign_user_role(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        role_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+    ) -> bool:
+        """Assign ordinary roles immediately; privileged standard roles enter maker-checker."""
+        now = datetime.now(UTC)
+        role = self.s.execute(
+            text(
+                """
+                SELECT role_key,status FROM security.roles
+                WHERE tenant_id=:tenant_id AND role_id=:role_id
+                """
+            ),
+            {"tenant_id": tenant_id, "role_id": role_id},
+        ).mappings().first()
+        if role is None or role["status"] != "ACTIVE":
+            raise ValueError("Role must be ACTIVE")
+        if str(role["role_key"]) not in PRIVILEGED_TENANT_ROLE_KEYS:
+            return super().assign_user_role(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role_id=role_id,
+                actor_user_id=actor_user_id,
+                correlation_id=correlation_id,
+            )
+        if not self._active_membership(tenant_id, user_id, now):
+            raise ValueError("User must be ACTIVE")
+        active = self.s.execute(
+            text(
+                """
+                SELECT assignment_id FROM security.user_role_assignments
+                WHERE tenant_id=:tenant_id AND user_id=:user_id
+                  AND role_id=:role_id AND status='ACTIVE'
+                """
+            ),
+            {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+        ).first()
+        if active is not None:
+            self.s.rollback()
+            return False
+        pending = self.s.execute(
+            text(
+                """
+                SELECT request_id FROM security.privileged_access_requests
+                WHERE tenant_id=:tenant_id AND subject_user_id=:user_id
+                  AND role_id=:role_id AND status='PENDING'
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+        ).first()
+        if pending is not None:
+            self.s.rollback()
+            return False
+        request_id = str(uuid4())
+        try:
+            self.s.execute(
+                text(
+                    """
+                    INSERT INTO security.privileged_access_requests
+                    (request_id,tenant_id,subject_user_id,role_id,status,
+                     requested_by_user_id,requested_at_utc,correlation_id)
+                    VALUES (:request_id,:tenant_id,:user_id,:role_id,'PENDING',
+                            :actor_user_id,:now,:correlation_id)
+                    """
+                ),
+                {
+                    "request_id": request_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "role_id": role_id,
+                    "actor_user_id": actor_user_id,
+                    "now": now,
+                    "correlation_id": correlation_id,
+                },
+            )
+            self._audit(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                correlation_id=correlation_id,
+                operation_key="security.privileged_access.request",
+                resource_type="PRIVILEGED_ACCESS_REQUEST",
+                resource_id=request_id,
+                now=now,
+            )
+            self.s.commit()
+        except IntegrityError:
+            self.s.rollback()
+            existing = self.s.execute(
+                text(
+                    """
+                    SELECT 1 FROM security.privileged_access_requests
+                    WHERE tenant_id=:tenant_id AND subject_user_id=:user_id
+                      AND role_id=:role_id AND status='PENDING'
+                    """
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+            ).first()
+            if existing is None:
+                raise
+            return False
+        return True
+
     def _active_membership(self, tenant_id: str, user_id: str, now: datetime) -> bool:
         _ = tenant_id, now
         return (

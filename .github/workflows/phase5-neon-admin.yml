@@ -5,6 +5,7 @@ on:
     branches:
       - feature/phase5-*
       - feature/admin-control-plane-*
+      - feature/admin-maker-checker-*
       - feature/clerk-*
       - feature/global-user-*
       - feature/super-admin-*
@@ -116,6 +117,9 @@ jobs:
       - name: Apply Clerk email OTP onboarding v1.4.6 migration
         run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0007_clerk_email_otp_onboarding_v1.4.6.sql
 
+      - name: Apply Increment G maker-checker migration
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0008_privileged_access_maker_checker_v1.4.7.sql
+
       - name: Run v1.4.2 schema/control-registry PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142_schema.py
 
@@ -126,6 +130,9 @@ jobs:
 
       - name: Run v1.4.6 Clerk email OTP onboarding PostgreSQL acceptance
         run: pytest -q tests/integration/test_phase5_self_onboarding_v146.py
+
+      - name: Run Increment G privileged-access maker-checker acceptance
+        run: pytest -q tests/integration/test_phase5_privileged_access_g.py
 
       - name: Run Platform Super Admin full-authority PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_super_admin_full_authority.py
@@ -142,6 +149,7 @@ jobs:
               tests/integration/test_phase5_global_user_onboarding_v142_schema.py|\
               tests/integration/test_phase5_onboarding_f.py|\
               tests/integration/test_phase5_platform_admin_api.py|\
+              tests/integration/test_phase5_privileged_access_g.py|\
               tests/integration/test_phase5_self_onboarding_v145.py|\
               tests/integration/test_phase5_self_onboarding_v146.py|\
               tests/integration/test_phase5_super_admin_full_authority.py)
