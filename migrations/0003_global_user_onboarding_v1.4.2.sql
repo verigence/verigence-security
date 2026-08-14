@@ -97,6 +97,51 @@ SELECT DISTINCT user_id,tenant_id,1,CURRENT_TIMESTAMP
 FROM security.group_memberships
 ON CONFLICT (user_id,tenant_id) DO NOTHING;
 
+-- The v1.4 role-template upgrade route predates the authorization-state table. Keep token
+-- invalidation correct for global USERs even when no historical tenant_memberships row exists.
+CREATE OR REPLACE FUNCTION security.bump_template_authz_state_v1_4_2()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO security.user_tenant_authorization_state
+  (user_id,tenant_id,authorization_version,updated_at_utc)
+  SELECT affected.user_id,NEW.tenant_id,2,CURRENT_TIMESTAMP
+  FROM (
+    SELECT ura.user_id
+    FROM security.user_role_assignments ura
+    JOIN security.users u ON u.user_id=ura.user_id AND u.status='ACTIVE'
+    WHERE ura.tenant_id=NEW.tenant_id
+      AND ura.role_id=NEW.role_id
+      AND ura.status='ACTIVE'
+    UNION
+    SELECT gm.user_id
+    FROM security.group_role_assignments gra
+    JOIN security.groups g
+      ON g.tenant_id=gra.tenant_id AND g.group_id=gra.group_id AND g.status='ACTIVE'
+    JOIN security.group_memberships gm
+      ON gm.tenant_id=g.tenant_id AND gm.group_id=g.group_id AND gm.status='ACTIVE'
+    JOIN security.users u ON u.user_id=gm.user_id AND u.status='ACTIVE'
+    WHERE gra.tenant_id=NEW.tenant_id
+      AND gra.role_id=NEW.role_id
+      AND gra.status='ACTIVE'
+  ) AS affected
+  ON CONFLICT (user_id,tenant_id) DO UPDATE SET
+    authorization_version=
+      security.user_tenant_authorization_state.authorization_version+1,
+    updated_at_utc=EXCLUDED.updated_at_utc;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_role_template_authz_v1_4_2
+ON security.role_template_bindings;
+CREATE TRIGGER trg_role_template_authz_v1_4_2
+AFTER INSERT ON security.role_template_bindings
+FOR EACH ROW
+WHEN (NEW.status='CURRENT')
+EXECUTE FUNCTION security.bump_template_authz_state_v1_4_2();
+
 -- v1.3 access_sessions carried Tenant membership_id for USER sessions. v1.4.2 removes that
 -- runtime requirement while retaining the nullable column for historical records.
 DO $$
