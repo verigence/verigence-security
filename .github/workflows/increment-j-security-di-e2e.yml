@@ -1,0 +1,312 @@
+name: Increment J — Deployed Security to DI E2E
+
+on:
+  push:
+    branches:
+      - feature/security-di-e2e-j
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: increment-j-security-di-e2e
+  cancel-in-progress: false
+
+env:
+  SECURITY_RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+  SECURITY_RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  SECURITY_RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+  DI_BASE_URL: https://verigence-di-production.up.railway.app
+
+jobs:
+  deployed-security-di-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo "::error::RAILWAY_TOKEN is not configured."; exit 1; }
+          if [ -z "${DEV_DATABASE_URL:-}" ] && [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
+            echo "::error::Neither DEV_DATABASE_URL nor MIGRATION_DATABASE_URL is configured."
+            exit 1
+          fi
+
+      - name: Resolve deployed Security DEV domain
+        id: security_domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          variables="$(jq -cn --arg project "$SECURITY_RAILWAY_PROJECT_ID" --arg environment "$SECURITY_RAILWAY_ENVIRONMENT_ID" --arg service "$SECURITY_RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || { echo "::error::Security DEV public domain is missing."; exit 1; }
+          echo "base_url=https://$domain" >> "$GITHUB_OUTPUT"
+
+      - name: Verify both deployed services are ready
+        shell: bash
+        env:
+          SECURITY_BASE_URL: ${{ steps.security_domain.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          security_code="$(curl --silent --show-error --output /tmp/security-ready.json --write-out '%{http_code}' "$SECURITY_BASE_URL/health/ready")"
+          [ "$security_code" = "200" ] || { cat /tmp/security-ready.json; echo "::error::Security readiness HTTP $security_code"; exit 1; }
+          di_code="$(curl --silent --show-error --output /tmp/di-ready.json --write-out '%{http_code}' "$DI_BASE_URL/health/ready")"
+          [ "$di_code" = "200" ] || { cat /tmp/di-ready.json; echo "::error::DI readiness HTTP $di_code"; exit 1; }
+
+      - name: Seed temporary Security authorization fixture
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_db="${DEV_DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
+          case "$raw_db" in
+            postgresql+psycopg://*) psql_url="postgresql://${raw_db#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) psql_url="postgresql://${raw_db#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) psql_url="$raw_db" ;;
+            *) echo "::error::Configured DEV database secret is not a supported PostgreSQL URL."; exit 1 ;;
+          esac
+          echo "::add-mask::$psql_url"
+
+          tenant_id="$(cat /proc/sys/kernel/random/uuid)"
+          user_id="$(cat /proc/sys/kernel/random/uuid)"
+          membership_id="$(cat /proc/sys/kernel/random/uuid)"
+          device_id="$(cat /proc/sys/kernel/random/uuid)"
+          location_id="$(cat /proc/sys/kernel/random/uuid)"
+          schedule_id="$(cat /proc/sys/kernel/random/uuid)"
+          override_id="$(cat /proc/sys/kernel/random/uuid)"
+          role_id="$(cat /proc/sys/kernel/random/uuid)"
+          role_assignment_id="$(cat /proc/sys/kernel/random/uuid)"
+          role_key="increment-j-${tenant_id}"
+          tenant_code="increment-j-${tenant_id}"
+          permission_preexisting="$(psql "$psql_url" -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM security.permissions WHERE permission_key='di.subject.read') THEN 'true' ELSE 'false' END")"
+
+          psql "$psql_url" -v ON_ERROR_STOP=1 \
+            -v tenant_id="$tenant_id" -v user_id="$user_id" -v membership_id="$membership_id" \
+            -v device_id="$device_id" -v location_id="$location_id" -v schedule_id="$schedule_id" \
+            -v override_id="$override_id" -v role_id="$role_id" -v role_assignment_id="$role_assignment_id" \
+            -v role_key="$role_key" -v tenant_code="$tenant_code" <<'SQL'
+          BEGIN;
+          INSERT INTO security.tenants
+            (tenant_id,tenant_code,tenant_name,status,created_at_utc,updated_at_utc)
+          VALUES (:'tenant_id',:'tenant_code','Increment J deployed Security to DI E2E','ACTIVE',now(),now());
+
+          INSERT INTO security.security_principals
+            (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+          VALUES (:'user_id','USER','Increment J E2E user','ACTIVE',now(),now());
+
+          INSERT INTO security.users
+            (user_id,display_name,status,created_at_utc,updated_at_utc)
+          VALUES (:'user_id','Increment J E2E user','ACTIVE',now(),now());
+
+          INSERT INTO security.tenant_memberships
+            (membership_id,tenant_id,user_id,status,authorization_version,created_at_utc,updated_at_utc)
+          VALUES (:'membership_id',:'tenant_id',:'user_id','ACTIVE',1,now(),now());
+
+          INSERT INTO security.registered_devices
+            (device_id,tenant_id,user_id,device_type,platform,device_name,status,registered_at_utc)
+          VALUES (:'device_id',:'tenant_id',:'user_id','WEB','LINUX','Increment J E2E device','ACTIVE',now());
+
+          INSERT INTO security.access_schedules
+            (schedule_id,tenant_id,schedule_key,schedule_name,status,created_at_utc,updated_at_utc)
+          VALUES (:'schedule_id',:'tenant_id','increment-j','Increment J E2E schedule','ACTIVE',now(),now());
+
+          INSERT INTO security.tenant_locations
+            (location_id,tenant_id,location_code,location_name,location_type,latitude,longitude,
+             allowed_radius_meters,timezone_iana,status,created_at_utc,updated_at_utc)
+          VALUES (:'location_id',:'tenant_id','increment-j','Increment J E2E location','OFFICE',
+                  28.613900,77.209000,1000,'UTC','ACTIVE',now(),now());
+
+          INSERT INTO security.user_location_assignments
+            (assignment_id,tenant_id,user_id,location_id,schedule_id,status,assigned_by_user_id,assigned_at_utc)
+          VALUES (gen_random_uuid(),:'tenant_id',:'user_id',:'location_id',:'schedule_id','ACTIVE',:'user_id',now());
+
+          INSERT INTO security.access_schedule_overrides
+            (override_id,tenant_id,user_id,location_id,valid_from_utc,valid_to_utc,reason,status,
+             approved_by_user_id,approved_at_utc)
+          VALUES (:'override_id',:'tenant_id',:'user_id',:'location_id',now()-interval '5 minutes',
+                  now()+interval '30 minutes','Increment J E2E fixture','ACTIVE',:'user_id',now());
+
+          INSERT INTO security.tenant_security_policies
+            (tenant_id,max_active_devices_per_user,max_geo_accuracy_meters,max_geo_age_seconds,
+             geo_revalidation_interval_seconds,access_token_ttl_minutes,machine_token_ttl_minutes,
+             session_idle_timeout_minutes,session_max_duration_minutes,vpn_detected_action,
+             vpn_unknown_action,configuration_version,status,updated_by_user_id,updated_at_utc)
+          VALUES (:'tenant_id',3,100,300,300,10,10,30,60,'DENY','FLAG',1,'ACTIVE',:'user_id',now());
+
+          INSERT INTO security.permissions
+            (permission_key,module_key,resource_key,action_key,description,status)
+          VALUES ('di.subject.read','di','subject','read','Canonical Increment J DI permission','ACTIVE')
+          ON CONFLICT (permission_key) DO NOTHING;
+
+          INSERT INTO security.roles
+            (role_id,tenant_id,role_key,role_name,status,created_at_utc,updated_at_utc)
+          VALUES (:'role_id',:'tenant_id',:'role_key','Increment J E2E role','ACTIVE',now(),now());
+
+          INSERT INTO security.role_permissions
+            (tenant_id,role_id,permission_key,assigned_at_utc)
+          VALUES (:'tenant_id',:'role_id','di.subject.read',now());
+
+          INSERT INTO security.user_role_assignments
+            (assignment_id,tenant_id,user_id,role_id,status,assigned_by_user_id,assigned_at_utc)
+          VALUES (:'role_assignment_id',:'tenant_id',:'user_id',:'role_id','ACTIVE',:'user_id',now());
+          COMMIT;
+          SQL
+
+          {
+            echo "tenant_id=$tenant_id"
+            echo "user_id=$user_id"
+            echo "membership_id=$membership_id"
+            echo "device_id=$device_id"
+            echo "location_id=$location_id"
+            echo "schedule_id=$schedule_id"
+            echo "override_id=$override_id"
+            echo "role_id=$role_id"
+            echo "role_assignment_id=$role_assignment_id"
+            echo "permission_preexisting=$permission_preexisting"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Issue Security JWT and prove deployed DI authorization boundary
+        shell: bash
+        env:
+          SECURITY_BASE_URL: ${{ steps.security_domain.outputs.base_url }}
+          TENANT_ID: ${{ steps.fixture.outputs.tenant_id }}
+          USER_ID: ${{ steps.fixture.outputs.user_id }}
+          DEVICE_ID: ${{ steps.fixture.outputs.device_id }}
+          ROLE_ID: ${{ steps.fixture.outputs.role_id }}
+        run: |
+          set -euo pipefail
+          raw_db="${DEV_DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
+          case "$raw_db" in
+            postgresql+psycopg://*) psql_url="postgresql://${raw_db#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) psql_url="postgresql://${raw_db#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) psql_url="$raw_db" ;;
+            *) exit 1 ;;
+          esac
+          echo "::add-mask::$psql_url"
+
+          mock_body="$(jq -cn --arg user "$USER_ID" '{userId:$user}')"
+          mock_code="$(curl --silent --show-error --output /tmp/mock.json --write-out '%{http_code}' -H 'Content-Type: application/json' --data "$mock_body" "$SECURITY_BASE_URL/security/v1/dev/mock-auth/token")"
+          [ "$mock_code" = "200" ] || { cat /tmp/mock.json; echo "::error::Security DEV identity bootstrap HTTP $mock_code"; exit 1; }
+          identity_token="$(jq -r '.mockIdentityToken // empty' /tmp/mock.json)"
+          [ -n "$identity_token" ] || { echo "::error::Security DEV identity bootstrap returned no token."; exit 1; }
+
+          issue_access_token() {
+            local output="$1"
+            local captured idempotency code body
+            captured="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            idempotency="$(cat /proc/sys/kernel/random/uuid)"
+            body="$(jq -cn --arg tenant "$TENANT_ID" --arg device "$DEVICE_ID" --arg captured "$captured" '{tenantId:$tenant,deviceId:$device,geo:{latitude:28.6139,longitude:77.2090,accuracyMeters:10,capturedAt:$captured,source:"BROWSER",integrityStatus:"NORMAL",integrityReason:null}}')"
+            code="$(curl --silent --show-error --output "$output" --write-out '%{http_code}' \
+              -H 'Content-Type: application/json' \
+              -H "Authorization: Bearer $identity_token" \
+              -H "Idempotency-Key: $idempotency" \
+              -H 'X-Real-IP: 203.0.113.10' \
+              --data "$body" \
+              "$SECURITY_BASE_URL/security/v1/access-sessions")"
+            [ "$code" = "200" ] || { cat "$output"; echo "::error::Security access-session HTTP $code"; exit 1; }
+          }
+
+          issue_access_token /tmp/allowed-access.json
+          allowed_token="$(jq -r '.accessToken // empty' /tmp/allowed-access.json)"
+          jq -e '.actorType == "USER" and (.permissions | index("di.subject.read") != null)' /tmp/allowed-access.json >/dev/null
+          [ -n "$allowed_token" ] || { echo "::error::Security did not issue an access token."; exit 1; }
+
+          jwks_code="$(curl --silent --show-error --output /tmp/security-jwks.json --write-out '%{http_code}' "$SECURITY_BASE_URL/.well-known/jwks.json")"
+          [ "$jwks_code" = "200" ] || { echo "::error::Security JWKS HTTP $jwks_code"; exit 1; }
+          token_kid="$(python - "$allowed_token" <<'PY'
+          import base64, json, sys
+          h=sys.argv[1].split('.')[0]
+          h += '=' * (-len(h) % 4)
+          print(json.loads(base64.urlsafe_b64decode(h)).get('kid',''))
+          PY
+          )"
+          jq -e --arg kid "$token_kid" '.keys[] | select(.kid == $kid)' /tmp/security-jwks.json >/dev/null || { echo "::error::Issued JWT kid is absent from deployed Security JWKS."; exit 1; }
+
+          allow_code="$(curl --silent --show-error --output /tmp/di-allow.json --write-out '%{http_code}' -H "Authorization: Bearer $allowed_token" "$DI_BASE_URL/v1/tenants/$TENANT_ID/subjects")"
+          [ "$allow_code" = "200" ] || { cat /tmp/di-allow.json; echo "::error::Expected DI allow=200, got $allow_code"; exit 1; }
+
+          other_tenant="$(cat /proc/sys/kernel/random/uuid)"
+          cross_code="$(curl --silent --show-error --output /tmp/di-cross.json --write-out '%{http_code}' -H "Authorization: Bearer $allowed_token" "$DI_BASE_URL/v1/tenants/$other_tenant/subjects")"
+          [ "$cross_code" = "403" ] || { cat /tmp/di-cross.json; echo "::error::Expected cross-Tenant DI deny=403, got $cross_code"; exit 1; }
+
+          psql "$psql_url" -v ON_ERROR_STOP=1 -v tenant_id="$TENANT_ID" -v role_id="$ROLE_ID" <<'SQL'
+          BEGIN;
+          DELETE FROM security.role_permissions WHERE tenant_id=:'tenant_id' AND role_id=:'role_id' AND permission_key='di.subject.read';
+          UPDATE security.tenant_memberships SET authorization_version=authorization_version+1, updated_at_utc=now() WHERE tenant_id=:'tenant_id' AND user_id=:'user_id';
+          COMMIT;
+          SQL
+
+          issue_access_token /tmp/denied-access.json
+          denied_token="$(jq -r '.accessToken // empty' /tmp/denied-access.json)"
+          jq -e '(.permissions | index("di.subject.read")) == null' /tmp/denied-access.json >/dev/null
+          no_perm_code="$(curl --silent --show-error --output /tmp/di-no-perm.json --write-out '%{http_code}' -H "Authorization: Bearer $denied_token" "$DI_BASE_URL/v1/tenants/$TENANT_ID/subjects")"
+          [ "$no_perm_code" = "403" ] || { cat /tmp/di-no-perm.json; echo "::error::Expected missing-permission DI deny=403, got $no_perm_code"; exit 1; }
+
+          echo "Increment J PASS: Security JWT -> DI JWKS validation -> allow=200 -> missing permission=403 -> cross-Tenant=403"
+
+      - name: Cleanup temporary Security fixture
+        if: always() && steps.fixture.outputs.tenant_id != ''
+        shell: bash
+        env:
+          TENANT_ID: ${{ steps.fixture.outputs.tenant_id }}
+          USER_ID: ${{ steps.fixture.outputs.user_id }}
+          MEMBERSHIP_ID: ${{ steps.fixture.outputs.membership_id }}
+          DEVICE_ID: ${{ steps.fixture.outputs.device_id }}
+          LOCATION_ID: ${{ steps.fixture.outputs.location_id }}
+          SCHEDULE_ID: ${{ steps.fixture.outputs.schedule_id }}
+          OVERRIDE_ID: ${{ steps.fixture.outputs.override_id }}
+          ROLE_ID: ${{ steps.fixture.outputs.role_id }}
+          ROLE_ASSIGNMENT_ID: ${{ steps.fixture.outputs.role_assignment_id }}
+          PERMISSION_PREEXISTED: ${{ steps.fixture.outputs.permission_preexisting }}
+        run: |
+          set -euo pipefail
+          raw_db="${DEV_DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
+          case "$raw_db" in
+            postgresql+psycopg://*) psql_url="postgresql://${raw_db#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) psql_url="postgresql://${raw_db#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) psql_url="$raw_db" ;;
+            *) exit 1 ;;
+          esac
+          echo "::add-mask::$psql_url"
+
+          psql "$psql_url" -v ON_ERROR_STOP=1 \
+            -v tenant_id="$TENANT_ID" -v user_id="$USER_ID" -v membership_id="$MEMBERSHIP_ID" \
+            -v device_id="$DEVICE_ID" -v location_id="$LOCATION_ID" -v schedule_id="$SCHEDULE_ID" \
+            -v override_id="$OVERRIDE_ID" -v role_id="$ROLE_ID" -v role_assignment_id="$ROLE_ASSIGNMENT_ID" <<'SQL'
+          BEGIN;
+          DELETE FROM security.access_context_evaluations WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.access_sessions WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.external_identities WHERE user_id=:'user_id' AND provider='DEV_MOCK';
+          DELETE FROM security.user_role_assignments WHERE assignment_id=:'role_assignment_id';
+          DELETE FROM security.role_permissions WHERE tenant_id=:'tenant_id' AND role_id=:'role_id';
+          DELETE FROM security.roles WHERE role_id=:'role_id';
+          DELETE FROM security.access_schedule_overrides WHERE override_id=:'override_id';
+          DELETE FROM security.user_location_assignments WHERE tenant_id=:'tenant_id' AND user_id=:'user_id';
+          DELETE FROM security.tenant_security_policies WHERE tenant_id=:'tenant_id';
+          DELETE FROM security.tenant_locations WHERE location_id=:'location_id';
+          DELETE FROM security.access_schedules WHERE schedule_id=:'schedule_id';
+          DELETE FROM security.registered_devices WHERE device_id=:'device_id';
+          DELETE FROM security.tenant_memberships WHERE membership_id=:'membership_id';
+          DELETE FROM security.users WHERE user_id=:'user_id';
+          DELETE FROM security.security_principals WHERE principal_id=:'user_id';
+          DELETE FROM security.tenants WHERE tenant_id=:'tenant_id';
+          COMMIT;
+          SQL
+
+          if [ "$PERMISSION_PREEXISTED" != "true" ]; then
+            psql "$psql_url" -v ON_ERROR_STOP=1 -c "DELETE FROM security.permissions WHERE permission_key='di.subject.read';"
+          fi
