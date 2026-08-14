@@ -6,6 +6,7 @@ on:
       - feature/phase5-*
       - feature/admin-control-plane-*
       - feature/admin-maker-checker-*
+      - feature/admin-policy-access-*
       - feature/clerk-*
       - feature/global-user-*
       - feature/super-admin-*
