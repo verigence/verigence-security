@@ -24,26 +24,28 @@ class TenantRbacGateService(TenantRbacAdminService):
         permission_key: str,
     ) -> tuple[list[str], list[str]]:
         now = datetime.now(UTC)
-        membership = self.s.execute(
+        state = self.s.execute(
             text(
                 """
-                SELECT status,valid_from_utc,valid_to_utc
-                FROM security.tenant_memberships
-                WHERE tenant_id=:tenant_id AND user_id=:user_id
+                SELECT t.status AS tenant_status,u.status AS user_status,
+                       p.status AS principal_status
+                FROM security.users u
+                JOIN security.security_principals p ON p.principal_id=u.user_id
+                CROSS JOIN security.tenants t
+                WHERE u.user_id=:user_id AND t.tenant_id=:tenant_id
                 """
             ),
             {"tenant_id": tenant_id, "user_id": user_id},
         ).mappings().first()
-        if membership is None:
-            _deny("TENANT_MEMBERSHIP_REQUIRED")
-        if membership["status"] != "ACTIVE":
-            _deny("TENANT_MEMBERSHIP_INACTIVE")
-        valid_from = membership["valid_from_utc"]
-        valid_to = membership["valid_to_utc"]
-        if valid_from is not None and valid_from > now:
-            _deny("TENANT_MEMBERSHIP_INACTIVE")
-        if valid_to is not None and valid_to <= now:
-            _deny("TENANT_MEMBERSHIP_INACTIVE")
+        if state is None or state["tenant_status"] != "ACTIVE":
+            _deny("TENANT_NOT_ACTIVE")
+        if state["principal_status"] != "ACTIVE":
+            _deny("PRINCIPAL_NOT_ACTIVE")
+        if state["user_status"] != "ACTIVE":
+            _deny("USER_NOT_ACTIVE")
+
+        # Tenant access is established by effective Tenant-scoped authorization only. No
+        # tenant_memberships row is required in v1.4.2.
         roles, permissions = effective_user_permissions(self.s, tenant_id, user_id, now)
         if permission_key not in permissions:
             _deny("PERMISSION_DENIED")
