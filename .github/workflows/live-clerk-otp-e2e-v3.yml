@@ -1,0 +1,226 @@
+name: Live Clerk OTP E2E v3
+
+on:
+  push:
+    branches:
+      - test/live-clerk-otp-e2e-autonomous-20260814
+    paths:
+      - .github/workflows/live-clerk-otp-e2e-v3.yml
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live-clerk-otp-e2e-v3
+  cancel-in-progress: true
+
+env:
+  RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+  CLERK_FAPI: actual-peacock-21.clerk.accounts.dev
+  CLERK_PORTAL: https://actual-peacock-21.accounts.dev
+  OTP_BRANCH: test/live-clerk-otp-e2e-autonomous-20260814
+  OTP_ISSUE_NUMBER: "57"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      GH_TOKEN_FOR_E2E: ${{ github.token }}
+    steps:
+      - name: Resolve DEV secrets and domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          q='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$q" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          r="$(curl -fsS -X POST https://backboard.railway.com/graphql/v2 -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H 'Content-Type: application/json' --data "$body")"
+          clerk="$(printf '%s' "$r" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')"
+          [ -n "$clerk" ] || { echo '::error::CLERK_SECRET_KEY missing'; exit 1; }
+          echo "::add-mask::$clerk"
+          echo "CLERK_SECRET_KEY=$clerk" >> "$GITHUB_ENV"
+          dq='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          db="$(jq -cn --arg query "$dq" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          dr="$(curl -fsS -X POST https://backboard.railway.com/graphql/v2 -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H 'Content-Type: application/json' --data "$db")"
+          domain="$(printf '%s' "$dr" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || { echo '::error::Railway domain missing'; exit 1; }
+          echo "SECURITY_BASE_URL=https://$domain" >> "$GITHUB_ENV"
+
+      - name: Pre-authorize disposable testUser
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix="$(date -u +%Y%m%d%H%M%S)-$(cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c1-8)"
+          email="gigsinopensource+verigence-live-${suffix}@gmail.com"
+          mobile="$(python - <<'PY'
+          import secrets
+          print('+91' + secrets.choice('6789') + ''.join(secrets.choice('0123456789') for _ in range(9)))
+          PY
+          )"
+          echo "TEST_EMAIL=$email" >> "$GITHUB_ENV"
+          echo "TEST_MOBILE=$mobile" >> "$GITHUB_ENV"
+          payload="$(jq -cn --arg email "$email" --arg mobile "$mobile" '{firstName:"testUser",lastName:"E2E",email:$email,mobile:$mobile}')"
+          r="$(curl -fsS -X POST "$SECURITY_BASE_URL/security/v1/onboarding/users" -H 'Content-Type: application/json' -H 'X-Onboarding-Key: VGN-PHASE846' -H "X-Correlation-ID: $(cat /proc/sys/kernel/random/uuid)" --data "$payload")"
+          [ "$(printf '%s' "$r" | jq -r '.status')" = CLERK_EMAIL_VERIFICATION_REQUIRED ] || { echo "$r"; exit 1; }
+          attempt="$(printf '%s' "$r" | jq -r '.signupAttemptId')"
+          echo "SIGNUP_ATTEMPT_ID=$attempt" >> "$GITHUB_ENV"
+
+      - name: Create Clerk testing token
+        shell: bash
+        run: |
+          set -euo pipefail
+          r="$(curl -fsS -X POST https://api.clerk.com/v1/testing_tokens -H "Authorization: Bearer $CLERK_SECRET_KEY" -H 'Content-Type: application/json' --data '{}')"
+          token="$(printf '%s' "$r" | jq -r '.token // empty')"
+          [ -n "$token" ] || exit 1
+          echo "::add-mask::$token"
+          echo "CLERK_TESTING_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Install browser test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/vg-e2e && cd /tmp/vg-e2e
+          npm init -y >/dev/null
+          npm install --silent @playwright/test @clerk/testing
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Create Clerk account, verify real Gmail OTP, complete Verigence
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd /tmp/vg-e2e
+          cat > live.spec.mjs <<'JS'
+          import { test, expect } from '@playwright/test'
+          import { setupClerkTestingToken } from '@clerk/testing/playwright'
+          import crypto from 'node:crypto'
+          import fs from 'node:fs'
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+          async function json(url, options={}) {
+            const response = await fetch(url, options)
+            const text = await response.text()
+            let body; try { body = text ? JSON.parse(text) : null } catch { body = text }
+            return {response, body}
+          }
+          test('real Clerk email OTP E2E', async ({page}) => {
+            test.setTimeout(13*60*1000)
+            const email = process.env.TEST_EMAIL
+            const attempt = process.env.SIGNUP_ATTEMPT_ID
+            const password = `Vg9!${crypto.randomBytes(24).toString('base64url')}`
+            const {publicKey, privateKey} = crypto.generateKeyPairSync('rsa',{modulusLength:2048})
+            const publicB64 = Buffer.from(publicKey.export({type:'spki',format:'pem'})).toString('base64')
+            const bridge = `.e2e/otp-${process.env.RUN_ID}.enc`
+
+            await setupClerkTestingToken({page, frontendApiUrl: process.env.CLERK_FAPI})
+            await page.goto(`${process.env.CLERK_PORTAL}/sign-up?email_address=${encodeURIComponent(email)}`,{waitUntil:'domcontentloaded'})
+            await page.locator('.cl-signUp-root').waitFor({state:'attached',timeout:30000})
+
+            const emailBox = page.locator('input[name="emailAddress"]')
+            if (await emailBox.isVisible()) await emailBox.fill(email)
+            const fn = page.locator('input[name="firstName"]'); if (await fn.isVisible()) await fn.fill('testUser')
+            const ln = page.locator('input[name="lastName"]'); if (await ln.isVisible()) await ln.fill('E2E')
+            if (await page.locator('input[name="username"]').isVisible()) throw new Error('Username is enabled in Clerk; Phase 1 requires email-only sign-in')
+            if (await page.locator('input[name="phoneNumber"]').isVisible()) throw new Error('Phone is enabled in Clerk; Phase 1 keeps mobile in Verigence')
+
+            const primary = page.locator('button.cl-formButtonPrimary').first()
+            let passwordBox = page.locator('input[name="password"]')
+            if (!(await passwordBox.isVisible())) {
+              await primary.click()
+              await passwordBox.waitFor({state:'visible',timeout:20000})
+            }
+            await passwordBox.fill(password)
+            await page.locator('button.cl-formButtonPrimary').first().click()
+
+            const codeBox = page.locator('input[autocomplete="one-time-code"], input[name="code"]').first()
+            await codeBox.waitFor({state:'visible',timeout:30000})
+
+            const metadata = [
+              'LIVE_OTP_READY',
+              `run_id=${process.env.RUN_ID}`,
+              `email=${email}`,
+              `signup_attempt_id=${attempt}`,
+              `otp_bridge_path=${bridge}`,
+              `otp_public_key_b64=${publicB64}`,
+            ].join('\n')
+            const c = await fetch(`https://api.github.com/repos/${process.env.REPO}/issues/${process.env.OTP_ISSUE_NUMBER}/comments`,{
+              method:'POST', headers:{Authorization:`Bearer ${process.env.GH_TOKEN_FOR_E2E}`,Accept:'application/vnd.github+json','Content-Type':'application/json'}, body:JSON.stringify({body:metadata})
+            })
+            if (!c.ok) throw new Error(`handoff metadata HTTP ${c.status}`)
+
+            let cipher
+            const fileUrl = `https://api.github.com/repos/${process.env.REPO}/contents/${bridge}?ref=${encodeURIComponent(process.env.OTP_BRANCH)}`
+            for (let i=0;i<100;i++) {
+              const r=await fetch(fileUrl,{headers:{Authorization:`Bearer ${process.env.GH_TOKEN_FOR_E2E}`,Accept:'application/vnd.github+json'}})
+              if (r.status===200) { const p=await r.json(); cipher=Buffer.from(Buffer.from(p.content.replace(/\n/g,''),'base64').toString('utf8').trim(),'base64'); break }
+              if (r.status!==404) throw new Error(`OTP bridge HTTP ${r.status}`)
+              await sleep(5000)
+            }
+            if (!cipher) throw new Error('OTP ciphertext not received')
+            const otp=crypto.privateDecrypt({key:privateKey,padding:crypto.constants.RSA_PKCS1_OAEP_PADDING,oaepHash:'sha256'},cipher).toString().trim()
+            if (!/^\d{6}$/.test(otp)) throw new Error('Invalid decrypted OTP format')
+            await codeBox.fill(otp)
+            const verify=page.locator('button.cl-formButtonPrimary').first(); if(await verify.isVisible().catch(()=>false)) await verify.click().catch(()=>{})
+
+            let user
+            for(let i=0;i<30;i++){
+              const r=await json(`https://api.clerk.com/v1/users?email_address=${encodeURIComponent(email)}`,{headers:{Authorization:`Bearer ${process.env.CLERK_SECRET_KEY}`}})
+              if(!r.response.ok) throw new Error(`Clerk lookup HTTP ${r.response.status}`)
+              const users=Array.isArray(r.body)?r.body:(r.body?.data??[])
+              user=users.find(u=>(u.email_addresses??[]).some(e=>String(e.email_address).toLowerCase()===email.toLowerCase()))
+              if(user)break; await sleep(1000)
+            }
+            if(!user)throw new Error('Clerk user not found after OTP')
+            const er=(user.email_addresses??[]).find(e=>String(e.email_address).toLowerCase()===email.toLowerCase())
+            if(er?.verification?.status!=='verified')throw new Error(`Email not verified: ${er?.verification?.status}`)
+            const clerkUserId=String(user.id)
+
+            let token=await page.evaluate(async()=>globalThis.Clerk?.session?.getToken?await globalThis.Clerk.session.getToken():null).catch(()=>null)
+            if(!token){
+              const s=await json('https://api.clerk.com/v1/sessions',{method:'POST',headers:{Authorization:`Bearer ${process.env.CLERK_SECRET_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({user_id:clerkUserId})})
+              if(!s.response.ok)throw new Error(`Session fallback HTTP ${s.response.status}: ${JSON.stringify(s.body)}`)
+              const t=await json(`https://api.clerk.com/v1/sessions/${s.body.id}/tokens`,{method:'POST',headers:{Authorization:`Bearer ${process.env.CLERK_SECRET_KEY}`,'Content-Type':'application/json'},body:'{}'})
+              if(!t.response.ok)throw new Error(`Token fallback HTTP ${t.response.status}`); token=t.body.jwt
+            }
+            const done=await json(`${process.env.SECURITY_BASE_URL}/security/v1/onboarding/users/${attempt}/complete`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json','X-Correlation-ID':crypto.randomUUID()},body:'{}'})
+            if(done.response.status!==201)throw new Error(`Verigence complete HTTP ${done.response.status}: ${JSON.stringify(done.body)}`)
+            expect(done.body.status).toBe('PENDING_ADMIN_APPROVAL')
+            const pre=await json(`${process.env.SECURITY_BASE_URL}/security/v1/auth/precheck`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})})
+            expect(pre.body).toEqual({allowed:false})
+            fs.appendFileSync(process.env.GITHUB_ENV,`CLERK_USER_ID=${clerkUserId}\nSECURITY_USER_ID=${done.body.userId??''}\nONBOARDING_REQUEST_ID=${done.body.onboardingRequestId??''}\n`)
+            const success=['LIVE_E2E_COMPLETED',`run_id=${process.env.RUN_ID}`,`email=${email}`,`clerk_user_id=${clerkUserId}`,`security_user_id=${done.body.userId??''}`,`onboarding_request_id=${done.body.onboardingRequestId??''}`,'clerk_email_verified=true','security_status=PENDING','onboarding_status=PENDING_ADMIN_APPROVAL','precheck_allowed=false','user_left_in_place=true'].join('\n')
+            await fetch(`https://api.github.com/repos/${process.env.REPO}/issues/${process.env.OTP_ISSUE_NUMBER}/comments`,{method:'POST',headers:{Authorization:`Bearer ${process.env.GH_TOKEN_FOR_E2E}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},body:JSON.stringify({body:success})})
+          })
+          JS
+          cat > playwright.config.mjs <<'JS'
+          export default {testDir:'.',testMatch:'live.spec.mjs',workers:1,retries:0,use:{headless:true}}
+          JS
+          npx playwright test --config=playwright.config.mjs --reporter=line
+
+      - name: Verify database state and deliberately leave user in place
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q 'sqlalchemy>=2,<3' 'psycopg[binary]>=3.2,<4'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine,text
+          raw=os.environ['MIGRATION_DATABASE_URL']
+          for prefix in ('postgresql+asyncpg://','postgresql://','postgres://'):
+              if raw.startswith(prefix): raw='postgresql+psycopg://'+raw.removeprefix(prefix); break
+          e=create_engine(raw,pool_pre_ping=True)
+          with e.connect() as c:
+              r=c.execute(text('''SELECT u.user_id,u.status,p.status principal_status,e.provider_subject,e.status identity_status,r.status onboarding_status,a.status attempt_status FROM security.users u JOIN security.security_principals p ON p.principal_id=u.user_id JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK' JOIN security.platform_user_onboarding_requests r ON r.user_id=u.user_id JOIN security.platform_user_signup_attempts a ON a.signup_attempt_id=:attempt WHERE lower(u.primary_email)=lower(:email)'''),{'attempt':os.environ['SIGNUP_ATTEMPT_ID'],'email':os.environ['TEST_EMAIL']}).mappings().one()
+          assert r['status']=='PENDING' and r['principal_status']=='ACTIVE' and r['identity_status']=='ACTIVE'
+          assert r['onboarding_status']=='PENDING_ADMIN_APPROVAL' and r['attempt_status']=='COMPLETED'
+          assert r['provider_subject']==os.environ['CLERK_USER_ID']
+          print(f"FINAL_E2E_PASS email={os.environ['TEST_EMAIL']} clerk_user_id={r['provider_subject']} security_user_id={r['user_id']}")
+          print('USER_LEFT_IN_PLACE_FOR_INSPECTION=true')
+          PY
