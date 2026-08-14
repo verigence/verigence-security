@@ -1,6 +1,5 @@
 from verigence_security.main import app
 
-
 paths = {
     path
     for route in app.routes
