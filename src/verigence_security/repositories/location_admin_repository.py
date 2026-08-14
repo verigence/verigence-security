@@ -18,6 +18,19 @@ class LocationAdminRepository:
         ).first()
         return row is not None
 
+    def list_locations(self, *, tenant_id: str) -> list[dict[str, Any]]:
+        rows = self.s.execute(
+            text(
+                """
+                SELECT * FROM security.tenant_locations
+                WHERE tenant_id=:tenant_id
+                ORDER BY location_code,location_id
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
     def upsert_location(
         self,
         *,
