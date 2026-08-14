@@ -31,8 +31,8 @@ def effective_user_permissions(
     rows = session.execute(
         text(
             """
-            WITH effective_roles AS (
-                SELECT r.tenant_id,r.role_id,r.role_key
+            WITH effective_tenant_roles AS (
+                SELECT r.role_key,r.role_id
                 FROM security.user_role_assignments ura
                 JOIN security.roles r
                   ON r.tenant_id=ura.tenant_id
@@ -44,7 +44,7 @@ def effective_user_permissions(
                   AND (ura.valid_from_utc IS NULL OR ura.valid_from_utc<=:now)
                   AND (ura.valid_to_utc IS NULL OR ura.valid_to_utc>:now)
                 UNION
-                SELECT r.tenant_id,r.role_id,r.role_key
+                SELECT r.role_key,r.role_id
                 FROM security.group_memberships gm
                 JOIN security.groups g
                   ON g.tenant_id=gm.tenant_id
@@ -63,13 +63,28 @@ def effective_user_permissions(
                   AND gm.status='ACTIVE'
                   AND (gm.valid_from_utc IS NULL OR gm.valid_from_utc<=:now)
                   AND (gm.valid_to_utc IS NULL OR gm.valid_to_utc>:now)
+            ),
+            effective_grants AS (
+                SELECT etr.role_key,p.permission_key
+                FROM effective_tenant_roles etr
+                JOIN security.role_permissions rp
+                  ON rp.tenant_id=:tenant_id AND rp.role_id=etr.role_id
+                JOIN security.permissions p
+                  ON p.permission_key=rp.permission_key AND p.status='ACTIVE'
+                UNION
+                SELECT pr.role_key,p.permission_key
+                FROM security.platform_user_role_assignments pura
+                JOIN security.platform_roles pr
+                  ON pr.role_key=pura.role_key AND pr.status='ACTIVE'
+                JOIN security.platform_role_permissions prp
+                  ON prp.role_key=pr.role_key
+                JOIN security.permissions p
+                  ON p.permission_key=prp.permission_key AND p.status='ACTIVE'
+                WHERE pura.user_id=:user_id
+                  AND pura.status='ACTIVE'
             )
-            SELECT DISTINCT er.role_key,p.permission_key
-            FROM effective_roles er
-            JOIN security.role_permissions rp
-              ON rp.tenant_id=er.tenant_id AND rp.role_id=er.role_id
-            JOIN security.permissions p
-              ON p.permission_key=rp.permission_key AND p.status='ACTIVE'
+            SELECT DISTINCT role_key,permission_key
+            FROM effective_grants
             """
         ),
         {"tenant_id": tenant_id, "user_id": user_id, "now": now},
