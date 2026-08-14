@@ -60,12 +60,10 @@ jobs:
           fi
 
           clerk_secret="$(printf '%s' "$response" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')"
-          encryption_key="$(printf '%s' "$response" | jq -r '.data.variables.SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY // empty')"
           runtime_db="$(printf '%s' "$response" | jq -r '.data.variables.DATABASE_URL // empty')"
           clerk_api="$(printf '%s' "$response" | jq -r '.data.variables.CLERK_BACKEND_API_URL // "https://api.clerk.com/v1"')"
 
           [ -n "$clerk_secret" ] || { echo "::error::Railway DEV does not have CLERK_SECRET_KEY configured."; exit 1; }
-          [ -n "$encryption_key" ] || { echo "::error::Railway DEV does not have SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY configured."; exit 1; }
           raw_db="${runtime_db:-${DEV_DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}}"
           [ -n "$raw_db" ] || { echo "::error::No DEV database URL is available."; exit 1; }
           case "$raw_db" in
@@ -88,14 +86,12 @@ jobs:
           [ -n "$domain" ] || { echo "::error::Railway DEV public domain is missing."; exit 1; }
 
           echo "::add-mask::$clerk_secret"
-          echo "::add-mask::$encryption_key"
           echo "::add-mask::$sqlalchemy_url"
           echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
-          echo "SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY=$encryption_key" >> "$GITHUB_ENV"
           echo "DATABASE_URL=$sqlalchemy_url" >> "$GITHUB_ENV"
           echo "CLERK_BACKEND_API_URL=$clerk_api" >> "$GITHUB_ENV"
           echo "BASE_URL=https://$domain" >> "$GITHUB_ENV"
-          echo "Actual Railway DEV runtime configuration resolved without exposing secrets."
+          echo "Actual Railway DEV Clerk/DB configuration resolved without exposing secret values."
 
       - name: Generate disposable testUser identity
         shell: bash
@@ -121,35 +117,37 @@ jobs:
           echo "Disposable testUser email: $email"
           echo "Disposable testUser mobile: $mobile"
 
-      - name: Resolve active onboarding key and preflight disposable identity
+      - name: Verify active onboarding key hash and preflight disposable identity
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import os
           import httpx
+          from argon2 import PasswordHasher
+          from argon2.exceptions import VerifyMismatchError
           from sqlalchemy import create_engine, text
-          from sqlalchemy.orm import Session
-          from verigence_security.config import Settings
-          from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
 
           engine = create_engine(os.environ['DATABASE_URL'], pool_pre_ping=True)
           email = os.environ['TEST_EMAIL'].lower()
           mobile = os.environ['TEST_MOBILE']
           with engine.connect() as conn:
+              state = conn.execute(
+                  text("SELECT key_hash,key_version,status FROM security.platform_user_onboarding_settings WHERE singleton_id=1")
+              ).mappings().one()
               existing = conn.execute(
                   text("SELECT 1 FROM security.users WHERE lower(primary_email)=:email OR primary_mobile=:mobile LIMIT 1"),
                   {'email': email, 'mobile': mobile},
               ).first()
-              assert existing is None, 'Disposable identity unexpectedly exists in Security before test'
-
-          settings = Settings(
-              security_user_onboarding_key_encryption_key=os.environ['SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY']
-          )
-          with Session(engine) as session:
-              state = GlobalUserOnboardingService(session, settings).get_onboarding_key()
           assert state['status'] == 'ACTIVE', 'Global onboarding key is not ACTIVE'
-          onboarding_key = str(state['onboardingKey'])
+          try:
+              matches = PasswordHasher().verify(str(state['key_hash']), 'VGN-PHASE845')
+          except VerifyMismatchError:
+              matches = False
+          assert matches, 'DEV onboarding key no longer matches the known v1.4.5 fixture; aborting without mutation'
+          assert existing is None, 'Disposable identity unexpectedly exists in Security before test'
+
+          onboarding_key = 'VGN-PHASE845'
           print(f"::add-mask::{onboarding_key}")
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
               handle.write(f"ONBOARDING_KEY={onboarding_key}\n")
@@ -168,7 +166,7 @@ jobs:
               if any(str(item.get('email_address', '')).lower() == email for item in user.get('email_addresses', []))
           ]
           assert not exact, 'Disposable identity unexpectedly exists in Clerk before test'
-          print(f"Preflight passed; onboarding key version={state['version']} and disposable identity is unused.")
+          print(f"Preflight passed; active onboarding key version={state['key_version']} and disposable identity is unused.")
           PY
 
       - name: Register testUser through deployed Verigence API
@@ -339,21 +337,38 @@ jobs:
                   payload = lookup.json()
                   users = payload if isinstance(payload, list) else payload.get('data', [])
                   for item in users:
-                      if any(str(address.get('email_address', '')).lower() == email for address in item.get('email_addresses', [])):
+                      if any(
+                          str(address.get('email_address', '')).lower() == email
+                          for address in item.get('email_addresses', [])
+                      ):
                           known_clerk_id = str(item.get('id', ''))
                           break
 
           if clerk_secret and known_clerk_id:
               deleted = httpx.delete(f'{clerk_api}/users/{known_clerk_id}', headers=headers, timeout=20.0)
-              assert deleted.status_code in (200, 204, 404), f'Clerk delete HTTP {deleted.status_code}: {deleted.text[:300]}'
+              assert deleted.status_code in (200, 204, 404), (
+                  f'Clerk delete HTTP {deleted.status_code}: {deleted.text[:300]}'
+              )
 
           if engine is not None and user_id:
               with engine.begin() as conn:
-                  conn.execute(text('DELETE FROM security.security_events WHERE principal_id=:uid OR entity_id=:uid'), {'uid': user_id})
-                  conn.execute(text('DELETE FROM security.platform_user_onboarding_requests WHERE user_id=:uid'), {'uid': user_id})
-                  conn.execute(text('DELETE FROM security.external_identities WHERE user_id=:uid'), {'uid': user_id})
+                  conn.execute(
+                      text('DELETE FROM security.security_events WHERE principal_id=:uid OR entity_id=:uid'),
+                      {'uid': user_id},
+                  )
+                  conn.execute(
+                      text('DELETE FROM security.platform_user_onboarding_requests WHERE user_id=:uid'),
+                      {'uid': user_id},
+                  )
+                  conn.execute(
+                      text('DELETE FROM security.external_identities WHERE user_id=:uid'),
+                      {'uid': user_id},
+                  )
                   conn.execute(text('DELETE FROM security.users WHERE user_id=:uid'), {'uid': user_id})
-                  conn.execute(text('DELETE FROM security.security_principals WHERE principal_id=:uid'), {'uid': user_id})
+                  conn.execute(
+                      text('DELETE FROM security.security_principals WHERE principal_id=:uid'),
+                      {'uid': user_id},
+                  )
 
           if engine is not None and email:
               with engine.connect() as conn:
@@ -372,13 +387,26 @@ jobs:
 
           if clerk_secret and known_clerk_id:
               confirm = httpx.get(f'{clerk_api}/users/{known_clerk_id}', headers=headers, timeout=20.0)
-              assert confirm.status_code == 404, f'Clerk user still exists after delete: HTTP {confirm.status_code}'
+              assert confirm.status_code == 404, (
+                  f'Clerk user still exists after delete: HTTP {confirm.status_code}'
+              )
           elif clerk_secret and email:
-              lookup = httpx.get(f'{clerk_api}/users', headers=headers, params=[('email_address', email)], timeout=20.0)
+              lookup = httpx.get(
+                  f'{clerk_api}/users',
+                  headers=headers,
+                  params=[('email_address', email)],
+                  timeout=20.0,
+              )
               lookup.raise_for_status()
               payload = lookup.json()
               users = payload if isinstance(payload, list) else payload.get('data', [])
-              exact = [item for item in users if any(str(address.get('email_address', '')).lower() == email for address in item.get('email_addresses', []))]
+              exact = [
+                  item for item in users
+                  if any(
+                      str(address.get('email_address', '')).lower() == email
+                      for address in item.get('email_addresses', [])
+                  )
+              ]
               assert not exact, 'Clerk disposable user still exists after cleanup'
 
           print(f"CLEANUP PASS: disposable identity {email or '<not-created>'} removed from Clerk and Security.")
