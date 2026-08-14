@@ -6,6 +6,7 @@ on:
       - feature/phase5-*
       - feature/admin-control-plane-*
       - feature/clerk-*
+      - feature/global-user-*
   workflow_dispatch:
 
 permissions:
@@ -13,7 +14,7 @@ permissions:
 
 concurrency:
   group: phase5-neon-security-administration
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   phase5-neon:
@@ -29,7 +30,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -47,26 +48,26 @@ jobs:
           fi
 
           case "$raw" in
-            postgresql+psycopg://*)
-              psql_url="postgresql://${raw#postgresql+psycopg://}"
-              sqlalchemy_url="$raw"
-              ;;
-            postgresql+asyncpg://*)
-              psql_url="postgresql://${raw#postgresql+asyncpg://}"
-              sqlalchemy_url="postgresql+psycopg://${raw#postgresql+asyncpg://}"
-              ;;
-            postgresql://*)
-              psql_url="$raw"
-              sqlalchemy_url="postgresql+psycopg://${raw#postgresql://}"
-              ;;
-            postgres://*)
-              psql_url="postgresql://${raw#postgres://}"
-              sqlalchemy_url="postgresql+psycopg://${raw#postgres://}"
-              ;;
-            *)
-              echo "::error::Configured DEV database secret is not a PostgreSQL URL."
-              exit 1
-              ;;
+          postgresql+psycopg://*)
+            psql_url="postgresql://${raw#postgresql+psycopg://}"
+            sqlalchemy_url="$raw"
+            ;;
+          postgresql+asyncpg://*)
+            psql_url="postgresql://${raw#postgresql+asyncpg://}"
+            sqlalchemy_url="postgresql+psycopg://${raw#postgresql+asyncpg://}"
+            ;;
+          postgresql://*)
+            psql_url="$raw"
+            sqlalchemy_url="postgresql+psycopg://${raw#postgresql://}"
+            ;;
+          postgres://*)
+            psql_url="postgresql://${raw#postgres://}"
+            sqlalchemy_url="postgresql+psycopg://${raw#postgres://}"
+            ;;
+          *)
+            echo "::error::Configured DEV database secret is not a PostgreSQL URL."
+            exit 1
+            ;;
           esac
 
           echo "::add-mask::$psql_url"
@@ -104,5 +105,47 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0002_security_admin_control_plane_v1.4.sql
 
-      - name: Run Phase 5 PostgreSQL administration tests
-        run: pytest -q tests/integration/test_phase5_*.py
+      - name: Apply global USER onboarding v1.4.2 migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$ADMIN_MIGRATION_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/0003_global_user_onboarding_v1.4.2.sql
+
+      - name: Apply v1.4.2 security-event compatibility migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$ADMIN_MIGRATION_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/0004_v142_security_event_outcome_width.sql
+
+      - name: Run v1.4.2 schema/control-registry PostgreSQL tests
+        run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142_schema.py
+
+      - name: Run v1.4.2 global onboarding lifecycle PostgreSQL test
+        run: >-
+          pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
+          -k global_user_onboards_once_then_authorizes_across_tenants
+
+      - name: Run current historical Phase 5 PostgreSQL administration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=()
+          for test_file in tests/integration/test_phase5_*.py; do
+            case "$test_file" in
+              tests/integration/test_phase5_admin_control_plane_schema.py|\
+              tests/integration/test_phase5_global_user_onboarding_v142.py|\
+              tests/integration/test_phase5_global_user_onboarding_v142_schema.py|\
+              tests/integration/test_phase5_onboarding_f.py|\
+              tests/integration/test_phase5_platform_admin_api.py)
+                continue
+                ;;
+            esac
+            tests+=("$test_file")
+          done
+          pytest -q "${tests[@]}"

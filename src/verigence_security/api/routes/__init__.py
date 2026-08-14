@@ -1,7 +1,6 @@
-from verigence_security.api.routes import access, tenant_groups, tenant_roles
+"""Verigence Security API route modules.
 
-# `access.router` is already registered by the application. The child route objects
-# carry their complete `/security/v1/admin/...` paths, so attach them directly without
-# applying the access router's `/security/v1` prefix a second time.
-access.router.routes.extend(tenant_groups.router.routes)
-access.router.routes.extend(tenant_roles.router.routes)
+Route registration is composed explicitly by ``verigence_security.main``. Importing this package
+must not mutate another router's route list; that made application composition dependent on module
+import/reload order and could duplicate or lose routes in long-lived/test processes.
+"""

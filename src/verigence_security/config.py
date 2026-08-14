@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     clerk_issuer: str = ""
     clerk_jwt_key: str = ""
     clerk_authorized_parties: str = ""
+    # v1.4.2 lifecycle operations use Clerk's Backend API only after Security has accepted a
+    # global onboarding request or when Security USER status is synchronized to Clerk.
+    clerk_secret_key: str = ""
+    clerk_backend_api_url: str = "https://api.clerk.com/v1"
 
     security_token_issuer: str = "verigence-security"
     security_token_audience: str = "verigence-platform"
@@ -28,12 +32,17 @@ class Settings(BaseSettings):
     security_private_key_pem: str = ""
     security_public_key_pem: str = ""
 
+    # Platform-global onboarding-key encryption key. Expected value is URL-safe base64 for
+    # exactly 32 bytes. It is intentionally required only by onboarding-key management routes,
+    # not by ordinary authentication/runtime startup.
+    security_user_onboarding_key_encryption_key: str = ""
+
     # v1.4.1 Clerk bootstrap. This replaces the local-password bootstrap runtime path.
     security_bootstrap_enabled: bool = False
     security_bootstrap_super_admin_clerk_user_id: str = ""
 
     # Increment-B local bootstrap configuration is retained only as migration debt.
-    # The v1.4.1 runtime no longer invokes the local bootstrap/login path.
+    # The v1.4.1+ runtime no longer invokes the local bootstrap/login path.
     platform_bootstrap_enabled: bool = False
     platform_bootstrap_login: str = ""
     platform_bootstrap_password: str = ""

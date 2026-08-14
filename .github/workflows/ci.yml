@@ -52,6 +52,9 @@ jobs:
       - name: Mypy
         run: mypy src
 
+      - name: Verify v1.4.2 runtime route contract
+        run: python scripts/check_v142_route_contract.py
+
       - name: Tests
         run: pytest -q
 
