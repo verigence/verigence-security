@@ -1,8 +1,10 @@
-from verigence_security.api.routes import global_users
+from importlib import import_module
+from typing import Any
+
 from verigence_security.main import app
 
 
-def route_paths(routes: object) -> set[str]:
+def route_paths(routes: Any) -> set[str]:
     return {
         path
         for route in routes
@@ -11,6 +13,7 @@ def route_paths(routes: object) -> set[str]:
 
 
 paths = route_paths(app.routes)
+global_users = import_module("verigence_security.api.routes.global_users")
 global_user_paths = route_paths(global_users.router.routes)
 print(f"global_users module: {global_users.__file__}")
 print(f"global_users router paths: {sorted(global_user_paths)}")
