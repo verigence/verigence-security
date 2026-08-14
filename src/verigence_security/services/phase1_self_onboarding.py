@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -11,59 +10,118 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
+from verigence_security.adapters.clerk_backend import ClerkBackendClient
+from verigence_security.adapters.identity import AuthenticatedIdentity
 from verigence_security.core.errors import security_error
 
 _HASHER = PasswordHasher()
+_ATTEMPT_TTL = timedelta(minutes=30)
 
 
 class Phase1SelfOnboardingService:
-    """Single-submit Phase 1 self-onboarding with Clerk backend user creation.
-
-    Security validates the Platform onboarding gate and global identity uniqueness first. Clerk
-    creates the credential identity next. Only after Clerk succeeds does Security persist the
-    global USER as PENDING together with the immutable Clerk subject.
-    """
+    """Phase 1 onboarding with Security pre-authorization and Clerk-owned email OTP."""
 
     def __init__(self, session: Session) -> None:
         self.s = session
 
-    def register(
+    def start(
         self,
         *,
         first_name: str,
         last_name: str,
         email: str,
         mobile: str,
-        password: str,
         onboarding_key: str,
         source_ip: str,
         correlation_id: str,
-        clerk: ClerkBackendClient,
     ) -> dict[str, Any]:
         clean_first = self._name(first_name, "First name")
         clean_last = self._name(last_name, "Last name")
         clean_email = self._email(email)
         clean_mobile = self._indian_mobile(mobile)
+        now = datetime.now(UTC)
 
         self._require_valid_onboarding_key(onboarding_key)
+        self._expire_stale_attempts(now)
         self._require_identity_not_registered(clean_email, clean_mobile)
+        self._require_no_live_attempt(clean_email, clean_mobile)
 
-        # Release the read transaction before the Clerk network call. The database uniqueness
-        # constraints remain the final concurrency guard when the local USER is persisted.
+        attempt_id = str(uuid4())
+        expires_at = now + _ATTEMPT_TTL
+        try:
+            self.s.execute(
+                text(
+                    """
+                    INSERT INTO security.platform_user_signup_attempts
+                    (signup_attempt_id,first_name,last_name,email,mobile,status,
+                     submitted_source_ip,correlation_id,created_at_utc,expires_at_utc)
+                    VALUES
+                    (:attempt_id,:first_name,:last_name,:email,:mobile,'AUTHORIZED_FOR_CLERK',
+                     CAST(:source_ip AS inet),:correlation_id,:now,:expires_at)
+                    """
+                ),
+                {
+                    "attempt_id": attempt_id,
+                    "first_name": clean_first,
+                    "last_name": clean_last,
+                    "email": clean_email,
+                    "mobile": clean_mobile,
+                    "source_ip": source_ip,
+                    "correlation_id": correlation_id,
+                    "now": now,
+                    "expires_at": expires_at,
+                },
+            )
+            self.s.commit()
+        except IntegrityError as exc:
+            self.s.rollback()
+            raise ValueError("Email or mobile number already has an active signup attempt") from exc
+
+        return {
+            "signupAttemptId": attempt_id,
+            "status": "CLERK_EMAIL_VERIFICATION_REQUIRED",
+            "expiresAt": expires_at.isoformat(),
+        }
+
+    def complete(
+        self,
+        *,
+        signup_attempt_id: str,
+        identity: AuthenticatedIdentity,
+        source_ip: str,
+        correlation_id: str,
+        clerk: ClerkBackendClient,
+    ) -> dict[str, Any]:
+        if identity.provider != "CLERK" or not identity.provider_subject.startswith("user_"):
+            raise security_error("AUTH_TOKEN_INVALID")
+
+        attempt = self._load_attempt(signup_attempt_id)
+        self._require_completable(attempt)
+        expected_email = str(attempt["email"])
+        first_name = str(attempt["first_name"])
+        last_name = str(attempt["last_name"])
+        mobile = str(attempt["mobile"])
+
+        # Do not hold a database row lock while calling Clerk. Re-acquire and re-check the
+        # signup attempt before committing the Security USER to make completion idempotent.
         self.s.rollback()
-
-        clerk_user_id = clerk.create_user(
-            first_name=clean_first,
-            last_name=clean_last,
-            email=clean_email,
-            password=password,
+        if not clerk.is_email_verified(identity.provider_subject, expected_email):
+            raise ValueError("Clerk email is not verified or does not match the signup email")
+        clerk.update_user_profile(
+            identity.provider_subject,
+            first_name=first_name,
+            last_name=last_name,
         )
 
         now = datetime.now(UTC)
+        locked_attempt = self._load_attempt(signup_attempt_id, for_update=True)
+        self._require_completable(locked_attempt, now=now)
+        self._require_identity_not_registered(expected_email, mobile)
+        self._require_clerk_identity_not_registered(identity.provider_subject)
+
         user_id = str(uuid4())
         request_id = str(uuid4())
-        display_name = f"{clean_first} {clean_last}".strip()
+        display_name = f"{first_name} {last_name}".strip()
         try:
             self.s.execute(
                 text(
@@ -75,7 +133,7 @@ class Phase1SelfOnboardingService:
                 ),
                 {
                     "user_id": user_id,
-                    "principal_name": clean_email,
+                    "principal_name": expected_email,
                     "now": now,
                 },
             )
@@ -92,10 +150,10 @@ class Phase1SelfOnboardingService:
                 {
                     "user_id": user_id,
                     "display_name": display_name,
-                    "first_name": clean_first,
-                    "last_name": clean_last,
-                    "email": clean_email,
-                    "mobile": clean_mobile,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": expected_email,
+                    "mobile": mobile,
                     "now": now,
                 },
             )
@@ -110,7 +168,7 @@ class Phase1SelfOnboardingService:
                 {
                     "external_identity_id": str(uuid4()),
                     "user_id": user_id,
-                    "clerk_user_id": clerk_user_id,
+                    "clerk_user_id": identity.provider_subject,
                     "now": now,
                 },
             )
@@ -127,16 +185,29 @@ class Phase1SelfOnboardingService:
                 {
                     "request_id": request_id,
                     "user_id": user_id,
-                    "email": clean_email,
-                    "clerk_user_id": clerk_user_id,
+                    "email": expected_email,
+                    "clerk_user_id": identity.provider_subject,
                     "source_ip": source_ip,
                     "now": now,
                     "correlation_id": correlation_id,
                 },
             )
+            self.s.execute(
+                text(
+                    """
+                    UPDATE security.platform_user_signup_attempts
+                    SET status='COMPLETED',clerk_user_id=:clerk_user_id,completed_at_utc=:now
+                    WHERE signup_attempt_id=:attempt_id
+                    """
+                ),
+                {
+                    "attempt_id": signup_attempt_id,
+                    "clerk_user_id": identity.provider_subject,
+                    "now": now,
+                },
+            )
             self._security_event(
                 user_id=user_id,
-                outcome="PENDING_ADMIN_APPROVAL",
                 source_ip=source_ip,
                 correlation_id=correlation_id,
                 now=now,
@@ -144,11 +215,9 @@ class Phase1SelfOnboardingService:
             self.s.commit()
         except IntegrityError as exc:
             self.s.rollback()
-            self._compensate_clerk_user(clerk, clerk_user_id)
-            raise ValueError("Email or mobile number is already registered") from exc
+            raise ValueError("Email, mobile, or Clerk identity is already registered") from exc
         except Exception:
             self.s.rollback()
-            self._compensate_clerk_user(clerk, clerk_user_id)
             raise
 
         return {
@@ -156,6 +225,61 @@ class Phase1SelfOnboardingService:
             "status": "PENDING_ADMIN_APPROVAL",
             "message": "Registration successful. Pending administrator approval.",
         }
+
+    def _load_attempt(self, signup_attempt_id: str, *, for_update: bool = False) -> dict[str, Any]:
+        suffix = " FOR UPDATE" if for_update else ""
+        row = self.s.execute(
+            text(
+                """
+                SELECT signup_attempt_id,first_name,last_name,email,mobile,status,
+                       created_at_utc,expires_at_utc,clerk_user_id,completed_at_utc
+                FROM security.platform_user_signup_attempts
+                WHERE signup_attempt_id=:attempt_id
+                """
+                + suffix
+            ),
+            {"attempt_id": signup_attempt_id},
+        ).mappings().first()
+        if row is None:
+            raise LookupError("Signup attempt was not found")
+        return dict(row)
+
+    def _require_completable(
+        self,
+        attempt: dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        current = now or datetime.now(UTC)
+        if str(attempt["status"]) != "AUTHORIZED_FOR_CLERK":
+            raise ValueError("Signup attempt is no longer available for completion")
+        if attempt["expires_at_utc"] <= current:
+            self.s.execute(
+                text(
+                    """
+                    UPDATE security.platform_user_signup_attempts
+                    SET status='EXPIRED'
+                    WHERE signup_attempt_id=:attempt_id
+                      AND status='AUTHORIZED_FOR_CLERK'
+                    """
+                ),
+                {"attempt_id": str(attempt["signup_attempt_id"])},
+            )
+            self.s.commit()
+            raise ValueError("Signup attempt has expired")
+
+    def _expire_stale_attempts(self, now: datetime) -> None:
+        self.s.execute(
+            text(
+                """
+                UPDATE security.platform_user_signup_attempts
+                SET status='EXPIRED'
+                WHERE status='AUTHORIZED_FOR_CLERK'
+                  AND expires_at_utc<=:now
+                """
+            ),
+            {"now": now},
+        )
 
     def _require_valid_onboarding_key(self, supplied: str) -> None:
         row = self.s.execute(
@@ -203,6 +327,37 @@ class Phase1SelfOnboardingService:
         if mobile_row is not None:
             raise ValueError("Mobile number is already registered")
 
+    def _require_no_live_attempt(self, email: str, mobile: str) -> None:
+        row = self.s.execute(
+            text(
+                """
+                SELECT 1
+                FROM security.platform_user_signup_attempts
+                WHERE status='AUTHORIZED_FOR_CLERK'
+                  AND (lower(email)=:email OR mobile=:mobile)
+                LIMIT 1
+                """
+            ),
+            {"email": email, "mobile": mobile},
+        ).first()
+        if row is not None:
+            raise ValueError("Email or mobile number already has an active signup attempt")
+
+    def _require_clerk_identity_not_registered(self, clerk_user_id: str) -> None:
+        row = self.s.execute(
+            text(
+                """
+                SELECT 1
+                FROM security.external_identities
+                WHERE provider='CLERK' AND provider_subject=:clerk_user_id
+                LIMIT 1
+                """
+            ),
+            {"clerk_user_id": clerk_user_id},
+        ).first()
+        if row is not None:
+            raise ValueError("Clerk identity is already registered")
+
     @staticmethod
     def _email(value: str) -> str:
         clean = value.strip().lower()
@@ -230,18 +385,10 @@ class Phase1SelfOnboardingService:
             raise ValueError("A valid 10-digit Indian mobile number is required")
         return f"+91{digits}"
 
-    @staticmethod
-    def _compensate_clerk_user(clerk: ClerkBackendClient, clerk_user_id: str) -> None:
-        # Security still fails closed because no local usable USER mapping was committed.
-        # Operational reconciliation can remove an orphan Clerk identity if this best effort fails.
-        with suppress(ClerkBackendError):
-            clerk.delete_user(clerk_user_id)
-
     def _security_event(
         self,
         *,
         user_id: str,
-        outcome: str,
         source_ip: str,
         correlation_id: str,
         now: datetime,
@@ -252,8 +399,8 @@ class Phase1SelfOnboardingService:
                 INSERT INTO security.security_events
                 (security_event_id,principal_id,actor_type,event_type,entity_type,entity_id,
                  outcome,reason_code,source_ip,correlation_id,occurred_at_utc)
-                VALUES (:event_id,:principal_id,'USER','GLOBAL_USER_SELF_REGISTERED','USER',
-                        :entity_id,:outcome,'SECURITY_ADMIN_APPROVAL_REQUIRED',
+                VALUES (:event_id,:principal_id,'USER','GLOBAL_USER_EMAIL_VERIFIED_REGISTERED','USER',
+                        :entity_id,'PENDING_ADMIN_APPROVAL','SECURITY_ADMIN_APPROVAL_REQUIRED',
                         CAST(:source_ip AS inet),:correlation_id,:now)
                 """
             ),
@@ -261,7 +408,6 @@ class Phase1SelfOnboardingService:
                 "event_id": str(uuid4()),
                 "principal_id": user_id,
                 "entity_id": user_id,
-                "outcome": outcome,
                 "source_ip": source_ip,
                 "correlation_id": correlation_id,
                 "now": now,
