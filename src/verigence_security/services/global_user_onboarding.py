@@ -553,11 +553,9 @@ class GlobalUserOnboardingService:
         if row is None or row["status"] != "ACTIVE":
             raise security_error("PERMISSION_DENIED")
         try:
-            valid = _HASHER.verify(str(row["key_hash"]), supplied)
-        except (VerifyMismatchError, VerificationError, InvalidHashError):
-            valid = False
-        if not valid:
-            raise security_error("PERMISSION_DENIED")
+            _HASHER.verify(str(row["key_hash"]), supplied)
+        except (VerifyMismatchError, VerificationError, InvalidHashError) as exc:
+            raise security_error("PERMISSION_DENIED") from exc
 
     def _validate_onboarding_key(self, value: str) -> str:
         clean = value.strip()
