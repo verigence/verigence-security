@@ -114,7 +114,10 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0003_global_user_onboarding_v1.4.2.sql
 
-      - name: Run current Phase 5 PostgreSQL administration tests
+      - name: Run v1.4.2 global onboarding PostgreSQL acceptance tests
+        run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
+
+      - name: Run current historical Phase 5 PostgreSQL administration tests
         shell: bash
         run: |
           set -euo pipefail
@@ -122,6 +125,7 @@ jobs:
           for test_file in tests/integration/test_phase5_*.py; do
             case "$test_file" in
               tests/integration/test_phase5_admin_control_plane_schema.py|\
+              tests/integration/test_phase5_global_user_onboarding_v142.py|\
               tests/integration/test_phase5_onboarding_f.py|\
               tests/integration/test_phase5_platform_admin_api.py)
                 continue
