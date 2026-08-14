@@ -1,0 +1,54 @@
+name: Onboarding Key State Diagnostic
+
+on:
+  push:
+    branches:
+      - test/live-user-onboarding-e2e-20260814
+
+permissions:
+  contents: read
+
+jobs:
+  key-state:
+    runs-on: ubuntu-24.04
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install database/key tooling
+        run: python -m pip install 'sqlalchemy>=2,<3' 'psycopg[binary]>=3.2,<4' 'argon2-cffi>=23,<26'
+      - name: Verify current key hash without revealing stored material
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from argon2 import PasswordHasher
+          from argon2.exceptions import VerifyMismatchError
+          from sqlalchemy import create_engine, text
+
+          raw = os.environ['MIGRATION_DATABASE_URL']
+          if raw.startswith('postgresql+psycopg://'):
+              url = raw
+          elif raw.startswith('postgresql+asyncpg://'):
+              url = 'postgresql+psycopg://' + raw.removeprefix('postgresql+asyncpg://')
+          elif raw.startswith('postgresql://'):
+              url = 'postgresql+psycopg://' + raw.removeprefix('postgresql://')
+          elif raw.startswith('postgres://'):
+              url = 'postgresql+psycopg://' + raw.removeprefix('postgres://')
+          else:
+              raise RuntimeError('Database URL is not PostgreSQL')
+          engine = create_engine(url, pool_pre_ping=True)
+          with engine.connect() as conn:
+              row = conn.execute(text('SELECT key_hash,key_version,status FROM security.platform_user_onboarding_settings WHERE singleton_id=1')).mappings().one()
+          try:
+              matches = PasswordHasher().verify(str(row['key_hash']), 'VGN-PHASE845')
+          except VerifyMismatchError:
+              matches = False
+          print(f"ONBOARDING_STATUS={row['status']}")
+          print(f"ONBOARDING_VERSION={row['key_version']}")
+          print(f"KNOWN_TEST_FIXTURE_MATCH={str(matches).lower()}")
+          PY
