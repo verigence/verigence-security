@@ -648,13 +648,14 @@ class GlobalUserOnboardingService:
                 INSERT INTO security.security_events
                 (security_event_id,principal_id,actor_type,event_type,entity_type,entity_id,
                  outcome,reason_code,source_ip,correlation_id,occurred_at_utc)
-                VALUES (:id,:user_id,'USER',:event_type,'USER',:user_id,
+                VALUES (:id,:principal_id,'USER',:event_type,'USER',:entity_id,
                         :outcome,:reason_code,CAST(:source_ip AS inet),:correlation_id,:now)
                 """
             ),
             {
                 "id": str(uuid4()),
-                "user_id": user_id,
+                "principal_id": user_id,
+                "entity_id": user_id,
                 "event_type": event_type,
                 "outcome": outcome,
                 "reason_code": reason_code,
