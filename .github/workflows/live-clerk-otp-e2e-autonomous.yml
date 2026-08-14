@@ -9,10 +9,11 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: live-clerk-otp-e2e-autonomous
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
@@ -21,6 +22,7 @@ env:
   CLERK_FAPI: actual-peacock-21.clerk.accounts.dev
   CLERK_ACCOUNT_PORTAL: https://actual-peacock-21.accounts.dev
   OTP_BRANCH: test/live-clerk-otp-e2e-autonomous-20260814
+  OTP_ISSUE_NUMBER: "57"
 
 jobs:
   live-e2e:
@@ -77,8 +79,6 @@ jobs:
           echo "TEST_MOBILE=$mobile" >> "$GITHUB_ENV"
           echo "TEST_FIRST_NAME=testUser" >> "$GITHUB_ENV"
           echo "TEST_LAST_NAME=E2E" >> "$GITHUB_ENV"
-          echo "TEST_EMAIL=$email"
-          echo "TEST_MOBILE=$mobile"
 
           payload="$(jq -cn --arg email "$email" --arg mobile "$mobile" '{firstName:"testUser",lastName:"E2E",email:$email,mobile:$mobile}')"
           response="$(curl --fail-with-body --silent --show-error \
@@ -90,12 +90,9 @@ jobs:
             --data "$payload")"
           status="$(printf '%s' "$response" | jq -r '.status // empty')"
           attempt="$(printf '%s' "$response" | jq -r '.signupAttemptId // empty')"
-          expires="$(printf '%s' "$response" | jq -r '.expiresAt // empty')"
           [ "$status" = 'CLERK_EMAIL_VERIFICATION_REQUIRED' ] || { echo "::error::Unexpected preauthorization status: $status"; exit 1; }
           [ -n "$attempt" ] || { echo '::error::Missing signupAttemptId'; exit 1; }
           echo "SIGNUP_ATTEMPT_ID=$attempt" >> "$GITHUB_ENV"
-          echo "SIGNUP_ATTEMPT_ID=$attempt"
-          echo "SIGNUP_EXPIRES_AT=$expires"
 
       - name: Create Clerk testing token
         shell: bash
@@ -122,7 +119,7 @@ jobs:
           npm install --silent @playwright/test @clerk/testing
           npx playwright install --with-deps chromium >/dev/null
 
-      - name: Run Clerk signup, wait for encrypted Gmail OTP, and complete Verigence registration
+      - name: Run live Clerk signup and complete Verigence after encrypted Gmail OTP handoff
         shell: bash
         env:
           GITHUB_RUN_IDENTIFIER: ${{ github.run_id }}
@@ -146,10 +143,9 @@ jobs:
             return { response, body }
           }
 
-          test('live Clerk OTP onboarding', async ({ page }) => {
+          test('real Gmail OTP Clerk onboarding', async ({ page }) => {
             test.setTimeout(15 * 60 * 1000)
             const email = process.env.TEST_EMAIL
-            const mobile = process.env.TEST_MOBILE
             const attemptId = process.env.SIGNUP_ATTEMPT_ID
             const password = `Vg9!${crypto.randomBytes(24).toString('base64url')}`
             const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
@@ -157,14 +153,8 @@ jobs:
             const publicB64 = Buffer.from(publicPem).toString('base64')
             const bridgePath = `.e2e/otp-${process.env.GITHUB_RUN_IDENTIFIER}.enc`
 
-            console.log(`TEST_EMAIL=${email}`)
-            console.log(`SIGNUP_ATTEMPT_ID=${attemptId}`)
-            console.log(`OTP_PUBLIC_KEY_B64=${publicB64}`)
-            console.log(`OTP_BRIDGE_PATH=${bridgePath}`)
-
             await setupClerkTestingToken({ page, frontendApiUrl: process.env.CLERK_FAPI })
-            const signupUrl = `${process.env.CLERK_ACCOUNT_PORTAL}/sign-up?email_address=${encodeURIComponent(email)}`
-            await page.goto(signupUrl, { waitUntil: 'domcontentloaded' })
+            await page.goto(`${process.env.CLERK_ACCOUNT_PORTAL}/sign-up?email_address=${encodeURIComponent(email)}`, { waitUntil: 'domcontentloaded' })
             await page.waitForSelector('.cl-signUp-root', { state: 'attached', timeout: 30000 })
 
             const emailInput = page.locator('input[name="emailAddress"]')
@@ -173,38 +163,44 @@ jobs:
             if (await firstName.isVisible()) await firstName.fill('testUser')
             const lastName = page.locator('input[name="lastName"]')
             if (await lastName.isVisible()) await lastName.fill('E2E')
+            if (await page.locator('input[name="username"]').isVisible()) throw new Error('Clerk username field is enabled but Phase 1 uses email as sign-in ID')
+            if (await page.locator('input[name="phoneNumber"]').isVisible()) throw new Error('Clerk phone field is enabled but Phase 1 keeps mobile in Verigence only')
 
-            const username = page.locator('input[name="username"]')
-            if (await username.isVisible()) throw new Error('Clerk signup still requires username; Phase 1 contract requires email-only sign-in identity')
-            const phone = page.locator('input[name="phoneNumber"]')
-            if (await phone.isVisible()) throw new Error('Clerk signup still requires phone; Indian mobile must remain Verigence-only in Phase 1')
-
-            let passwordInput = page.locator('input[name="password"]')
+            const passwordInput = page.locator('input[name="password"]')
             if (!(await passwordInput.isVisible())) {
               await page.getByRole('button', { name: /continue|sign up|create account/i }).first().click()
               await passwordInput.waitFor({ state: 'visible', timeout: 20000 })
             }
             await passwordInput.fill(password)
-
-            const prepareResponse = page.waitForResponse(
-              (resp) => resp.url().includes('prepare_verification') && resp.status() >= 200 && resp.status() < 300,
-              { timeout: 30000 },
-            ).catch(() => null)
             await page.getByRole('button', { name: /continue|sign up|create account/i }).first().click()
-            await prepareResponse
 
             const codeInput = page.locator('input[autocomplete="one-time-code"], input[name="code"]').first()
             await codeInput.waitFor({ state: 'visible', timeout: 30000 })
-            console.log('OTP_TRIGGERED=true')
+
+            const handoffBody = [
+              'LIVE_OTP_READY',
+              `run_id=${process.env.GITHUB_RUN_IDENTIFIER}`,
+              `email=${email}`,
+              `signup_attempt_id=${attemptId}`,
+              `otp_bridge_path=${bridgePath}`,
+              `otp_public_key_b64=${publicB64}`,
+            ].join('\n')
+            const comment = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY_NAME}/issues/${process.env.OTP_ISSUE_NUMBER}/comments`, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${process.env.GITHUB_API_TOKEN}`,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ body: handoffBody }),
+            })
+            if (!comment.ok) throw new Error(`Unable to publish OTP handoff metadata: HTTP ${comment.status}`)
 
             const contentsUrl = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY_NAME}/contents/${bridgePath}?ref=${encodeURIComponent(process.env.OTP_BRANCH)}`
             let encrypted = null
             for (let i = 0; i < 120; i += 1) {
               const r = await fetch(contentsUrl, {
-                headers: {
-                  Authorization: `Bearer ${process.env.GITHUB_API_TOKEN}`,
-                  Accept: 'application/vnd.github+json',
-                },
+                headers: { Authorization: `Bearer ${process.env.GITHUB_API_TOKEN}`, Accept: 'application/vnd.github+json' },
               })
               if (r.status === 200) {
                 const payload = await r.json()
@@ -217,15 +213,12 @@ jobs:
             }
             if (!encrypted) throw new Error('Timed out waiting for encrypted Gmail OTP bridge')
 
-            const otp = crypto.privateDecrypt(
-              {
-                key: privateKey,
-                padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-                oaepHash: 'sha256',
-              },
-              encrypted,
-            ).toString('utf8').trim()
-            if (!/^\d{6}$/.test(otp)) throw new Error('Decrypted Gmail OTP is not a six-digit code')
+            const otp = crypto.privateDecrypt({
+              key: privateKey,
+              padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+              oaepHash: 'sha256',
+            }, encrypted).toString('utf8').trim()
+            if (!/^\d{6}$/.test(otp)) throw new Error('Decrypted Gmail OTP is not six digits')
 
             await codeInput.fill(otp)
             const verifyButton = page.getByRole('button', { name: /continue|verify|confirm/i }).first()
@@ -243,61 +236,39 @@ jobs:
               await sleep(1000)
             }
             if (!clerkUser) throw new Error('Clerk user was not created after OTP verification')
-
             const emailRecord = (clerkUser.email_addresses ?? []).find((entry) => String(entry.email_address).toLowerCase() === email.toLowerCase())
-            const verificationStatus = emailRecord?.verification?.status ?? null
-            if (verificationStatus !== 'verified') throw new Error(`Clerk email verification status is ${verificationStatus}`)
+            if (emailRecord?.verification?.status !== 'verified') throw new Error(`Clerk email verification status is ${emailRecord?.verification?.status ?? 'missing'}`)
             const clerkUserId = String(clerkUser.id)
-            console.log(`CLERK_USER_ID=${clerkUserId}`)
-            console.log('CLERK_EMAIL_VERIFIED=true')
 
             let sessionToken = await page.evaluate(async () => {
               const clerk = globalThis.Clerk
               if (!clerk?.session?.getToken) return null
               return await clerk.session.getToken()
             }).catch(() => null)
-            let tokenSource = 'browser_session'
-
             if (!sessionToken) {
               const sessionCreated = await fetchJson('https://api.clerk.com/v1/sessions', {
                 method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${process.env.CLERK_SECRET_KEY}`,
-                  'Content-Type': 'application/json',
-                },
+                headers: { Authorization: `Bearer ${process.env.CLERK_SECRET_KEY}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: clerkUserId }),
               })
-              if (!sessionCreated.response.ok) throw new Error(`Clerk session fallback failed HTTP ${sessionCreated.response.status}: ${JSON.stringify(sessionCreated.body)}`)
-              const sessionId = String(sessionCreated.body.id)
-              const tokenCreated = await fetchJson(`https://api.clerk.com/v1/sessions/${sessionId}/tokens`, {
+              if (!sessionCreated.response.ok) throw new Error(`Clerk session fallback failed HTTP ${sessionCreated.response.status}`)
+              const tokenCreated = await fetchJson(`https://api.clerk.com/v1/sessions/${sessionCreated.body.id}/tokens`, {
                 method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${process.env.CLERK_SECRET_KEY}`,
-                  'Content-Type': 'application/json',
-                },
+                headers: { Authorization: `Bearer ${process.env.CLERK_SECRET_KEY}`, 'Content-Type': 'application/json' },
                 body: '{}',
               })
-              if (!tokenCreated.response.ok) throw new Error(`Clerk token fallback failed HTTP ${tokenCreated.response.status}: ${JSON.stringify(tokenCreated.body)}`)
+              if (!tokenCreated.response.ok) throw new Error(`Clerk token fallback failed HTTP ${tokenCreated.response.status}`)
               sessionToken = tokenCreated.body.jwt
-              tokenSource = 'backend_session_fallback'
             }
-            if (!sessionToken) throw new Error('No Clerk session token available after verified signup')
-            console.log(`SESSION_TOKEN_SOURCE=${tokenSource}`)
+            if (!sessionToken) throw new Error('No Clerk session token available')
 
             const complete = await fetchJson(`${process.env.SECURITY_BASE_URL}/security/v1/onboarding/users/${attemptId}/complete`, {
               method: 'POST',
-              headers: {
-                Authorization: `Bearer ${sessionToken}`,
-                'Content-Type': 'application/json',
-                'X-Correlation-ID': crypto.randomUUID(),
-              },
+              headers: { Authorization: `Bearer ${sessionToken}`, 'Content-Type': 'application/json', 'X-Correlation-ID': crypto.randomUUID() },
               body: '{}',
             })
             if (complete.response.status !== 201) throw new Error(`Verigence completion failed HTTP ${complete.response.status}: ${JSON.stringify(complete.body)}`)
-            if (complete.body?.status !== 'PENDING_ADMIN_APPROVAL') throw new Error(`Unexpected Verigence completion state: ${JSON.stringify(complete.body)}`)
-            console.log(`SECURITY_USER_ID=${complete.body.userId ?? ''}`)
-            console.log(`ONBOARDING_REQUEST_ID=${complete.body.onboardingRequestId ?? ''}`)
-            console.log('VERIGENCE_PENDING_ADMIN_APPROVAL=true')
+            if (complete.body?.status !== 'PENDING_ADMIN_APPROVAL') throw new Error(`Unexpected Verigence state: ${JSON.stringify(complete.body)}`)
 
             const precheck = await fetchJson(`${process.env.SECURITY_BASE_URL}/security/v1/auth/precheck`, {
               method: 'POST',
@@ -306,22 +277,33 @@ jobs:
             })
             expect(precheck.response.status).toBe(200)
             expect(precheck.body).toEqual({ allowed: false })
-            console.log('PENDING_PRECHECK_DENIED=true')
 
-            fs.appendFileSync(process.env.GITHUB_ENV, `TEST_EMAIL=${email}\nCLERK_USER_ID=${clerkUserId}\nSECURITY_USER_ID=${complete.body.userId ?? ''}\nONBOARDING_REQUEST_ID=${complete.body.onboardingRequestId ?? ''}\n`)
+            fs.appendFileSync(process.env.GITHUB_ENV, `CLERK_USER_ID=${clerkUserId}\nSECURITY_USER_ID=${complete.body.userId ?? ''}\nONBOARDING_REQUEST_ID=${complete.body.onboardingRequestId ?? ''}\n`)
+
+            const successBody = [
+              'LIVE_E2E_COMPLETED',
+              `run_id=${process.env.GITHUB_RUN_IDENTIFIER}`,
+              `email=${email}`,
+              `clerk_user_id=${clerkUserId}`,
+              `security_user_id=${complete.body.userId ?? ''}`,
+              `onboarding_request_id=${complete.body.onboardingRequestId ?? ''}`,
+              'clerk_email_verified=true',
+              'security_status=PENDING',
+              'onboarding_status=PENDING_ADMIN_APPROVAL',
+              'precheck_allowed=false',
+              'user_left_in_place=true',
+            ].join('\n')
+            await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY_NAME}/issues/${process.env.OTP_ISSUE_NUMBER}/comments`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.GITHUB_API_TOKEN}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({ body: successBody }),
+            })
           })
           JS
 
           cat > playwright.config.mjs <<'JS'
-          export default {
-            testDir: '.',
-            testMatch: 'e2e.spec.mjs',
-            workers: 1,
-            retries: 0,
-            use: { headless: true },
-          }
+          export default { testDir: '.', testMatch: 'e2e.spec.mjs', workers: 1, retries: 0, use: { headless: true } }
           JS
-
           npx playwright test --config=playwright.config.mjs --reporter=line
 
       - name: Verify final Security persistence and leave user for inspection
@@ -344,23 +326,19 @@ jobs:
               url = 'postgresql+psycopg://' + raw.removeprefix('postgres://')
           else:
               raise RuntimeError('MIGRATION_DATABASE_URL is not PostgreSQL')
-
           engine = create_engine(url, pool_pre_ping=True)
           with engine.connect() as conn:
-              row = conn.execute(
-                  text('''
-                      SELECT u.user_id,u.first_name,u.last_name,u.primary_email,u.primary_mobile,u.status,
-                             p.status AS principal_status,e.provider_subject,e.status AS identity_status,
-                             r.status AS onboarding_status,a.status AS attempt_status
-                      FROM security.users u
-                      JOIN security.security_principals p ON p.principal_id=u.user_id
-                      JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
-                      JOIN security.platform_user_onboarding_requests r ON r.user_id=u.user_id
-                      JOIN security.platform_user_signup_attempts a ON a.signup_attempt_id=:attempt_id
-                      WHERE lower(u.primary_email)=lower(:email)
-                  '''),
-                  {'attempt_id': os.environ['SIGNUP_ATTEMPT_ID'], 'email': os.environ['TEST_EMAIL']},
-              ).mappings().one()
+              row = conn.execute(text('''
+                  SELECT u.user_id,u.first_name,u.last_name,u.primary_email,u.primary_mobile,u.status,
+                         p.status AS principal_status,e.provider_subject,e.status AS identity_status,
+                         r.status AS onboarding_status,a.status AS attempt_status
+                  FROM security.users u
+                  JOIN security.security_principals p ON p.principal_id=u.user_id
+                  JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+                  JOIN security.platform_user_onboarding_requests r ON r.user_id=u.user_id
+                  JOIN security.platform_user_signup_attempts a ON a.signup_attempt_id=:attempt_id
+                  WHERE lower(u.primary_email)=lower(:email)
+              '''), {'attempt_id': os.environ['SIGNUP_ATTEMPT_ID'], 'email': os.environ['TEST_EMAIL']}).mappings().one()
           assert row['first_name'] == 'testUser'
           assert row['last_name'] == 'E2E'
           assert row['primary_mobile'] == os.environ['TEST_MOBILE']
