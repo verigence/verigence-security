@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from verigence_security.config import Settings
@@ -70,10 +71,10 @@ class FakeClerk:
         self.deleted.append(clerk_user_id)
 
 
-def _seed_admin(engine: object) -> str:
+def _seed_admin(engine: Engine) -> str:
     user_id = str(uuid4())
     now = datetime.now(UTC)
-    with engine.begin() as conn:  # type: ignore[union-attr]
+    with engine.begin() as conn:
         conn.execute(
             text(
                 """
@@ -118,7 +119,7 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
             key_service = GlobalUserOnboardingService(session, _settings())
             key_service.set_onboarding_key(
                 actor_user_id=admin_id,
-                onboarding_key="VGN-PHASE145",
+                onboarding_key="VGN-PHASE845",
                 enabled=True,
                 correlation_id=str(uuid4()),
             )
@@ -132,7 +133,7 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
                     email=email,
                     mobile=mobile,
                     password="safe-password-123",
-                    onboarding_key="VGN-WRONG145",
+                    onboarding_key="VGN-WRONG845",
                     source_ip="127.0.0.1",
                     correlation_id=str(uuid4()),
                     clerk=clerk,  # type: ignore[arg-type]
@@ -146,7 +147,7 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
                 email=email.upper(),
                 mobile=f"+91 {mobile_digits[:5]} {mobile_digits[5:]}",
                 password="safe-password-123",
-                onboarding_key="VGN-PHASE145",
+                onboarding_key="VGN-PHASE845",
                 source_ip="127.0.0.1",
                 correlation_id=str(uuid4()),
                 clerk=clerk,  # type: ignore[arg-type]
@@ -208,7 +209,7 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
                     email=email.upper(),
                     mobile="+919123456789",
                     password="safe-password-456",
-                    onboarding_key="VGN-PHASE145",
+                    onboarding_key="VGN-PHASE845",
                     source_ip="127.0.0.1",
                     correlation_id=str(uuid4()),
                     clerk=clerk,  # type: ignore[arg-type]
@@ -224,16 +225,13 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
                     email=second_email,
                     mobile=mobile_digits,
                     password="safe-password-789",
-                    onboarding_key="VGN-PHASE145",
+                    onboarding_key="VGN-PHASE845",
                     source_ip="127.0.0.1",
                     correlation_id=str(uuid4()),
                     clerk=clerk,  # type: ignore[arg-type]
                 )
             assert len(clerk.create_calls) == 1
 
-        # Force a post-Clerk database uniqueness failure by returning the already-mapped Clerk
-        # subject for a new email/mobile. The whole local transaction must roll back and the
-        # compensation hook must delete the newly created Clerk-side identity.
         compensation_email = f"v145-comp-{uuid4()}@example.invalid"
         clerk.next_user_id = clerk_user_id
         with Session(engine) as session:
@@ -244,7 +242,7 @@ def test_phase1_self_onboarding_creates_clerk_then_pending_security_user() -> No
                     email=compensation_email,
                     mobile="+918123456789",
                     password="safe-password-999",
-                    onboarding_key="VGN-PHASE145",
+                    onboarding_key="VGN-PHASE845",
                     source_ip="127.0.0.1",
                     correlation_id=str(uuid4()),
                     clerk=clerk,  # type: ignore[arg-type]
