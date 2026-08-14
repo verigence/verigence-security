@@ -123,8 +123,13 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0004_v142_security_event_outcome_width.sql
 
-      - name: Run v1.4.2 global onboarding PostgreSQL acceptance tests
-        run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
+      - name: Run v1.4.2 schema/control-registry PostgreSQL tests
+        run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142_schema.py
+
+      - name: Run v1.4.2 global onboarding lifecycle PostgreSQL test
+        run: >-
+          pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
+          -k global_user_onboards_once_then_authorizes_across_tenants
 
       - name: Run current historical Phase 5 PostgreSQL administration tests
         shell: bash
@@ -135,6 +140,7 @@ jobs:
             case "$test_file" in
               tests/integration/test_phase5_admin_control_plane_schema.py|\
               tests/integration/test_phase5_global_user_onboarding_v142.py|\
+              tests/integration/test_phase5_global_user_onboarding_v142_schema.py|\
               tests/integration/test_phase5_onboarding_f.py|\
               tests/integration/test_phase5_platform_admin_api.py)
                 continue
