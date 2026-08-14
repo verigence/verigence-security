@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from verigence_security.main import app
 
 
