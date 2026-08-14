@@ -233,7 +233,11 @@ def test_v142_schema_and_runtime_retirement_state() -> None:
 
         from verigence_security.main import app
 
-        paths = {route.path for route in app.routes}
+        paths = {
+            path
+            for route in app.routes
+            if isinstance((path := getattr(route, "path", None)), str)
+        }
         assert "/security/v1/onboarding/users" in paths
         assert "/security/v1/auth/precheck" in paths
         assert "/security/v1/platform/users" in paths
