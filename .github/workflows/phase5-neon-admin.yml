@@ -114,6 +114,15 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0003_global_user_onboarding_v1.4.2.sql
 
+      - name: Apply v1.4.2 security-event compatibility migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$ADMIN_MIGRATION_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/0004_v142_security_event_outcome_width.sql
+
       - name: Run v1.4.2 global onboarding PostgreSQL acceptance tests
         run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
 
