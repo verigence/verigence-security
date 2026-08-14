@@ -27,79 +27,73 @@ Human onboarding          = Platform-global, once per person
 Clerk                     = authentication provider
 Security                  = USER lifecycle + authorization authority
 Tenant membership         = not a USER-access prerequisite
-Platform Super Admin      = built-in initial system administrator
+Platform Super Admin      = built-in initial system administrator with full authority
 ```
 
-The built-in `platform.super_admin` is sufficient to initialize the platform. It owns every ACTIVE Security permission and does not need separate Tenant-role or additional Platform-role provisioning before it can administer the system.
+`platform.super_admin` owns every ACTIVE Security permission, automatically inherits future ACTIVE permissions and can administer Tenant authorization without a Tenant-specific role assignment.
 
 ## 3. Current promoted baseline
 
 ```text
-DEV commit: 9856d7398e0af9937506033e1cf60d69d91e2d71
+DEV commit: 4701705b89a68e1c05eb65007d4aadbc8d92727d
 ```
 
-This includes the v1.4.2 global USER onboarding correction.
-
-Promotion evidence:
+Promotion evidence for the latest Super Admin authority clarification:
 
 ```text
-PR #48:                  MERGED
-Neon/PostgreSQL:         31768537758 — PASS
-Post-merge Security CI: 31768624655 — PASS
-Railway DEV:            31768624692 — PASS
+PR #49:                  MERGED
+Feature Security CI:     31774336088 — PASS
+Feature Neon/PostgreSQL: 31774334218 — PASS
+Post-merge Security CI:  31774409815 — PASS
+Railway DEV:             31774409818 — PASS
+readiness/liveness/correlation: PASS
 ```
+
+The earlier global USER onboarding v1.4.2 promotion through PR #48 remains valid historical evidence.
 
 ## 4. Current workstream
 
-**NOW:** built-in Platform Super Admin full-authority clarification.
+**NOW:** live initial Clerk Super Admin bootstrap/E2E.
 
-Feature branch:
-
-```text
-feature/super-admin-full-authority-v1.4.3
-```
+The built-in role and permission data are already deployed. No administrator must provision extra roles before the first Super Admin can operate the system.
 
 Required sequence:
 
 ```text
-migration 0005
+operator-selected Clerk user_...
    ↓
-backfill all ACTIVE permissions to platform.super_admin
+configure SECURITY_BOOTSTRAP_SUPER_ADMIN_CLERK_USER_ID
    ↓
-automatic future permission synchronization
+temporarily enable SECURITY_BOOTSTRAP_ENABLED
    ↓
-include Platform-role grants in Tenant authorization
+authenticated Clerk JWT
    ↓
-real Neon/PostgreSQL acceptance tests
+POST /security/v1/platform/bootstrap/claim
    ↓
-Security CI
+Security global USER + CLERK mapping
    ↓
-PR -> dev
+ACTIVE platform.super_admin assignment
    ↓
-Railway DEV exact-digest proof
+verify full Platform + Tenant administration authority
    ↓
-live initial Clerk Super Admin binding
+prove repeated bootstrap is denied
+   ↓
+disable bootstrap
+   ↓
+resume Increment G
 ```
 
 ## 5. Super Admin rule
 
 Do not create a circular provisioning dependency.
 
-The first administrator must not require another administrator to grant it additional roles.
-
-Security bootstrap assigns one role:
+Security bootstrap assigns one built-in role:
 
 ```text
 platform.super_admin
 ```
 
-That role supplies full effective authority through system-owned permission data.
-
-New ACTIVE Security/module permissions must automatically become effective for the Super Admin.
-
-Platform Super Admin must be able to configure Tenants and Tenant RBAC without a Tenant-specific role assignment.
-
-Ordinary USERs still require Tenant-scoped effective authorization.
+That one role supplies full effective authority through system-owned permission data. Do not add redundant Platform/Tenant roles simply to reproduce the same access.
 
 ## 6. Global USER onboarding rule
 
@@ -111,21 +105,21 @@ Security validates the Platform onboarding key before Clerk provisioning, and on
 
 ## 7. Live initial administrator dependency
 
-No secret values belong in Git.
+No secret values belong in Git or chat.
 
-The operator-selected Clerk account still needs to be bound once using its immutable Clerk User ID:
+The only non-secret identity value still required for the live bootstrap is the immutable Clerk User ID selected by the operator:
 
 ```text
-SECURITY_BOOTSTRAP_SUPER_ADMIN_CLERK_USER_ID=user_...
+user_...
 ```
 
-The Clerk User ID only selects the initial administrator identity. The built-in Security role determines its authority.
+The Clerk User ID selects the initial administrator identity. The deployed built-in Security role determines its authority.
 
 ## 8. Promotion discipline
 
 ```text
 feature/*
-   ↓ Security CI + real Neon/PostgreSQL
+   ↓ Security CI + applicable real Neon/PostgreSQL
   dev
    ↓ exact-commit Security CI
 immutable GHCR image
@@ -134,4 +128,4 @@ Railway DEV
    ↓ readiness + liveness + correlation
 ```
 
-Do not move to Increment G until the current Super Admin authority correction and live initial Clerk bootstrap are green.
+Do not move to Increment G until the live initial Clerk bootstrap is green.

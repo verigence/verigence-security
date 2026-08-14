@@ -3,8 +3,7 @@
 **Status:** CURRENT CANONICAL EXECUTION TRACKER  
 **Repository:** `verigence/verigence-security`  
 **Integration branch:** `dev`  
-**Current promoted DEV commit:** `9856d7398e0af9937506033e1cf60d69d91e2d71`  
-**Branch under validation:** `feature/super-admin-full-authority-v1.4.3`  
+**Current promoted DEV commit:** `4701705b89a68e1c05eb65007d4aadbc8d92727d`  
 **Date:** 2026-08-14
 
 ## 1. Implementation authorities
@@ -24,21 +23,19 @@ Read/apply in this order when decisions conflict:
 | Area | Status | Current position |
 |---|---|---|
 | Phase 1 CI quality gate | DONE | Static/design, compile, Ruff, Mypy, tests, build and dependency checks enforced |
-| Phase 2 Neon DEV | DONE | Real PostgreSQL validation available and green for v1.4.2 |
+| Phase 2 Neon DEV | DONE | Real PostgreSQL validation green through Super Admin v1.4.3 |
 | Phase 3 Railway DEV | DONE | Exact-commit immutable deployment with readiness/liveness/correlation proof |
 | Admin Control Plane A–F | DONE / HISTORICAL F IDENTITY SUPERSEDED | A–E active; F Tenant identity onboarding superseded by global onboarding |
-| Clerk identity boundary v1.4.1 | BACKEND IMPLEMENTED / DEPLOYED | Live initial Super Admin identity binding still requires the chosen Clerk `user_...` configuration |
-| Global USER onboarding v1.4.2 | DONE / DEPLOYED | PR #48 merged to `dev`; Neon, post-merge CI and Railway all green |
-| Built-in Platform Super Admin full authority | NOW | Data-driven full authority + automatic future permission inheritance + Tenant provisioning authority under validation |
-| Increment G maker-checker | PAUSED | Resume after Super Admin authority correction and live initial Clerk bootstrap are green |
+| Clerk identity boundary v1.4.1 | BACKEND IMPLEMENTED / DEPLOYED | Live initial Super Admin identity binding requires the chosen Clerk `user_...` configuration |
+| Global USER onboarding v1.4.2 | DONE / DEPLOYED | PR #48 merged; Neon, CI and Railway green |
+| Built-in Platform Super Admin full authority v1.4.3 | DONE / DEPLOYED | PR #49 merged; all ACTIVE permissions + future inheritance + Tenant provisioning authority validated |
+| Increment G maker-checker | PAUSED | Resume after live initial Clerk Super Admin bootstrap/E2E is green |
 | Increment H Control Registry/runtime Admin APIs | PENDING | After G unless sequencing is explicitly changed |
 | Increment I DI authorization alignment | PENDING | Recorded corrections remain |
 | Increment J Security -> DI deployed E2E | PENDING | Final Admin Control Plane integration proof |
 | SYSTEM/SERVICE_INTEGRATION | PENDING | Separate machine-identity phase |
 
 ## 3. Promoted v1.4.2 evidence
-
-Global USER onboarding v1.4.2 was completed and promoted through PR #48.
 
 ```text
 Feature head:             f6dca3ef86c664b49fcd400e1bca099ceced0a0d
@@ -52,93 +49,82 @@ liveness:                 PASS
 correlation ID:           PASS
 ```
 
-The promoted model is:
+Frozen invariant:
 
 > **USER onboarding is Platform-global and one-time. Tenant access is authorization assignment, not identity onboarding.**
 
-## 4. Current clarification — built-in Platform Super Admin
+## 4. Promoted built-in Platform Super Admin authority v1.4.3
 
 Frozen invariant:
 
-> **The built-in Platform Super Admin must be able to initialize and administer the entire Verigence Security platform without requiring another administrator to grant additional roles first.**
+> **The built-in Platform Super Admin can initialize and administer the entire Verigence Security platform without requiring another administrator to grant additional roles first.**
 
-Required behavior:
+Implemented behavior:
 
 1. bootstrap assigns the initial administrator the single built-in `platform.super_admin` role;
 2. `platform.super_admin` owns every ACTIVE Security permission;
-3. when a new permission becomes ACTIVE it is automatically granted to `platform.super_admin`;
-4. when a permission becomes non-ACTIVE its Super Admin grant is removed;
+3. a newly ACTIVE permission is automatically granted to `platform.super_admin`;
+4. a permission becoming non-ACTIVE loses its Super Admin grant;
 5. Platform-role permissions participate in Tenant authorization;
-6. a Super Admin can perform Tenant provisioning without a Tenant-specific role assignment;
+6. Super Admin can perform Tenant provisioning without a Tenant-specific role assignment;
 7. ordinary USERs continue to require Tenant-scoped effective authorization.
 
-Implementation branch:
-
-```text
-feature/super-admin-full-authority-v1.4.3
-```
-
-Implementation includes:
+Implementation:
 
 - additive migration `0005_super_admin_full_authority.sql`;
 - backfill of every ACTIVE permission to `platform.super_admin`;
-- PostgreSQL trigger that keeps future ACTIVE permission grants synchronized automatically;
-- effective authorization union of Tenant-role grants and active Platform-role grants;
-- real PostgreSQL tests proving full permission ownership, future permission inheritance/removal and Tenant provisioning without Tenant role assignment;
-- Neon workflow coverage for migration 0005 and the new tests.
+- PostgreSQL trigger for future permission synchronization;
+- Tenant authorization union of Tenant-role grants and active Platform-role grants;
+- real PostgreSQL tests for full permission ownership, future permission inheritance/removal and Tenant provisioning without a Tenant role assignment.
 
-## 5. Acceptance evidence required for the current branch
-
-Do not merge until all are green on the exact feature head:
-
-- Security CI;
-- migration 0005 applied successfully on Neon DEV;
-- Super Admin owns all ACTIVE permissions;
-- new ACTIVE permission is auto-granted;
-- retired permission is removed from Super Admin grants;
-- Super Admin Tenant administration succeeds without a Tenant role assignment;
-- historical Phase 5 PostgreSQL tests remain green.
-
-Evidence:
+Promotion evidence:
 
 ```text
-Feature head:             PENDING
-Security CI:              PENDING
-Real Neon/PostgreSQL:     PENDING
-PR:                       PENDING
-Promoted DEV commit:      PENDING
-Post-merge Security CI:   PENDING
-Railway DEV:              PENDING
+Feature head:             5f999948cf1e982d50dbb00699f118e0d5686173
+Security CI:              31774336088 — PASS
+Real Neon/PostgreSQL:     31774334218 — PASS
+PR:                       #49 — MERGED
+Promoted DEV commit:      4701705b89a68e1c05eb65007d4aadbc8d92727d
+Post-merge Security CI:   31774409815 — PASS
+Railway DEV:              31774409818 — PASS
+readiness:                PASS
+liveness:                 PASS
+correlation ID:           PASS
 ```
 
-## 6. Live initial Super Admin binding
+## 5. Live initial Super Admin binding — NEXT
 
 No secrets belong in Git.
 
-The Security role/permission data is system-owned. The first real administrator does not require manual permission provisioning after bootstrap.
+The Security role/permission data is now fully system-owned. The first real administrator requires no manual permission provisioning after bootstrap.
 
-The live Clerk identity still needs to be bound to the Security bootstrap through the immutable Clerk User ID:
+The chosen Clerk account must be bound using its immutable Clerk User ID:
 
 ```text
 SECURITY_BOOTSTRAP_SUPER_ADMIN_CLERK_USER_ID=user_...
+SECURITY_BOOTSTRAP_ENABLED=true
 ```
 
-After successful one-time bootstrap claim, Security creates/resolves the Security USER and assigns `platform.super_admin`. The data-driven role then supplies full authority automatically.
+Then the authenticated Clerk identity performs the one-time bootstrap claim. Security creates/resolves the global Security USER and assigns `platform.super_admin`. After successful proof, bootstrap is disabled.
 
-## 7. Current execution pointer
+Required live proof:
 
 ```text
-Super Admin full-authority branch
-  -> Security CI + real Neon/PostgreSQL
-  -> PR -> dev
-  -> exact-commit Security CI
-  -> immutable GHCR image -> Railway DEV
-  -> readiness/liveness/correlation
-  -> configure chosen Clerk user_...
-  -> live one-time Super Admin bootstrap claim
-  -> verify full effective authority
-  -> disable bootstrap
-  -> resume Increment G
+configured Clerk user_...
+  -> authenticated Clerk JWT
+  -> POST /security/v1/platform/bootstrap/claim
+  -> Security USER / CLERK mapping
+  -> ACTIVE platform.super_admin assignment
+  -> effective full Security authority
+  -> Tenant administration without Tenant role assignment
+  -> repeat bootstrap denied
+  -> SECURITY_BOOTSTRAP_ENABLED=false
 ```
+
+## 6. Current execution pointer
+
+**NOW:** complete the live initial Clerk Super Admin bootstrap/E2E using the operator-selected Clerk `user_...` identifier.
+
+After that, resume Increment G maker-checker.
 
 Do not reintroduce Tenant-scoped human onboarding or require Tenant role provisioning for the Platform Super Admin after a context reset.
