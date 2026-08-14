@@ -33,30 +33,31 @@ Therefore:
 
 ## Promoted baseline
 
-Global USER onboarding v1.4.2 is merged and deployed:
-
 ```text
-DEV commit:             9856d7398e0af9937506033e1cf60d69d91e2d71
-PR:                     #48 — MERGED
-Neon/PostgreSQL:        31768537758 — PASS
-Post-merge Security CI: 31768624655 — PASS
-Railway DEV:            31768624692 — PASS
+DEV commit:             4701705b89a68e1c05eb65007d4aadbc8d92727d
+PR #49:                 MERGED
+Feature Security CI:    31774336088 — PASS
+Neon/PostgreSQL:        31774334218 — PASS
+Post-merge Security CI: 31774409815 — PASS
+Railway DEV:            31774409818 — PASS
 ```
+
+Global USER onboarding v1.4.2 and built-in Super Admin authority v1.4.3 are both merged and deployed.
 
 ## Current execution pointer
 
 ```text
-feature/super-admin-full-authority-v1.4.3
+chosen Clerk user_...
    ↓
-Security CI + real Neon/PostgreSQL validation
+live initial Clerk Super Admin bootstrap
    ↓
-PR -> dev
+verify Security USER + Clerk mapping
    ↓
-exact-commit Security CI
+verify platform.super_admin full authority
    ↓
-immutable GHCR image -> Railway DEV
+disable bootstrap
    ↓
-live initial Clerk Super Admin binding
+resume Increment G maker-checker
 ```
 
-Increment G remains paused until this Super Admin authority clarification and the live initial Clerk identity bootstrap are green.
+Increment G remains paused only until the live initial Clerk identity bootstrap/E2E is green.
