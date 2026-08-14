@@ -1,0 +1,32 @@
+name: Runtime Onboarding Config Probe
+
+on:
+  push:
+    branches:
+      - test/live-user-onboarding-e2e-20260814
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Probe deployed onboarding without creating identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          correlation="$(cat /proc/sys/kernel/random/uuid)"
+          code="$(curl --silent --show-error --dump-header /tmp/headers --output /tmp/body --write-out '%{http_code}' \
+            -X POST 'https://verigence-security-dev.up.railway.app/security/v1/onboarding/users' \
+            -H 'Content-Type: application/json' \
+            -H 'X-Onboarding-Key: VGN-PROBE845' \
+            -H "X-Correlation-ID: $correlation" \
+            --data '{"firstName":"testUser","lastName":"Probe","email":"gigsinopensource+verigence-config-probe@gmail.com","mobile":"+919876543219","password":"ProbeOnly9!NotCreated"}')"
+          echo "HTTP_STATUS=$code"
+          cat /tmp/body
+          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit}' /tmp/headers)"
+          [ "$returned" = "$correlation" ] || { echo '::error::Correlation ID not preserved'; exit 1; }
+          [ "$code" = "503" ] || { echo "::error::Expected missing-Clerk configuration HTTP 503, got $code"; exit 1; }
+          grep -q 'Clerk lifecycle integration is not configured' /tmp/body || { echo '::error::Unexpected 503 response'; exit 1; }
+          echo 'RUNTIME_PROBE=CONFIRMED_MISSING_CLERK_CONFIGURATION'
