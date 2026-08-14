@@ -92,15 +92,12 @@ def create_tenant(
     claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.create")),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    self_onboarding = body.selfOnboarding
     try:
         tenant = PlatformTenantService(session).create_tenant(
             actor_user_id=str(claims["sub"]),
             tenant_code=body.tenantCode,
             tenant_name=body.tenantName,
             correlation_id=request.state.correlation_id,
-            self_onboarding_enabled=(self_onboarding.enabled if self_onboarding else False),
-            self_onboarding_token=(self_onboarding.token if self_onboarding else None),
         )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="Tenant code already exists") from exc
