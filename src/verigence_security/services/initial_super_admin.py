@@ -33,7 +33,9 @@ class InitialSuperAdminProvisioningService:
         subject = clerk_user_id.strip()
         name = display_name.strip() or "superadmin"
         if not subject.startswith("user_") or len(subject) > 240:
-            raise ValueError("Initial Super Admin Clerk user ID must be an immutable Clerk user_ identifier")
+            raise ValueError(
+                "Initial Super Admin Clerk user ID must be an immutable Clerk user_ identifier"
+            )
 
         try:
             self.s.execute(
@@ -48,12 +50,14 @@ class InitialSuperAdminProvisioningService:
                     self.s.commit()
                     return InitialSuperAdminProvisioningResult(user_id=user_id, created=False)
                 raise RuntimeError(
-                    "The configured Clerk identity is already mapped to Security but is not an active Platform Super Admin"
+                    "The configured Clerk identity is already mapped to Security but is not "
+                    "an active Platform Super Admin"
                 )
 
             if self._active_super_admin_exists():
                 raise RuntimeError(
-                    "A different active Platform Super Admin already exists; initial provisioning will not replace it"
+                    "A different active Platform Super Admin already exists; initial provisioning "
+                    "will not replace it"
                 )
 
             now = datetime.now(UTC)
