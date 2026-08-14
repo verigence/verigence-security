@@ -10,6 +10,7 @@ from verigence_security.config import Settings
 
 def test_create_user_sends_email_name_password_but_no_phone_or_username() -> None:
     captured: dict[str, object] = {}
+    test_secret = "clerk-unit-test-credential"
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["method"] = request.method
@@ -19,7 +20,7 @@ def test_create_user_sends_email_name_password_but_no_phone_or_username() -> Non
         return httpx.Response(200, json={"id": "user_phase1_test"})
 
     settings = Settings(
-        clerk_secret_key="sk_test_not_a_real_secret",
+        clerk_secret_key=test_secret,
         clerk_backend_api_url="https://api.clerk.test/v1",
     )
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -36,7 +37,7 @@ def test_create_user_sends_email_name_password_but_no_phone_or_username() -> Non
     assert result == "user_phase1_test"
     assert captured["method"] == "POST"
     assert captured["url"] == "https://api.clerk.test/v1/users"
-    assert captured["authorization"] == "Bearer sk_test_not_a_real_secret"
+    assert captured["authorization"] == f"Bearer {test_secret}"
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload == {
@@ -58,7 +59,7 @@ def test_delete_user_uses_backend_compensation_endpoint() -> None:
         return httpx.Response(200, json={"id": "user_phase1_test"})
 
     settings = Settings(
-        clerk_secret_key="sk_test_not_a_real_secret",
+        clerk_secret_key="clerk-unit-test-credential",
         clerk_backend_api_url="https://api.clerk.test/v1",
     )
     client = httpx.Client(transport=httpx.MockTransport(handler))
