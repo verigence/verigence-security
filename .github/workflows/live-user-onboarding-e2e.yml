@@ -1,0 +1,385 @@
+name: Live Phase 1 User Onboarding E2E
+
+on:
+  push:
+    branches:
+      - test/live-user-onboarding-e2e-20260814
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-phase1-user-onboarding-e2e
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+  RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+  RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+
+jobs:
+  live-onboarding-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Check out exact test commit
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security package
+        run: python -m pip install .
+
+      - name: Resolve actual Railway DEV runtime configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo "::error::RAILWAY_TOKEN is not configured."; exit 1; }
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo "::error::RAILWAY_API_TOKEN is not configured."; exit 1; }
+
+          query='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+
+          clerk_secret="$(printf '%s' "$response" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')"
+          encryption_key="$(printf '%s' "$response" | jq -r '.data.variables.SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY // empty')"
+          runtime_db="$(printf '%s' "$response" | jq -r '.data.variables.DATABASE_URL // empty')"
+          clerk_api="$(printf '%s' "$response" | jq -r '.data.variables.CLERK_BACKEND_API_URL // "https://api.clerk.com/v1"')"
+
+          [ -n "$clerk_secret" ] || { echo "::error::Railway DEV does not have CLERK_SECRET_KEY configured."; exit 1; }
+          [ -n "$encryption_key" ] || { echo "::error::Railway DEV does not have SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY configured."; exit 1; }
+          raw_db="${runtime_db:-${DEV_DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}}"
+          [ -n "$raw_db" ] || { echo "::error::No DEV database URL is available."; exit 1; }
+          case "$raw_db" in
+            postgresql+psycopg://*) sqlalchemy_url="$raw_db" ;;
+            postgresql+asyncpg://*) sqlalchemy_url="postgresql+psycopg://${raw_db#postgresql+asyncpg://}" ;;
+            postgresql://*) sqlalchemy_url="postgresql+psycopg://${raw_db#postgresql://}" ;;
+            postgres://*) sqlalchemy_url="postgresql+psycopg://${raw_db#postgres://}" ;;
+            *) echo "::error::DEV database URL is not PostgreSQL."; exit 1 ;;
+          esac
+
+          domain_query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          domain_vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          domain_body="$(jq -cn --arg query "$domain_query" --argjson variables "$domain_vars" '{query:$query,variables:$variables}')"
+          domain_response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$domain_body")"
+          domain="$(printf '%s' "$domain_response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || { echo "::error::Railway DEV public domain is missing."; exit 1; }
+
+          echo "::add-mask::$clerk_secret"
+          echo "::add-mask::$encryption_key"
+          echo "::add-mask::$sqlalchemy_url"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+          echo "SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY=$encryption_key" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=$sqlalchemy_url" >> "$GITHUB_ENV"
+          echo "CLERK_BACKEND_API_URL=$clerk_api" >> "$GITHUB_ENV"
+          echo "BASE_URL=https://$domain" >> "$GITHUB_ENV"
+          echo "Actual Railway DEV runtime configuration resolved without exposing secrets."
+
+      - name: Generate disposable testUser identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix="$(date -u +%Y%m%d%H%M%S)-$(cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c1-8)"
+          email="gigsinopensource+verigence-e2e-${suffix}@gmail.com"
+          mobile="$(python - <<'PY'
+          import secrets
+          print('+91' + secrets.choice('6789') + ''.join(secrets.choice('0123456789') for _ in range(9)))
+          PY
+          )"
+          password="$(python - <<'PY'
+          import secrets, string
+          alphabet = string.ascii_letters + string.digits + '!@#$%^&*_-'
+          print('Vg9!' + ''.join(secrets.choice(alphabet) for _ in range(20)))
+          PY
+          )"
+          echo "::add-mask::$password"
+          echo "TEST_EMAIL=$email" >> "$GITHUB_ENV"
+          echo "TEST_MOBILE=$mobile" >> "$GITHUB_ENV"
+          echo "TEST_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "Disposable testUser email: $email"
+          echo "Disposable testUser mobile: $mobile"
+
+      - name: Resolve active onboarding key and preflight disposable identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import httpx
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.orm import Session
+          from verigence_security.config import Settings
+          from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
+
+          engine = create_engine(os.environ['DATABASE_URL'], pool_pre_ping=True)
+          email = os.environ['TEST_EMAIL'].lower()
+          mobile = os.environ['TEST_MOBILE']
+          with engine.connect() as conn:
+              existing = conn.execute(
+                  text("SELECT 1 FROM security.users WHERE lower(primary_email)=:email OR primary_mobile=:mobile LIMIT 1"),
+                  {'email': email, 'mobile': mobile},
+              ).first()
+              assert existing is None, 'Disposable identity unexpectedly exists in Security before test'
+
+          settings = Settings(
+              security_user_onboarding_key_encryption_key=os.environ['SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY']
+          )
+          with Session(engine) as session:
+              state = GlobalUserOnboardingService(session, settings).get_onboarding_key()
+          assert state['status'] == 'ACTIVE', 'Global onboarding key is not ACTIVE'
+          onboarding_key = str(state['onboardingKey'])
+          print(f"::add-mask::{onboarding_key}")
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write(f"ONBOARDING_KEY={onboarding_key}\n")
+
+          response = httpx.get(
+              f"{os.environ['CLERK_BACKEND_API_URL'].rstrip('/')}/users",
+              headers={'Authorization': f"Bearer {os.environ['CLERK_SECRET_KEY']}"},
+              params=[('email_address', email)],
+              timeout=20.0,
+          )
+          response.raise_for_status()
+          payload = response.json()
+          users = payload if isinstance(payload, list) else payload.get('data', [])
+          exact = [
+              user for user in users
+              if any(str(item.get('email_address', '')).lower() == email for item in user.get('email_addresses', []))
+          ]
+          assert not exact, 'Disposable identity unexpectedly exists in Clerk before test'
+          print(f"Preflight passed; onboarding key version={state['version']} and disposable identity is unused.")
+          PY
+
+      - name: Register testUser through deployed Verigence API
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import uuid
+          import httpx
+
+          correlation_id = str(uuid.uuid4())
+          response = httpx.post(
+              f"{os.environ['BASE_URL'].rstrip('/')}/security/v1/onboarding/users",
+              headers={
+                  'X-Onboarding-Key': os.environ['ONBOARDING_KEY'],
+                  'X-Correlation-ID': correlation_id,
+              },
+              json={
+                  'firstName': 'testUser',
+                  'lastName': 'E2E',
+                  'email': os.environ['TEST_EMAIL'],
+                  'mobile': os.environ['TEST_MOBILE'],
+                  'password': os.environ['TEST_PASSWORD'],
+              },
+              timeout=30.0,
+          )
+          if response.status_code != 201:
+              raise AssertionError(f"Registration returned HTTP {response.status_code}: {response.text[:500]}")
+          payload = response.json()
+          assert payload.get('status') == 'PENDING_ADMIN_APPROVAL', payload
+          request_id = str(payload.get('onboardingRequestId', ''))
+          assert request_id, payload
+          assert response.headers.get('X-Correlation-ID') == correlation_id
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write(f"ONBOARDING_REQUEST_ID={request_id}\n")
+          print(f"Deployed registration API returned 201/PENDING_ADMIN_APPROVAL; request_id={request_id}")
+          PY
+
+      - name: Verify Security persistence and real Clerk credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import httpx
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ['DATABASE_URL'], pool_pre_ping=True)
+          email = os.environ['TEST_EMAIL'].lower()
+          with engine.connect() as conn:
+              row = conn.execute(
+                  text(
+                      """
+                      SELECT u.user_id,u.first_name,u.last_name,u.primary_email,u.primary_mobile,u.status,
+                             p.status AS principal_status,e.provider_subject,e.status AS identity_status,
+                             r.onboarding_request_id,r.status AS onboarding_status,r.clerk_invitation_id
+                      FROM security.users u
+                      JOIN security.security_principals p ON p.principal_id=u.user_id
+                      JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+                      JOIN security.platform_user_onboarding_requests r ON r.user_id=u.user_id
+                      WHERE lower(u.primary_email)=:email
+                      """
+                  ),
+                  {'email': email},
+              ).mappings().one()
+
+          assert row['first_name'] == 'testUser'
+          assert row['last_name'] == 'E2E'
+          assert str(row['primary_email']).lower() == email
+          assert row['primary_mobile'] == os.environ['TEST_MOBILE']
+          assert row['status'] == 'PENDING'
+          assert row['principal_status'] == 'ACTIVE'
+          assert row['identity_status'] == 'ACTIVE'
+          assert row['onboarding_status'] == 'PENDING_ADMIN_APPROVAL'
+          assert row['clerk_invitation_id'] is None
+          assert str(row['onboarding_request_id']) == os.environ['ONBOARDING_REQUEST_ID']
+
+          user_id = str(row['user_id'])
+          clerk_id = str(row['provider_subject'])
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write(f"SECURITY_USER_ID={user_id}\n")
+              handle.write(f"CLERK_USER_ID={clerk_id}\n")
+
+          headers = {'Authorization': f"Bearer {os.environ['CLERK_SECRET_KEY']}"}
+          clerk = httpx.get(
+              f"{os.environ['CLERK_BACKEND_API_URL'].rstrip('/')}/users/{clerk_id}",
+              headers=headers,
+              timeout=20.0,
+          )
+          clerk.raise_for_status()
+          clerk_user = clerk.json()
+          assert clerk_user.get('first_name') == 'testUser'
+          assert clerk_user.get('last_name') == 'E2E'
+          assert any(
+              str(item.get('email_address', '')).lower() == email
+              for item in clerk_user.get('email_addresses', [])
+          )
+          assert len(clerk_user.get('phone_numbers', [])) == 0
+          assert clerk_user.get('username') in (None, '')
+
+          password_check = httpx.post(
+              f"{os.environ['CLERK_BACKEND_API_URL'].rstrip('/')}/users/{clerk_id}/verify_password",
+              headers={**headers, 'Content-Type': 'application/json'},
+              json={'password': os.environ['TEST_PASSWORD']},
+              timeout=20.0,
+          )
+          password_check.raise_for_status()
+          assert password_check.json().get('verified') is True
+
+          precheck = httpx.post(
+              f"{os.environ['BASE_URL'].rstrip('/')}/security/v1/auth/precheck",
+              json={'email': os.environ['TEST_EMAIL']},
+              timeout=20.0,
+          )
+          precheck.raise_for_status()
+          assert precheck.json() == {'allowed': False}
+
+          print(f"Security USER verified PENDING; Clerk user={clerk_id}; Clerk password verification passed; precheck correctly denied pending USER.")
+          PY
+
+      - name: Delete disposable Clerk user and all Security records
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import httpx
+          from sqlalchemy import create_engine, text
+
+          email = os.environ.get('TEST_EMAIL', '').lower()
+          database_url = os.environ.get('DATABASE_URL', '')
+          clerk_secret = os.environ.get('CLERK_SECRET_KEY', '')
+          clerk_api = os.environ.get('CLERK_BACKEND_API_URL', 'https://api.clerk.com/v1').rstrip('/')
+          known_clerk_id = os.environ.get('CLERK_USER_ID', '')
+          user_id = os.environ.get('SECURITY_USER_ID', '')
+
+          engine = create_engine(database_url, pool_pre_ping=True) if database_url else None
+          if engine is not None and email:
+              with engine.connect() as conn:
+                  row = conn.execute(
+                      text(
+                          """
+                          SELECT u.user_id,e.provider_subject
+                          FROM security.users u
+                          LEFT JOIN security.external_identities e
+                            ON e.user_id=u.user_id AND e.provider='CLERK'
+                          WHERE lower(u.primary_email)=:email
+                          LIMIT 1
+                          """
+                      ),
+                      {'email': email},
+                  ).mappings().first()
+                  if row is not None:
+                      user_id = user_id or str(row['user_id'])
+                      known_clerk_id = known_clerk_id or str(row['provider_subject'] or '')
+
+          headers = {'Authorization': f'Bearer {clerk_secret}'} if clerk_secret else {}
+          if clerk_secret and email and not known_clerk_id:
+              lookup = httpx.get(
+                  f'{clerk_api}/users',
+                  headers=headers,
+                  params=[('email_address', email)],
+                  timeout=20.0,
+              )
+              if lookup.status_code == 200:
+                  payload = lookup.json()
+                  users = payload if isinstance(payload, list) else payload.get('data', [])
+                  for item in users:
+                      if any(str(address.get('email_address', '')).lower() == email for address in item.get('email_addresses', [])):
+                          known_clerk_id = str(item.get('id', ''))
+                          break
+
+          if clerk_secret and known_clerk_id:
+              deleted = httpx.delete(f'{clerk_api}/users/{known_clerk_id}', headers=headers, timeout=20.0)
+              assert deleted.status_code in (200, 204, 404), f'Clerk delete HTTP {deleted.status_code}: {deleted.text[:300]}'
+
+          if engine is not None and user_id:
+              with engine.begin() as conn:
+                  conn.execute(text('DELETE FROM security.security_events WHERE principal_id=:uid OR entity_id=:uid'), {'uid': user_id})
+                  conn.execute(text('DELETE FROM security.platform_user_onboarding_requests WHERE user_id=:uid'), {'uid': user_id})
+                  conn.execute(text('DELETE FROM security.external_identities WHERE user_id=:uid'), {'uid': user_id})
+                  conn.execute(text('DELETE FROM security.users WHERE user_id=:uid'), {'uid': user_id})
+                  conn.execute(text('DELETE FROM security.security_principals WHERE principal_id=:uid'), {'uid': user_id})
+
+          if engine is not None and email:
+              with engine.connect() as conn:
+                  remaining = conn.execute(
+                      text(
+                          """
+                          SELECT
+                            (SELECT count(*) FROM security.users WHERE lower(primary_email)=:email) AS users_count,
+                            (SELECT count(*) FROM security.platform_user_onboarding_requests WHERE lower(email)=:email) AS requests_count
+                          """
+                      ),
+                      {'email': email},
+                  ).mappings().one()
+                  assert int(remaining['users_count']) == 0
+                  assert int(remaining['requests_count']) == 0
+
+          if clerk_secret and known_clerk_id:
+              confirm = httpx.get(f'{clerk_api}/users/{known_clerk_id}', headers=headers, timeout=20.0)
+              assert confirm.status_code == 404, f'Clerk user still exists after delete: HTTP {confirm.status_code}'
+          elif clerk_secret and email:
+              lookup = httpx.get(f'{clerk_api}/users', headers=headers, params=[('email_address', email)], timeout=20.0)
+              lookup.raise_for_status()
+              payload = lookup.json()
+              users = payload if isinstance(payload, list) else payload.get('data', [])
+              exact = [item for item in users if any(str(address.get('email_address', '')).lower() == email for address in item.get('email_addresses', []))]
+              assert not exact, 'Clerk disposable user still exists after cleanup'
+
+          print(f"CLEANUP PASS: disposable identity {email or '<not-created>'} removed from Clerk and Security.")
+          PY
