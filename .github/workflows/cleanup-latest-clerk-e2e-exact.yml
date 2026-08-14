@@ -1,0 +1,100 @@
+name: Cleanup Latest Clerk E2E Exact
+
+on:
+  push:
+    branches:
+      - test/cleanup-live-onboarding-e2e-20260814
+    paths:
+      - .github/workflows/cleanup-latest-clerk-e2e-exact.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+      RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      CLERK_USER_ID: user_3HtxWxpHRWR6piqXWegb1ozqzGm
+      TEST_EMAIL: gigsinopensource+verigence-live-20260814094715-96328470@gmail.com
+      SIGNUP_ATTEMPT_ID: c7c6da2d-4bd5-450a-bebb-780b37b0e4cc
+    steps:
+      - name: Resolve Railway DEV configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          q='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$q" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          r="$(curl -fsS -X POST https://backboard.railway.com/graphql/v2 -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H 'Content-Type: application/json' --data "$body")"
+          clerk="$(printf '%s' "$r" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')"
+          db="$(printf '%s' "$r" | jq -r '.data.variables.DATABASE_URL // empty')"
+          [ -n "$clerk" ] && [ -n "$db" ]
+          echo "::add-mask::$clerk"
+          echo "::add-mask::$db"
+          echo "CLERK_SECRET_KEY=$clerk" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=$db" >> "$GITHUB_ENV"
+
+      - name: Delete exact Clerk user and exact signup attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q 'httpx>=0.28,<1' 'sqlalchemy>=2,<3' 'psycopg[binary]>=3.2,<4'
+          python - <<'PY'
+          import os
+          import httpx
+          from sqlalchemy import create_engine, text
+
+          clerk_id = os.environ['CLERK_USER_ID']
+          email = os.environ['TEST_EMAIL'].lower()
+          attempt_id = os.environ['SIGNUP_ATTEMPT_ID']
+          headers = {'Authorization': f"Bearer {os.environ['CLERK_SECRET_KEY']}"}
+
+          current = httpx.get(f'https://api.clerk.com/v1/users/{clerk_id}', headers=headers, timeout=20.0)
+          assert current.status_code in (200, 404), current.text[:300]
+          if current.status_code == 200:
+              deleted = httpx.delete(f'https://api.clerk.com/v1/users/{clerk_id}', headers=headers, timeout=20.0)
+              assert deleted.status_code in (200, 204), deleted.text[:300]
+
+          raw = os.environ['DATABASE_URL']
+          if raw.startswith('postgresql+asyncpg://'):
+              raw = 'postgresql+psycopg://' + raw.removeprefix('postgresql+asyncpg://')
+          elif raw.startswith('postgresql://'):
+              raw = 'postgresql+psycopg://' + raw.removeprefix('postgresql://')
+          elif raw.startswith('postgres://'):
+              raw = 'postgresql+psycopg://' + raw.removeprefix('postgres://')
+          engine = create_engine(raw, pool_pre_ping=True)
+          with engine.begin() as conn:
+              conn.execute(
+                  text('DELETE FROM security.platform_user_signup_attempts WHERE signup_attempt_id=CAST(:attempt AS uuid) AND lower(email)=:email'),
+                  {'attempt': attempt_id, 'email': email},
+              )
+
+          confirm = httpx.get(f'https://api.clerk.com/v1/users/{clerk_id}', headers=headers, timeout=20.0)
+          assert confirm.status_code == 404, f'Clerk user still returns HTTP {confirm.status_code}'
+          with engine.connect() as conn:
+              attempt_count = conn.execute(
+                  text('SELECT count(*) FROM security.platform_user_signup_attempts WHERE signup_attempt_id=CAST(:attempt AS uuid) OR lower(email)=:email'),
+                  {'attempt': attempt_id, 'email': email},
+              ).scalar_one()
+              user_count = conn.execute(
+                  text('SELECT count(*) FROM security.users WHERE lower(primary_email)=:email'),
+                  {'email': email},
+              ).scalar_one()
+              request_count = conn.execute(
+                  text('SELECT count(*) FROM security.platform_user_onboarding_requests WHERE lower(email)=:email'),
+                  {'email': email},
+              ).scalar_one()
+          assert int(attempt_count) == 0
+          assert int(user_count) == 0
+          assert int(request_count) == 0
+          print('CLEANUP_VERIFIED=true')
+          print(f'CLERK_USER_ID={clerk_id}')
+          print('SECURITY_USER_COUNT=0')
+          print('ONBOARDING_REQUEST_COUNT=0')
+          print('SIGNUP_ATTEMPT_COUNT=0')
+          PY
