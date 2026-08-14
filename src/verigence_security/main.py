@@ -11,6 +11,8 @@ from verigence_security.api.routes import (
     jwks,
     platform_admin,
     platform_modules,
+    tenant_groups,
+    tenant_roles,
 )
 from verigence_security.config import get_settings
 from verigence_security.core.correlation import CorrelationIdMiddleware
@@ -34,6 +36,8 @@ app.add_exception_handler(Exception, unexpected_error_handler)
 app.include_router(health.router)
 app.include_router(jwks.router)
 app.include_router(access.router)
+app.include_router(tenant_groups.router)
+app.include_router(tenant_roles.router)
 app.include_router(platform_admin.router)
 app.include_router(platform_modules.router)
 app.include_router(global_users.router)
