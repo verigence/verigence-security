@@ -1,7 +1,12 @@
-from verigence_security.main import app
+import importlib
+
+import verigence_security.main as main_module
 
 
 def test_v142_global_user_routes_are_active_and_tenant_identity_routes_are_retired() -> None:
+    # Other API tests intentionally exercise/mutate the module-level FastAPI app. Reload main so
+    # this route-contract assertion is order-independent and validates a freshly composed runtime.
+    app = importlib.reload(main_module).app
     paths = {
         path
         for route in app.routes
