@@ -1,0 +1,148 @@
+name: Live Clerk OTP E2E - Stage 1
+
+on:
+  push:
+    branches:
+      - test/live-clerk-otp-e2e-20260814
+
+permissions:
+  contents: read
+
+jobs:
+  preauthorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+      RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      TEST_EMAIL: gigsinopensource+verigence-otp-e2e@gmail.com
+      TEST_MOBILE: +919876540846
+      TEST_FIRST_NAME: testUser
+      TEST_LAST_NAME: E2E
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install preflight tooling
+        run: python -m pip install 'sqlalchemy>=2,<3' 'psycopg[binary]>=3.2,<4' 'argon2-cffi>=23,<26'
+
+      - name: Resolve Railway runtime Clerk secret and public domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          clerk_secret="$(printf '%s' "$response" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')"
+          [ -n "$clerk_secret" ] || { echo '::error::CLERK_SECRET_KEY missing from Railway DEV'; exit 1; }
+          echo "::add-mask::$clerk_secret"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+
+          domain_query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          domain_vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          domain_body="$(jq -cn --arg query "$domain_query" --argjson variables "$domain_vars" '{query:$query,variables:$variables}')"
+          domain_response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$domain_body")"
+          domain="$(printf '%s' "$domain_response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || { echo '::error::Railway public domain missing'; exit 1; }
+          echo "SECURITY_BASE_URL=https://$domain" >> "$GITHUB_ENV"
+
+      - name: Verify clean disposable identity and active DEV onboarding key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from argon2 import PasswordHasher
+          from argon2.exceptions import VerifyMismatchError
+          from sqlalchemy import create_engine, text
+
+          raw = os.environ['MIGRATION_DATABASE_URL']
+          if raw.startswith('postgresql+psycopg://'):
+              url = raw
+          elif raw.startswith('postgresql+asyncpg://'):
+              url = 'postgresql+psycopg://' + raw.removeprefix('postgresql+asyncpg://')
+          elif raw.startswith('postgresql://'):
+              url = 'postgresql+psycopg://' + raw.removeprefix('postgresql://')
+          elif raw.startswith('postgres://'):
+              url = 'postgresql+psycopg://' + raw.removeprefix('postgres://')
+          else:
+              raise RuntimeError('MIGRATION_DATABASE_URL is not PostgreSQL')
+          engine = create_engine(url, pool_pre_ping=True)
+          email = os.environ['TEST_EMAIL'].lower()
+          mobile = os.environ['TEST_MOBILE']
+          with engine.connect() as conn:
+              key = conn.execute(text('SELECT key_hash,status,key_version FROM security.platform_user_onboarding_settings WHERE singleton_id=1')).mappings().one()
+              user_count = conn.execute(text('SELECT count(*) FROM security.users WHERE lower(primary_email)=:email OR primary_mobile=:mobile'), {'email': email, 'mobile': mobile}).scalar_one()
+              attempt_count = conn.execute(text("SELECT count(*) FROM security.platform_user_signup_attempts WHERE status='AUTHORIZED_FOR_CLERK' AND (lower(email)=:email OR mobile=:mobile)"), {'email': email, 'mobile': mobile}).scalar_one()
+          assert key['status'] == 'ACTIVE', 'DEV onboarding key is not ACTIVE'
+          try:
+              matches = PasswordHasher().verify(str(key['key_hash']), 'VGN-PHASE846')
+          except VerifyMismatchError:
+              matches = False
+          assert matches, 'DEV onboarding key does not match expected controlled v1.4.6 fixture'
+          assert int(user_count) == 0, 'Disposable Security identity already exists'
+          assert int(attempt_count) == 0, 'Disposable active signup attempt already exists'
+          print(f"SECURITY_PREFLIGHT=PASS key_version={key['key_version']} no_user=true no_active_attempt=true")
+          PY
+
+      - name: Verify disposable identity does not already exist in Clerk
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error \
+            --url "https://api.clerk.com/v1/users?email_address=${TEST_EMAIL}" \
+            --header "Authorization: Bearer $CLERK_SECRET_KEY")"
+          count="$(printf '%s' "$response" | jq '[.[]? // empty, .data[]? // empty] | map(select(any(.email_addresses[]?; ((.email_address // "") | ascii_downcase) == env.TEST_EMAIL))) | length')"
+          [ "$count" = "0" ] || { echo '::error::Disposable Clerk identity already exists'; exit 1; }
+          echo 'CLERK_PREFLIGHT=PASS no_user=true'
+
+      - name: Resolve Clerk Account Portal URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error \
+            --url 'https://api.clerk.com/v1/domains' \
+            --header "Authorization: Bearer $CLERK_SECRET_KEY")"
+          portal="$(printf '%s' "$response" | jq -r '[.data[]? | select(.is_satellite == false) | .accounts_portal_url // empty, .[]? | select(.is_satellite == false) | .accounts_portal_url // empty] | map(select(length>0)) | first // empty')"
+          [ -n "$portal" ] || { echo '::error::Clerk Account Portal URL not returned'; exit 1; }
+          echo "ACCOUNT_PORTAL_URL=$portal" >> "$GITHUB_ENV"
+          echo "ACCOUNT_PORTAL_URL=$portal"
+
+      - name: Start Verigence signup authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          correlation="$(cat /proc/sys/kernel/random/uuid)"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url "$SECURITY_BASE_URL/security/v1/onboarding/users" \
+            --header 'Content-Type: application/json' \
+            --header 'X-Onboarding-Key: VGN-PHASE846' \
+            --header "X-Correlation-ID: $correlation" \
+            --data "$(jq -cn --arg first "$TEST_FIRST_NAME" --arg last "$TEST_LAST_NAME" --arg email "$TEST_EMAIL" --arg mobile "$TEST_MOBILE" '{firstName:$first,lastName:$last,email:$email,mobile:$mobile}')")"
+          status="$(printf '%s' "$response" | jq -r '.status // empty')"
+          attempt="$(printf '%s' "$response" | jq -r '.signupAttemptId // empty')"
+          expires="$(printf '%s' "$response" | jq -r '.expiresAt // empty')"
+          [ "$status" = 'CLERK_EMAIL_VERIFICATION_REQUIRED' ] || { echo "::error::Unexpected Security status: $status"; exit 1; }
+          [ -n "$attempt" ] || { echo '::error::Security did not return signupAttemptId'; exit 1; }
+          echo "SIGNUP_ATTEMPT_ID=$attempt"
+          echo "SIGNUP_EXPIRES_AT=$expires"
+          printf 'CLERK_SIGNUP_URL=%s/sign-up?email_address=%s&first_name=%s&last_name=%s\n' \
+            "$ACCOUNT_PORTAL_URL" "$TEST_EMAIL" "$TEST_FIRST_NAME" "$TEST_LAST_NAME"
+          echo 'STAGE1_RESULT=PASS_NO_SECURITY_USER_CREATED'
