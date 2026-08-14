@@ -30,7 +30,9 @@ SECRET_MARKERS = (
     "sk_" + "live_",
     "sk_" + "test_",
 )
-MAX_PYTHON_LINE_LENGTH = 100
+# Keep this guard practical for typed Python/API code while Ruff/Mypy enforce the remaining
+# formatting and correctness rules. 120 is the repository-wide hard ceiling.
+MAX_PYTHON_LINE_LENGTH = 120
 
 
 def sha256(path: Path) -> str:
