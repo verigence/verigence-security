@@ -99,49 +99,22 @@ jobs:
           fi
 
       - name: Apply Admin Control Plane v1.4 migration
-        shell: bash
-        run: |
-          set -euo pipefail
-          psql "$ADMIN_MIGRATION_DATABASE_URL" \
-            -X \
-            -v ON_ERROR_STOP=1 \
-            -f migrations/0002_security_admin_control_plane_v1.4.sql
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0002_security_admin_control_plane_v1.4.sql
 
       - name: Apply global USER onboarding v1.4.2 migration
-        shell: bash
-        run: |
-          set -euo pipefail
-          psql "$ADMIN_MIGRATION_DATABASE_URL" \
-            -X \
-            -v ON_ERROR_STOP=1 \
-            -f migrations/0003_global_user_onboarding_v1.4.2.sql
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0003_global_user_onboarding_v1.4.2.sql
 
       - name: Apply v1.4.2 security-event compatibility migration
-        shell: bash
-        run: |
-          set -euo pipefail
-          psql "$ADMIN_MIGRATION_DATABASE_URL" \
-            -X \
-            -v ON_ERROR_STOP=1 \
-            -f migrations/0004_v142_security_event_outcome_width.sql
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0004_v142_security_event_outcome_width.sql
 
       - name: Apply Platform Super Admin full-authority migration
-        shell: bash
-        run: |
-          set -euo pipefail
-          psql "$ADMIN_MIGRATION_DATABASE_URL" \
-            -X \
-            -v ON_ERROR_STOP=1 \
-            -f migrations/0005_super_admin_full_authority.sql
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0005_super_admin_full_authority.sql
 
       - name: Apply Phase 1 self-onboarding v1.4.5 migration
-        shell: bash
-        run: |
-          set -euo pipefail
-          psql "$ADMIN_MIGRATION_DATABASE_URL" \
-            -X \
-            -v ON_ERROR_STOP=1 \
-            -f migrations/0006_phase1_self_onboarding_v1.4.5.sql
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0006_phase1_self_onboarding_v1.4.5.sql
+
+      - name: Apply Clerk email OTP onboarding v1.4.6 migration
+        run: psql "$ADMIN_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0007_clerk_email_otp_onboarding_v1.4.6.sql
 
       - name: Run v1.4.2 schema/control-registry PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142_schema.py
@@ -151,8 +124,8 @@ jobs:
           pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
           -k global_user_onboards_once_then_authorizes_across_tenants
 
-      - name: Run v1.4.5 Phase 1 self-onboarding PostgreSQL acceptance
-        run: pytest -q tests/integration/test_phase5_self_onboarding_v145.py
+      - name: Run v1.4.6 Clerk email OTP onboarding PostgreSQL acceptance
+        run: pytest -q tests/integration/test_phase5_self_onboarding_v146.py
 
       - name: Run Platform Super Admin full-authority PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_super_admin_full_authority.py
@@ -170,6 +143,7 @@ jobs:
               tests/integration/test_phase5_onboarding_f.py|\
               tests/integration/test_phase5_platform_admin_api.py|\
               tests/integration/test_phase5_self_onboarding_v145.py|\
+              tests/integration/test_phase5_self_onboarding_v146.py|\
               tests/integration/test_phase5_super_admin_full_authority.py)
                 continue
                 ;;
