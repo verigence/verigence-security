@@ -2,7 +2,7 @@
 
 **Repository:** `verigence/verigence-security`  
 **Primary integration branch:** `dev`  
-**Approved baseline:** Security v1.3 + Admin Control Plane v1.4 + Clerk v1.4.1 + Global USER Onboarding v1.4.2 + Super Admin Authority v1.4.3  
+**Approved baseline:** Security v1.3 + Admin Control Plane v1.4 + Clerk v1.4.1 + Global USER Onboarding v1.4.2 + Super Admin Authority v1.4.3 + Initial Super Admin Provisioning v1.4.4  
 **Last updated:** 2026-08-14
 
 ## 1. Governing recovery rule
@@ -12,33 +12,39 @@ Implementation is grounded in approved/versioned repository artifacts, not chat 
 After a context reset, read in this order:
 
 1. `docs/CONTEXT_AND_DESIGN_GROUNDING_POLICY.md`;
-2. `docs/SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md`;
-3. `docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md`;
-4. `docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md`;
-5. `docs/SECURITY_CLERK_IDENTITY_BOUNDARY_DESIGN_v1.4.1.md`;
-6. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`;
-7. `docs/IMPLEMENTATION_STATUS.md`;
-8. current `dev`, open Security PRs and CI/Railway state.
+2. `docs/SECURITY_INITIAL_SUPER_ADMIN_PROVISIONING_DESIGN_v1.4.4.md`;
+3. `docs/SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md`;
+4. `docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md`;
+5. `docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md`;
+6. `docs/SECURITY_CLERK_IDENTITY_BOUNDARY_DESIGN_v1.4.1.md`;
+7. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`;
+8. `docs/IMPLEMENTATION_STATUS.md`;
+9. current `dev`, open Security PRs and CI/Railway state.
 
 ## 2. Invariants that must survive every reset
 
 ```text
-Human onboarding          = Platform-global, once per person
+Human onboarding          = Platform-global, once per normal USER
 Clerk                     = authentication provider
 Security                  = USER lifecycle + authorization authority
 Tenant membership         = not a USER-access prerequisite
 Platform Super Admin      = built-in initial system administrator with full authority
+Initial administrator     = operator-selected immutable Clerk user_... provisioned as setup data
 ```
+
+The first environment administrator is exceptional installation data, not a normal onboarding event.
 
 `platform.super_admin` owns every ACTIVE Security permission, automatically inherits future ACTIVE permissions and can administer Tenant authorization without a Tenant-specific role assignment.
 
 ## 3. Current promoted baseline
 
 ```text
-DEV commit: 4701705b89a68e1c05eb65007d4aadbc8d92727d
+DEV commit: b3c9994c420a261ef55ad402f1d8219651eebdb7
 ```
 
-Promotion evidence for the latest Super Admin authority clarification:
+The deployed baseline includes global USER onboarding v1.4.2 and full Super Admin authority v1.4.3.
+
+Latest Super Admin authority evidence:
 
 ```text
 PR #49:                  MERGED
@@ -49,71 +55,71 @@ Railway DEV:             31774409818 — PASS
 readiness/liveness/correlation: PASS
 ```
 
-The earlier global USER onboarding v1.4.2 promotion through PR #48 remains valid historical evidence.
-
 ## 4. Current workstream
 
-**NOW:** live initial Clerk Super Admin bootstrap/E2E.
+**NOW:** v1.4.4 initial Platform Super Admin system provisioning.
 
-The built-in role and permission data are already deployed. No administrator must provision extra roles before the first Super Admin can operate the system.
+DEV selected Clerk identity:
+
+```text
+user_3HtNkIWp32cD9HC7KzDbZdJkr2h
+```
 
 Required sequence:
 
 ```text
-operator-selected Clerk user_...
+feature/super-admin-system-provisioning-v1.4.4
    ↓
-configure SECURITY_BOOTSTRAP_SUPER_ADMIN_CLERK_USER_ID
+Security CI + Neon regression
    ↓
-temporarily enable SECURITY_BOOTSTRAP_ENABLED
+merge to dev with [provision-initial-super-admin] marker
    ↓
-authenticated Clerk JWT
+controlled provisioning job uses selected Clerk user_...
    ↓
-POST /security/v1/platform/bootstrap/claim
+ACTIVE Security USER + CLERK mapping + platform.super_admin
    ↓
-Security global USER + CLERK mapping
+verify complete ACTIVE permission coverage
    ↓
-ACTIVE platform.super_admin assignment
+Railway DEV remains green
    ↓
-verify full Platform + Tenant administration authority
+selected person authenticates normally with Clerk
    ↓
-prove repeated bootstrap is denied
-   ↓
-disable bootstrap
+Security Platform Admin login/full-authority proof
    ↓
 resume Increment G
 ```
 
-## 5. Super Admin rule
+Fresh installation no longer requires the person to execute `/security/v1/platform/bootstrap/claim` simply to initialize the platform. The historical claim path stays disabled unless a specific compatibility procedure requires it.
+
+## 5. Initial Super Admin rule
 
 Do not create a circular provisioning dependency.
 
-Security bootstrap assigns one built-in role:
+The operator supplies only the immutable Clerk User ID. Security creates the initial global USER and one built-in role assignment:
 
 ```text
 platform.super_admin
 ```
 
-That one role supplies full effective authority through system-owned permission data. Do not add redundant Platform/Tenant roles simply to reproduce the same access.
+No Tenant membership, Tenant role, onboarding key or local credential is required for this initial system administrator.
+
+The provisioning operation is serialized and idempotent for the same already-bound Super Admin. It fails closed rather than replacing a different active Super Admin.
 
 ## 6. Global USER onboarding rule
 
 Do not reconstruct the retired Tenant-scoped identity onboarding model.
 
-A person has one global Security USER and one Clerk mapping. The same `user_id` can be assigned different authorization in many Tenants without another onboarding event.
+Normal people are onboarded once as global Security USERs. The same `user_id` can be assigned different authorization in many Tenants without another onboarding event.
 
-Security validates the Platform onboarding key before Clerk provisioning, and only Security Admin activation changes a normal onboarding USER to ACTIVE.
+Security validates the Platform onboarding key before Clerk provisioning for normal USER onboarding, and only Security Admin activation changes a normal onboarding USER to ACTIVE.
 
-## 7. Live initial administrator dependency
+## 7. Identity boundary
 
-No secret values belong in Git or chat.
+Clerk continues to own credentials, MFA, verification, recovery and authentication sessions.
 
-The only non-secret identity value still required for the live bootstrap is the immutable Clerk User ID selected by the operator:
+Initial provisioning only establishes the Security-side identity mapping and authorization. It does not mint a Clerk session or bypass Clerk authentication.
 
-```text
-user_...
-```
-
-The Clerk User ID selects the initial administrator identity. The deployed built-in Security role determines its authority.
+After provisioning, the selected Super Admin authenticates normally with Clerk. Security verifies the Clerk JWT, resolves its `sub` to the provisioned Security USER and issues the Verigence Platform Admin token from Security-owned authorization data.
 
 ## 8. Promotion discipline
 
@@ -122,10 +128,10 @@ feature/*
    ↓ Security CI + applicable real Neon/PostgreSQL
   dev
    ↓ exact-commit Security CI
-immutable GHCR image
+controlled setup data provisioning when explicitly marked
    ↓
-Railway DEV
+immutable GHCR image -> Railway DEV
    ↓ readiness + liveness + correlation
 ```
 
-Do not move to Increment G until the live initial Clerk bootstrap is green.
+Do not move to Increment G until initial DEV Super Admin provisioning and normal Clerk -> Security login proof are green.
