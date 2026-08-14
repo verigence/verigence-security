@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -231,12 +232,10 @@ class Phase1SelfOnboardingService:
 
     @staticmethod
     def _compensate_clerk_user(clerk: ClerkBackendClient, clerk_user_id: str) -> None:
-        try:
+        # Security still fails closed because no local usable USER mapping was committed.
+        # Operational reconciliation can remove an orphan Clerk identity if this best effort fails.
+        with suppress(ClerkBackendError):
             clerk.delete_user(clerk_user_id)
-        except ClerkBackendError:
-            # Security still fails closed because no local usable USER mapping was committed.
-            # Operational reconciliation can remove the orphan Clerk identity later.
-            pass
 
     def _security_event(
         self,
