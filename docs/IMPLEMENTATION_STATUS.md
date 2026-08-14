@@ -2,7 +2,7 @@
 
 **Repository:** `verigence/verigence-security`  
 **Current integration branch:** `dev`  
-**Current implementation authority:** Security v1.3 + Admin Control Plane v1.4 + Clerk boundary v1.4.1 + Global USER Onboarding v1.4.2  
+**Current implementation authority:** Security v1.3 + Admin Control Plane v1.4 + Clerk v1.4.1 + Global USER Onboarding v1.4.2 + Super Admin Authority v1.4.3  
 **Last updated:** 2026-08-14
 
 Detailed current execution/evidence is maintained in:
@@ -11,184 +11,123 @@ Detailed current execution/evidence is maintained in:
 docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md
 ```
 
-## 1. Promoted baseline
-
-The promoted `dev` baseline before the v1.4.2 correction is:
+## 1. Current promoted baseline
 
 ```text
-0464adf353bf23cd7acf85db4368c3d456a06b34
+9856d7398e0af9937506033e1cf60d69d91e2d71
 ```
 
-That baseline includes:
+This `dev` baseline includes:
 
 - Security CI, Neon/PostgreSQL and Railway DEV foundations;
 - USER device/access-session security controls;
-- Platform Admin Control Plane increments A–F historical implementation;
-- module permission catalogue and role templates;
-- Groups and effective Tenant RBAC;
-- Tenant Role administration;
+- Platform Admin Control Plane implementation;
 - Clerk-backed Platform Super Admin bootstrap/login boundary;
-- local Platform password runtime path disabled;
+- global one-time USER onboarding and Security-owned USER lifecycle;
+- global onboarding key;
+- Tenant authorization without a Tenant-membership prerequisite;
+- same USER authorization across multiple Tenants;
+- per-user/per-Tenant authorization versioning;
 - immutable GHCR -> Railway exact-digest deployment.
 
-The Clerk v1.4.1 merge/deployment evidence is retained in
-`docs/CLERK_IDENTITY_INTEGRATION_TEST_REPORT_v1.4.1.md`.
+Global USER onboarding v1.4.2 promotion evidence:
 
-## 2. Current architecture correction — v1.4.2
+```text
+PR #48:                  MERGED
+Feature Neon:            31768537758 — PASS
+Post-merge Security CI:  31768624655 — PASS
+Railway DEV:             31768624692 — PASS
+readiness/liveness/correlation: PASS
+```
 
-The previously implemented Tenant-scoped human invitation/self-onboarding identity model is superseded for the
-active runtime.
+## 2. Current clarification — built-in Platform Super Admin
 
-The governing invariant is now:
+A new Verigence installation must have one initial administrator capable of provisioning the rest of the system.
 
-> **A human is onboarded into Verigence once at Platform level. Tenant access is authorization assignment, not
-> identity onboarding.**
+The governing invariant is:
 
-### Global USER identity/lifecycle
+> **One `platform.super_admin` assignment gives the initial administrator full effective Security authority. No second administrator or Tenant-role bootstrap is required.**
+
+The current implementation branch is:
+
+```text
+feature/super-admin-full-authority-v1.4.3
+```
+
+It adds:
+
+- migration `0005_super_admin_full_authority.sql`;
+- backfill of every ACTIVE Security permission to `platform.super_admin`;
+- automatic future permission synchronization through a PostgreSQL trigger;
+- removal of Super Admin grants when a permission becomes non-ACTIVE;
+- Platform-role permission participation in Tenant authorization;
+- Super Admin Tenant provisioning without Tenant-specific role assignment;
+- Neon/PostgreSQL acceptance tests for the invariant.
+
+This remains data-driven: the user receives one built-in `platform.super_admin` role rather than redundant assignments to every other role.
+
+## 3. Identity boundary
+
+Clerk continues to own human credentials, MFA, recovery and authentication sessions.
 
 Security owns:
 
-- one global Security USER record;
-- one-time global onboarding workflow;
-- global onboarding key;
-- `PENDING`, `ACTIVE`, `SUSPENDED`, `DISABLED`, `EXITED` USER lifecycle;
-- Security Admin activation;
-- Clerk external-identity mapping;
-- lifecycle synchronization to Clerk;
-- Verigence authorization and access tokens.
+- global USER record and lifecycle;
+- Clerk-to-Security USER mapping;
+- Platform and Tenant authorization;
+- Super Admin role assignment;
+- Security access/session decisions.
 
-Clerk owns:
+The first real administrator is bound once through the Clerk bootstrap flow. After the successful claim, the single `platform.super_admin` assignment supplies full authority automatically.
 
-- password/passkey;
-- email verification;
-- MFA;
-- recovery;
-- authentication sessions;
-- Clerk signed session JWTs.
-
-### Tenant authorization
-
-An ACTIVE global USER can be assigned independently in any number of Tenants through:
-
-- direct Tenant roles;
-- Groups and Group-inherited roles;
-- explicit locations;
-- schedules;
-- registered devices and access controls.
-
-`security.tenant_memberships` is no longer an active USER authorization/access-session prerequisite under v1.4.2.
-Historical rows/tables remain until a separate retention migration is approved.
-
-Per-user/per-Tenant authorization invalidation moves to:
-
-```text
-security.user_tenant_authorization_state
-```
-
-## 3. Current feature branch
-
-```text
-feature/global-user-onboarding-v1.4.2
-```
-
-Implemented in the branch:
-
-- `docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md`;
-- additive migration `0003_global_user_onboarding_v1.4.2.sql`;
-- global USER `PENDING` lifecycle;
-- single retrievable/rotatable/disable-able Platform onboarding key;
-- Argon2id key validation + encrypted reveal material;
-- Security validation and PENDING USER commit before Clerk provisioning;
-- Clerk application invitation/profile/ban/unban adapter;
-- authenticated Clerk binding to the pending Security USER;
-- Security Admin USER activation/status management;
-- public pre-auth allow/deny gate;
-- Tenant creation decoupled from user onboarding;
-- Tenant-scoped human onboarding routes removed from active runtime;
-- Tenant RBAC gate without membership prerequisite;
-- USER access sessions with nullable/unused membership ID;
-- per-user/per-Tenant authorization version state;
-- real PostgreSQL acceptance test for global one-time onboarding and cross-Tenant authorization.
-
-**Status:** UNDER CI/NEON VALIDATION. Do not call v1.4.2 DONE until the current exact feature head is green.
-
-## 4. Active route direction
-
-New v1.4.2 global USER surfaces:
-
-```text
-GET    /security/v1/platform/user-onboarding/key
-PUT    /security/v1/platform/user-onboarding/key
-POST   /security/v1/platform/user-onboarding/key/rotate
-DELETE /security/v1/platform/user-onboarding/key
-
-POST   /security/v1/onboarding/users
-POST   /security/v1/onboarding/users/{requestId}/bind
-POST   /security/v1/auth/precheck
-
-GET    /security/v1/platform/users
-PATCH  /security/v1/platform/users/{userId}/status
-```
-
-Retired from active runtime:
-
-- Tenant owner identity invitation;
-- Tenant-scoped self-onboarding key/token;
-- Tenant-scoped human invitations used for identity creation;
-- Tenant self-registration/onboarding approval endpoints.
-
-## 5. Remaining genuine blockers/deferred items
-
-Unchanged blockers/deferred work include:
-
-- complete SEC-032 Tenant activation prerequisite catalogue and activation mutation;
-- persistent cross-replica idempotency store;
-- device `BLOCKED` versus `REVOKED` business mutation semantics;
-- legacy v1.3 lifecycle public route shapes dependent on the unavailable v1.3 OpenAPI;
-- exact recent-MFA freshness requirement for privileged mutations;
-- Clerk webhook lifecycle semantics beyond explicit v1.4.2 ban/unban synchronization;
-- SYSTEM/SERVICE_INTEGRATION credential/token implementation;
-- retention purge/offboarding execution;
-- overlapping JWKS rotation;
-- WPM permission catalogue until WPM is reviewed;
-- UAT/Production readiness.
-
-## 6. Live Clerk configuration still required
+## 4. Live configuration still required
 
 No secret values belong in Git.
 
-For the live global onboarding/lifecycle path, deployment needs:
+Live Clerk/global onboarding requires the configured Clerk verification and Backend API secrets already documented in the governing designs.
+
+The initial Super Admin binding still requires the immutable Clerk User ID selected by the operator:
 
 ```text
-CLERK_SECRET_KEY
-SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY
+SECURITY_BOOTSTRAP_SUPER_ADMIN_CLERK_USER_ID=user_...
 ```
 
-The v1.4.1 Clerk issuer/public-key configuration remains required.
+The ID identifies which Clerk account becomes the initial Security Super Admin; it does not determine permissions. Permissions come from the built-in system role/data.
 
-The real first Platform Super Admin bootstrap additionally still needs the intended immutable Clerk `user_...`
-identifier. No placeholder is used for a live claim.
-
-## 7. Current execution direction
+## 5. Current execution direction
 
 ```text
-v1.4.2 design + implementation
+Super Admin authority branch
        ↓
-Security CI
-       ↓
-real Neon/PostgreSQL tests
+Security CI + real Neon/PostgreSQL
        ↓
 PR -> dev
        ↓
 exact-commit CI
        ↓
-immutable GHCR image
-       ↓
-Railway DEV
+immutable GHCR image -> Railway DEV
        ↓
 health/correlation proof
        ↓
-live Clerk E2E when required Clerk IDs/secrets are configured
+live Clerk Super Admin bootstrap
+       ↓
+verify full effective authority
+       ↓
+resume Increment G
 ```
 
-Increment G maker-checker remains paused until this corrected identity/authorization foundation is green.
+## 6. Other deferred work
+
+Still unresolved unless a later tracker says otherwise:
+
+- complete SEC-032 Tenant activation prerequisite catalogue;
+- persistent cross-replica idempotency store;
+- device `BLOCKED` vs `REVOKED` business semantics;
+- legacy v1.3 lifecycle route shapes dependent on unavailable v1.3 OpenAPI;
+- exact recent-MFA freshness threshold for privileged operations;
+- broader Clerk webhook lifecycle semantics;
+- SYSTEM/SERVICE_INTEGRATION issuance;
+- retention/offboarding execution;
+- overlapping JWKS rotation;
+- WPM catalogue;
+- UAT/Production readiness.

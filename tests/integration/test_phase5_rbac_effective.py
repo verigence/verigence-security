@@ -231,6 +231,15 @@ def _cleanup(
             {"a": actor_id, "m": member_id},
         )
         conn.execute(text("DELETE FROM security.tenants WHERE tenant_id=:id"), {"id": tenant_id})
+        # A temporary ACTIVE permission is automatically granted to platform.super_admin.
+        # Retire it first so the v1.4.3 trigger removes that derived grant before deletion.
+        conn.execute(
+            text(
+                "UPDATE security.permissions SET status='RETIRED',updated_at_utc=CURRENT_TIMESTAMP "
+                "WHERE permission_key=:key"
+            ),
+            {"key": permission},
+        )
         conn.execute(
             text("DELETE FROM security.permissions WHERE permission_key=:key"),
             {"key": permission},

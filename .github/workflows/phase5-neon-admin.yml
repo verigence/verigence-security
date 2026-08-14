@@ -7,6 +7,7 @@ on:
       - feature/admin-control-plane-*
       - feature/clerk-*
       - feature/global-user-*
+      - feature/super-admin-*
   workflow_dispatch:
 
 permissions:
@@ -123,6 +124,15 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f migrations/0004_v142_security_event_outcome_width.sql
 
+      - name: Apply Platform Super Admin full-authority migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$ADMIN_MIGRATION_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            -f migrations/0005_super_admin_full_authority.sql
+
       - name: Run v1.4.2 schema/control-registry PostgreSQL tests
         run: pytest -q tests/integration/test_phase5_global_user_onboarding_v142_schema.py
 
@@ -130,6 +140,9 @@ jobs:
         run: >-
           pytest -q tests/integration/test_phase5_global_user_onboarding_v142.py
           -k global_user_onboards_once_then_authorizes_across_tenants
+
+      - name: Run Platform Super Admin full-authority PostgreSQL tests
+        run: pytest -q tests/integration/test_phase5_super_admin_full_authority.py
 
       - name: Run current historical Phase 5 PostgreSQL administration tests
         shell: bash
@@ -142,7 +155,8 @@ jobs:
               tests/integration/test_phase5_global_user_onboarding_v142.py|\
               tests/integration/test_phase5_global_user_onboarding_v142_schema.py|\
               tests/integration/test_phase5_onboarding_f.py|\
-              tests/integration/test_phase5_platform_admin_api.py)
+              tests/integration/test_phase5_platform_admin_api.py|\
+              tests/integration/test_phase5_super_admin_full_authority.py)
                 continue
                 ;;
             esac
