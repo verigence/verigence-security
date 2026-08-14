@@ -67,6 +67,15 @@ jobs:
           di_code="$(curl --silent --show-error --output /tmp/di-ready.json --write-out '%{http_code}' "$DI_BASE_URL/health/ready")"
           [ "$di_code" = "200" ] || { cat /tmp/di-ready.json; echo "::error::DI readiness HTTP $di_code"; exit 1; }
 
+      - name: Install PostgreSQL client if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+
       - name: Seed temporary Security authorization fixture
         id: fixture
         shell: bash
@@ -243,7 +252,7 @@ jobs:
           cross_code="$(curl --silent --show-error --output /tmp/di-cross.json --write-out '%{http_code}' -H "Authorization: Bearer $allowed_token" "$DI_BASE_URL/v1/tenants/$other_tenant/subjects")"
           [ "$cross_code" = "403" ] || { cat /tmp/di-cross.json; echo "::error::Expected cross-Tenant DI deny=403, got $cross_code"; exit 1; }
 
-          psql "$psql_url" -v ON_ERROR_STOP=1 -v tenant_id="$TENANT_ID" -v role_id="$ROLE_ID" <<'SQL'
+          psql "$psql_url" -v ON_ERROR_STOP=1 -v tenant_id="$TENANT_ID" -v user_id="$USER_ID" -v role_id="$ROLE_ID" <<'SQL'
           BEGIN;
           DELETE FROM security.role_permissions WHERE tenant_id=:'tenant_id' AND role_id=:'role_id' AND permission_key='di.subject.read';
           UPDATE security.tenant_memberships SET authorization_version=authorization_version+1, updated_at_utc=now() WHERE tenant_id=:'tenant_id' AND user_id=:'user_id';
