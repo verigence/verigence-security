@@ -1,7 +1,7 @@
 # Verigence Security — Implementation Progress Tracker
 
 **Status:** POINTER TO CURRENT VERSIONED TRACKER  
-**Last updated:** 2026-08-14
+**Last updated:** 2026-08-15
 
 The current canonical execution tracker is:
 
@@ -78,9 +78,26 @@ Status:           ACTIVE
 ## Current execution pointer
 
 ```text
-Phase 1 self-onboarding v1.4.5  DONE / DEPLOYED
-   ↓
-Increment G maker-checker       NEXT
+Increment I — DI authorization alignment      DONE
+       ↓
+Increment J — Security -> DI deployed E2E    DEFERRED / NOT STARTED
+       ↓
+Resume only on explicit user direction
 ```
+
+### DI write-protection rule for Increment J
+
+No write change may be made to `verigence/verigence-di` without explicit user approval first.
+
+If a DI modification appears necessary, first disclose:
+
+```text
+exact file path(s)
+why each file needs to change
+exact intended change
+expected effect/risk
+```
+
+Only after explicit approval may the DI repository be modified. DI may be inspected/read for diagnosis without making changes.
 
 Do not reintroduce Clerk invitations, Tenant-scoped identity onboarding, Tenant membership for onboarding, a separate Phase 1 username, dummy Clerk phone numbers, or Phase 1 MFA.
