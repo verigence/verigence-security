@@ -7,12 +7,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
-from verigence_security.api.dependencies import source_ip
+from verigence_security.adapters.identity import AuthenticatedIdentity
+from verigence_security.api.dependencies import bearer_token, identity_from_token, source_ip
 from verigence_security.api.platform_dependencies import (
     platform_session,
     require_platform_permission,
 )
 from verigence_security.config import Settings, get_settings
+from verigence_security.core.errors import security_error
 from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
 from verigence_security.services.phase1_self_onboarding import Phase1SelfOnboardingService
 
@@ -29,7 +31,6 @@ class GlobalUserOnboardingRequest(BaseModel):
     lastName: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=3, max_length=320)
     mobile: str = Field(min_length=10, max_length=40)
-    password: str = Field(min_length=8, max_length=256)
 
 
 class GlobalUserStatusRequest(BaseModel):
@@ -46,6 +47,16 @@ def _clerk(settings: Settings) -> ClerkBackendClient:
         return ClerkBackendClient(settings)
     except ClerkBackendError as exc:
         raise HTTPException(status_code=503, detail="Clerk lifecycle integration is not configured") from exc
+
+
+def _clerk_identity(
+    token: str = Depends(bearer_token),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedIdentity:
+    identity = identity_from_token(token, settings)
+    if identity.provider != "CLERK":
+        raise security_error("AUTH_TOKEN_INVALID")
+    return identity
 
 
 @router.get("/platform/user-onboarding/key")
@@ -125,29 +136,52 @@ def disable_global_onboarding_key(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/onboarding/users", status_code=status.HTTP_201_CREATED)
-def submit_global_user_onboarding(
+@router.post("/onboarding/users", status_code=status.HTTP_202_ACCEPTED)
+def start_global_user_onboarding(
     body: GlobalUserOnboardingRequest,
     request: Request,
     onboarding_key: str = Header(min_length=8, max_length=64, alias="X-Onboarding-Key"),
+    client_ip: str = Depends(source_ip),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    try:
+        return Phase1SelfOnboardingService(session).start(
+            first_name=body.firstName,
+            last_name=body.lastName,
+            email=body.email,
+            mobile=body.mobile,
+            onboarding_key=onboarding_key,
+            source_ip=client_ip,
+            correlation_id=request.state.correlation_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/onboarding/users/{signupAttemptId}/complete",
+    status_code=status.HTTP_201_CREATED,
+)
+def complete_global_user_onboarding(
+    signupAttemptId: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(_clerk_identity),
     settings: Settings = Depends(get_settings),
     client_ip: str = Depends(source_ip),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     try:
-        return Phase1SelfOnboardingService(session).register(
-            first_name=body.firstName,
-            last_name=body.lastName,
-            email=body.email,
-            mobile=body.mobile,
-            password=body.password,
-            onboarding_key=onboarding_key,
+        return Phase1SelfOnboardingService(session).complete(
+            signup_attempt_id=signupAttemptId,
+            identity=identity,
             source_ip=client_ip,
             correlation_id=request.state.correlation_id,
             clerk=_clerk(settings),
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ClerkBackendError as exc:
-        raise HTTPException(status_code=502, detail="Clerk user could not be created") from exc
+        raise HTTPException(status_code=502, detail="Clerk identity verification failed") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

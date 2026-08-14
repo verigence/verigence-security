@@ -14,9 +14,9 @@ class ClerkBackendError(RuntimeError):
 class ClerkBackendClient:
     """Narrow Clerk Backend API adapter for Verigence human identity lifecycle.
 
-    Phase 1 self-onboarding transports the submitted password to Clerk only for backend user
-    creation. Verigence never stores, hashes, authenticates, logs, or audits that password.
-    Mobile numbers remain Verigence-only and are never sent to Clerk by this adapter.
+    Active v1.4.6 onboarding uses Clerk client-side sign-up for password and email OTP. Security
+    uses this backend adapter only to verify the resulting Clerk user, synchronize profile names,
+    and enforce lifecycle actions. Mobile numbers remain Verigence-only.
     """
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
@@ -26,6 +26,7 @@ class ClerkBackendClient:
         self._secret_key = settings.clerk_secret_key.strip()
         self._client = client
 
+    # Historical v1.4.5 compatibility only. Active v1.4.6 onboarding MUST NOT call this method.
     def create_user(
         self,
         *,
@@ -50,7 +51,7 @@ class ClerkBackendClient:
         self._request("DELETE", f"/users/{clerk_user_id}")
 
     # Historical v1.4.2 compatibility only. The active Phase 1 onboarding API no longer uses
-    # Clerk invitations or a later identity-binding route.
+    # Clerk invitations or a later invitation-binding route.
     def create_invitation(
         self,
         *,
@@ -77,6 +78,29 @@ class ClerkBackendClient:
         if not isinstance(data.get("id"), str):
             raise ClerkBackendError("Clerk user response did not contain a user ID")
         return data
+
+    def is_email_verified(self, clerk_user_id: str, expected_email: str) -> bool:
+        expected = expected_email.strip().lower()
+        user = self.get_user(clerk_user_id)
+        values = user.get("email_addresses")
+        if not isinstance(values, list):
+            return False
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("email_address")
+            if not isinstance(value, str) or value.strip().lower() != expected:
+                continue
+            verification = item.get("verification")
+            return isinstance(verification, dict) and verification.get("status") == "verified"
+        return False
+
+    def update_user_profile(self, clerk_user_id: str, *, first_name: str, last_name: str) -> None:
+        self._request(
+            "PATCH",
+            f"/users/{clerk_user_id}",
+            json={"first_name": first_name, "last_name": last_name},
+        )
 
     def primary_email(self, clerk_user_id: str) -> str | None:
         user = self.get_user(clerk_user_id)
