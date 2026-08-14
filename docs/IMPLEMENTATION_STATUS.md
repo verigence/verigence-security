@@ -2,7 +2,7 @@
 
 **Repository:** `verigence/verigence-security`  
 **Current integration branch:** `dev`  
-**Current implementation authority:** Security v1.3 + Admin Control Plane v1.4 + Clerk v1.4.1 + Global USER Onboarding v1.4.2 + Super Admin Authority v1.4.3  
+**Current implementation authority:** Security v1.3 + Admin Control Plane v1.4 + Clerk v1.4.1 + Global USER Onboarding v1.4.2 + Super Admin Authority v1.4.3 + Initial Super Admin Provisioning v1.4.4  
 **Last updated:** 2026-08-14
 
 Detailed execution/evidence is maintained in:
@@ -14,7 +14,7 @@ docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md
 ## 1. Current promoted baseline
 
 ```text
-4701705b89a68e1c05eb65007d4aadbc8d92727d
+b3c9994c420a261ef55ad402f1d8219651eebdb7
 ```
 
 This `dev` baseline includes:
@@ -22,7 +22,7 @@ This `dev` baseline includes:
 - Security CI, Neon/PostgreSQL and Railway DEV foundations;
 - USER device/access-session security controls;
 - Platform Admin Control Plane implementation;
-- Clerk-backed Platform Super Admin bootstrap/login boundary;
+- Clerk-backed human authentication boundary;
 - global one-time USER onboarding and Security-owned USER lifecycle;
 - global onboarding key;
 - Tenant authorization without a Tenant-membership prerequisite;
@@ -53,15 +53,6 @@ Governing invariant:
 
 > **One `platform.super_admin` assignment gives the initial administrator full effective Security authority. No second administrator or Tenant-role bootstrap is required.**
 
-Implementation includes:
-
-- migration `0005_super_admin_full_authority.sql`;
-- every ACTIVE Security permission granted to `platform.super_admin`;
-- automatic synchronization of future permission activation/retirement;
-- Platform-role permission participation in Tenant authorization;
-- Super Admin Tenant provisioning without Tenant-specific role assignment;
-- PostgreSQL acceptance tests for these invariants.
-
 Promotion evidence:
 
 ```text
@@ -69,39 +60,81 @@ PR #49:                  MERGED
 Feature head:            5f999948cf1e982d50dbb00699f118e0d5686173
 Feature Security CI:     31774336088 — PASS
 Feature Neon:            31774334218 — PASS
-Promoted DEV commit:     4701705b89a68e1c05eb65007d4aadbc8d92727d
+Promoted DEV code:       4701705b89a68e1c05eb65007d4aadbc8d92727d
 Post-merge Security CI:  31774409815 — PASS
 Railway DEV:             31774409818 — PASS
 readiness/liveness/correlation: PASS
 ```
 
-## 4. Identity boundary
+## 4. Initial Super Admin provisioning v1.4.4 — UNDER VALIDATION
 
-Clerk owns human credentials, MFA, recovery and authentication sessions.
+Fresh Verigence installation now treats the initial administrator as controlled system setup data.
+
+The operator selects one immutable Clerk User ID. Security provisions that identity once as:
+
+```text
+ACTIVE global Security USER
+ACTIVE CLERK external identity
+ACTIVE platform.super_admin assignment
+BOOTSTRAP assignment source
+Platform audit record
+```
+
+No Tenant membership, Tenant role or local password credential is created.
+
+DEV selected Clerk identity:
+
+```text
+user_3HtNkIWp32cD9HC7KzDbZdJkr2h
+```
+
+The controlled provisioning service is idempotent for the same already-bound Super Admin and fails closed if a different active Super Admin already exists.
+
+The fresh-installation path no longer requires a human-operated `/platform/bootstrap/claim`. The historical claim implementation remains disabled unless explicitly required for compatibility/migration.
+
+## 5. Identity boundary after v1.4.4
+
+Clerk owns:
+
+- password/passkey;
+- MFA;
+- verification and recovery;
+- human authentication sessions and Clerk JWTs.
 
 Security owns:
 
+- initial system administrator provisioning;
 - global USER record and lifecycle;
 - Clerk-to-Security USER mapping;
 - Platform and Tenant authorization;
 - Super Admin role assignment and authority data;
 - Security access/session decisions.
 
-The initial administrator is bound once through the Clerk bootstrap flow. The single `platform.super_admin` assignment supplies full authority automatically.
+Initial system provisioning does not authenticate the user. After provisioning, the selected Clerk account signs in normally and Security resolves the Clerk `sub` to the provisioned global USER.
 
-## 5. NEXT — live initial Super Admin bootstrap
-
-The operator-selected Clerk account must be identified by its immutable Clerk User ID:
+## 6. Current execution direction
 
 ```text
-SECURITY_BOOTSTRAP_SUPER_ADMIN_CLERK_USER_ID=user_...
+feature/super-admin-system-provisioning-v1.4.4
+       ↓
+Security CI + Neon regression
+       ↓
+PR -> dev with controlled provisioning marker
+       ↓
+exact-commit Security CI
+       ↓
+one-time DEV initial Super Admin data provisioning
+       ↓
+verify ACTIVE mapping + full permission coverage
+       ↓
+Railway DEV exact-digest proof
+       ↓
+normal Clerk authentication / Security Platform Admin login proof
+       ↓
+resume Increment G
 ```
 
-After configuration, enable bootstrap temporarily, execute the authenticated one-time claim, verify the Security USER/Clerk mapping and full effective authority, prove a repeated claim is denied, then disable bootstrap.
-
-No password, Clerk session JWT or Clerk secret belongs in chat or Git.
-
-## 6. Other deferred work
+## 7. Other deferred work
 
 Still unresolved unless a later tracker says otherwise:
 
