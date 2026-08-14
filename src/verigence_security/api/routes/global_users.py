@@ -7,14 +7,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
-from verigence_security.adapters.identity import ClerkJwtIdentityProvider
-from verigence_security.api.dependencies import bearer_token, source_ip
+from verigence_security.api.dependencies import source_ip
 from verigence_security.api.platform_dependencies import (
     platform_session,
     require_platform_permission,
 )
 from verigence_security.config import Settings, get_settings
 from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
+from verigence_security.services.phase1_self_onboarding import Phase1SelfOnboardingService
 
 router = APIRouter(prefix="/security/v1", tags=["Global User Onboarding"])
 
@@ -25,8 +25,11 @@ class OnboardingKeyRequest(BaseModel):
 
 
 class GlobalUserOnboardingRequest(BaseModel):
-    displayName: str = Field(min_length=1, max_length=240)
+    firstName: str = Field(min_length=1, max_length=120)
+    lastName: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=3, max_length=320)
+    mobile: str = Field(min_length=10, max_length=40)
+    password: str = Field(min_length=8, max_length=256)
 
 
 class GlobalUserStatusRequest(BaseModel):
@@ -131,46 +134,22 @@ def submit_global_user_onboarding(
     client_ip: str = Depends(source_ip),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    service = GlobalUserOnboardingService(session, settings)
     try:
-        return service.submit(
+        return Phase1SelfOnboardingService(session).register(
+            first_name=body.firstName,
+            last_name=body.lastName,
             email=body.email,
-            display_name=body.displayName,
+            mobile=body.mobile,
+            password=body.password,
             onboarding_key=onboarding_key,
             source_ip=client_ip,
             correlation_id=request.state.correlation_id,
             clerk=_clerk(settings),
         )
     except ClerkBackendError as exc:
-        raise HTTPException(status_code=502, detail="Clerk invitation could not be created") from exc
+        raise HTTPException(status_code=502, detail="Clerk user could not be created") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.post("/onboarding/users/{requestId}/bind")
-def bind_global_user_clerk_identity(
-    requestId: str,
-    request: Request,
-    authorization_token: str = Depends(bearer_token),
-    settings: Settings = Depends(get_settings),
-    client_ip: str = Depends(source_ip),
-    session: Session = Depends(platform_session),
-) -> dict[str, object]:
-    identity = ClerkJwtIdentityProvider(settings).verify(authorization_token)
-    try:
-        return GlobalUserOnboardingService(session, settings).bind_authenticated_clerk_user(
-            onboarding_request_id=requestId,
-            identity=identity,
-            source_ip=client_ip,
-            correlation_id=request.state.correlation_id,
-            clerk=_clerk(settings),
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ClerkBackendError as exc:
-        raise HTTPException(status_code=502, detail="Clerk identity lifecycle synchronization failed") from exc
 
 
 @router.get("/platform/users")
