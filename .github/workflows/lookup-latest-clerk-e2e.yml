@@ -1,0 +1,81 @@
+name: Lookup Latest Clerk E2E Identity
+
+on:
+  push:
+    branches:
+      - test/cleanup-live-onboarding-e2e-20260814
+    paths:
+      - .github/workflows/lookup-latest-clerk-e2e.yml
+
+permissions:
+  contents: read
+
+jobs:
+  lookup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+      RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      TEST_EMAIL: gigsinopensource+verigence-live-20260814094715-96328470@gmail.com
+      SIGNUP_ATTEMPT_ID: c7c6da2d-4bd5-450a-bebb-780b37b0e4cc
+    steps:
+      - name: Resolve Railway DEV configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          q='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          vars="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$q" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+          r="$(curl -fsS -X POST https://backboard.railway.com/graphql/v2 -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H 'Content-Type: application/json' --data "$body")"
+          clerk="$(printf '%s' "$r" | jq -r '.data.variables.CLERK_SECRET_KEY // empty')"
+          db="$(printf '%s' "$r" | jq -r '.data.variables.DATABASE_URL // empty')"
+          [ -n "$clerk" ] && [ -n "$db" ]
+          echo "::add-mask::$clerk"
+          echo "::add-mask::$db"
+          echo "CLERK_SECRET_KEY=$clerk" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=$db" >> "$GITHUB_ENV"
+
+      - name: Lookup exact Clerk and Security identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q 'httpx>=0.28,<1' 'sqlalchemy>=2,<3' 'psycopg[binary]>=3.2,<4'
+          python - <<'PY'
+          import os
+          import httpx
+          from sqlalchemy import create_engine, text
+
+          email = os.environ['TEST_EMAIL'].lower()
+          headers = {'Authorization': f"Bearer {os.environ['CLERK_SECRET_KEY']}"}
+          r = httpx.get('https://api.clerk.com/v1/users', headers=headers, params=[('email_address', email)], timeout=20.0)
+          r.raise_for_status()
+          payload = r.json()
+          users = payload if isinstance(payload, list) else payload.get('data', [])
+          exact = [u for u in users if any(str(e.get('email_address','')).lower()==email for e in u.get('email_addresses', []))]
+          print(f'CLERK_MATCH_COUNT={len(exact)}')
+          for u in exact:
+              print(f"CLERK_USER_ID={u.get('id')}")
+              rec = next((e for e in u.get('email_addresses', []) if str(e.get('email_address','')).lower()==email), {})
+              print(f"CLERK_EMAIL_VERIFICATION_STATUS={rec.get('verification',{}).get('status')}")
+
+          raw = os.environ['DATABASE_URL']
+          if raw.startswith('postgresql+asyncpg://'):
+              raw = 'postgresql+psycopg://' + raw.removeprefix('postgresql+asyncpg://')
+          elif raw.startswith('postgresql://'):
+              raw = 'postgresql+psycopg://' + raw.removeprefix('postgresql://')
+          elif raw.startswith('postgres://'):
+              raw = 'postgresql+psycopg://' + raw.removeprefix('postgres://')
+          engine = create_engine(raw, pool_pre_ping=True)
+          with engine.connect() as conn:
+              user = conn.execute(text('SELECT user_id,status FROM security.users WHERE lower(primary_email)=:email'), {'email': email}).mappings().first()
+              attempt = conn.execute(text('SELECT signup_attempt_id,status FROM security.platform_user_signup_attempts WHERE signup_attempt_id=CAST(:attempt AS uuid)'), {'attempt': os.environ['SIGNUP_ATTEMPT_ID']}).mappings().first()
+              request = conn.execute(text('SELECT onboarding_request_id,status FROM security.platform_user_onboarding_requests WHERE lower(email)=:email'), {'email': email}).mappings().first()
+          print(f"SECURITY_USER_ID={user['user_id'] if user else '<none>'}")
+          print(f"SECURITY_USER_STATUS={user['status'] if user else '<none>'}")
+          print(f"SIGNUP_ATTEMPT_STATUS={attempt['status'] if attempt else '<none>'}")
+          print(f"ONBOARDING_REQUEST_ID={request['onboarding_request_id'] if request else '<none>'}")
+          print(f"ONBOARDING_REQUEST_STATUS={request['status'] if request else '<none>'}")
+          PY
