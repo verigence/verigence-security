@@ -11,130 +11,87 @@ Detailed execution/evidence is maintained in:
 docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md
 ```
 
-## 1. Current promoted baseline
+## 1. Current promoted runtime baseline
 
 ```text
-b3c9994c420a261ef55ad402f1d8219651eebdb7
+951a7694b31c195ccbde45d13346e0eea8ae9f14
 ```
 
-This `dev` baseline includes:
+This DEV runtime includes global one-time USER onboarding, Security-owned USER lifecycle, Tenant authorization without Tenant-membership dependency, built-in full-authority `platform.super_admin`, controlled initial administrator provisioning, and immutable exact-digest Railway deployment.
 
-- Security CI, Neon/PostgreSQL and Railway DEV foundations;
-- USER device/access-session security controls;
-- Platform Admin Control Plane implementation;
-- Clerk-backed human authentication boundary;
-- global one-time USER onboarding and Security-owned USER lifecycle;
-- global onboarding key;
-- Tenant authorization without a Tenant-membership prerequisite;
-- same USER authorization across multiple Tenants;
-- per-user/per-Tenant authorization versioning;
-- built-in `platform.super_admin` full effective authority;
-- automatic future ACTIVE-permission inheritance for Super Admin;
-- Super Admin Tenant provisioning without a Tenant-specific role assignment;
-- immutable GHCR -> Railway exact-digest deployment.
+## 2. Identity and onboarding model
 
-## 2. Global USER onboarding v1.4.2 — DONE / DEPLOYED
+Normal human USER onboarding is Platform-global and one-time. A USER is not onboarded again when authorization is added in another Tenant.
 
-```text
-PR #48:                  MERGED
-Feature Neon:            31768537758 — PASS
-Post-merge Security CI:  31768624655 — PASS
-Railway DEV:             31768624692 — PASS
-readiness/liveness/correlation: PASS
-```
+Clerk owns credentials, MFA, verification, recovery and human authentication sessions.
 
-Governing invariant:
+Security owns the global USER record/status, initial administrator setup, Clerk-to-Security mapping, Platform/Tenant authorization, devices/access controls and Security access tokens.
 
-> **A human is onboarded once at Platform level. Tenant access is authorization assignment, not identity onboarding.**
-
-## 3. Built-in Platform Super Admin v1.4.3 — DONE / DEPLOYED
-
-Governing invariant:
-
-> **One `platform.super_admin` assignment gives the initial administrator full effective Security authority. No second administrator or Tenant-role bootstrap is required.**
-
-Promotion evidence:
-
-```text
-PR #49:                  MERGED
-Feature head:            5f999948cf1e982d50dbb00699f118e0d5686173
-Feature Security CI:     31774336088 — PASS
-Feature Neon:            31774334218 — PASS
-Promoted DEV code:       4701705b89a68e1c05eb65007d4aadbc8d92727d
-Post-merge Security CI:  31774409815 — PASS
-Railway DEV:             31774409818 — PASS
-readiness/liveness/correlation: PASS
-```
-
-## 4. Initial Super Admin provisioning v1.4.4 — UNDER VALIDATION
-
-Fresh Verigence installation now treats the initial administrator as controlled system setup data.
-
-The operator selects one immutable Clerk User ID. Security provisions that identity once as:
-
-```text
-ACTIVE global Security USER
-ACTIVE CLERK external identity
-ACTIVE platform.super_admin assignment
-BOOTSTRAP assignment source
-Platform audit record
-```
-
-No Tenant membership, Tenant role or local password credential is created.
+## 3. Initial Super Admin v1.4.4 — DONE / PROVISIONED / DEPLOYED
 
 DEV selected Clerk identity:
 
 ```text
-user_3HtNkIWp32cD9HC7KzDbZdJkr2h
+Clerk User ID:     user_3HtNkIWp32cD9HC7KzDbZdJkr2h
+Display name:      superadmin
+Security user_id:  55d20cae-406d-4918-9a9d-bc63dfcd633c
+Role:              platform.super_admin
 ```
 
-The controlled provisioning service is idempotent for the same already-bound Super Admin and fails closed if a different active Super Admin already exists.
-
-The fresh-installation path no longer requires a human-operated `/platform/bootstrap/claim`. The historical claim implementation remains disabled unless explicitly required for compatibility/migration.
-
-## 5. Identity boundary after v1.4.4
-
-Clerk owns:
-
-- password/passkey;
-- MFA;
-- verification and recovery;
-- human authentication sessions and Clerk JWTs.
-
-Security owns:
-
-- initial system administrator provisioning;
-- global USER record and lifecycle;
-- Clerk-to-Security USER mapping;
-- Platform and Tenant authorization;
-- Super Admin role assignment and authority data;
-- Security access/session decisions.
-
-Initial system provisioning does not authenticate the user. After provisioning, the selected Clerk account signs in normally and Security resolves the Clerk `sub` to the provisioned global USER.
-
-## 6. Current execution direction
+Verified Security state:
 
 ```text
-feature/super-admin-system-provisioning-v1.4.4
-       ↓
-Security CI + Neon regression
-       ↓
-PR -> dev with controlled provisioning marker
-       ↓
-exact-commit Security CI
-       ↓
-one-time DEV initial Super Admin data provisioning
-       ↓
-verify ACTIVE mapping + full permission coverage
-       ↓
-Railway DEV exact-digest proof
-       ↓
-normal Clerk authentication / Security Platform Admin login proof
-       ↓
-resume Increment G
+Principal               ACTIVE
+Global USER             ACTIVE
+CLERK external identity ACTIVE
+platform.super_admin    ACTIVE
+Missing ACTIVE permissions from Super Admin = 0
 ```
 
-## 7. Other deferred work
+No Tenant membership, Tenant role or local password credential is required for this initial administrator.
+
+Fresh installation no longer depends on a manual `/platform/bootstrap/claim`; the historical route remains compatibility code and is disabled by default.
+
+## 4. v1.4.4 evidence
+
+```text
+PR #51 feature CI:       31775948471 — PASS
+PR #51 feature Neon:     31775946314 — PASS
+PR #51:                  MERGED
+First provisioning:      31776049219 — FAIL / TRANSACTION ROLLED BACK
+PR #52 hotfix CI:        31776200341 — PASS
+PR #52 hotfix Neon:      31776189798 — PASS
+PR #52:                  MERGED
+Runtime commit:          951a7694b31c195ccbde45d13346e0eea8ae9f14
+Post-merge Security CI:  31776274556 — PASS
+Initial provisioning:    31776274559 — PASS
+Railway DEV:             31776274539 — PASS
+readiness/liveness/correlation: PASS
+```
+
+Detailed report: `docs/INITIAL_SUPER_ADMIN_PROVISIONING_TEST_REPORT_v1.4.4.md`.
+
+## 5. Current execution direction
+
+The Security-side initial administrator dependency is closed.
+
+Next:
+
+```text
+separate UI/auth client performs normal Clerk login
+       ↓
+Clerk session JWT
+       ↓
+Security Platform Admin token exchange + /platform/me
+       ↓
+full effective authority proof
+       ↓
+Increment G maker-checker
+```
+
+No Clerk password, secret key or long-lived session token should be committed to Git for this proof.
+
+## 6. Other deferred work
 
 Still unresolved unless a later tracker says otherwise:
 
