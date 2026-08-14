@@ -31,15 +31,9 @@ class PlatformMeResponse(BaseModel):
     mustChangePassword: bool
 
 
-class TenantSelfOnboardingCreate(BaseModel):
-    enabled: bool
-    token: str = Field(min_length=1)
-
-
 class PlatformTenantCreateRequest(BaseModel):
     tenantCode: str = Field(min_length=1, max_length=80)
     tenantName: str = Field(min_length=1, max_length=240)
-    selfOnboarding: TenantSelfOnboardingCreate | None = None
 
     @model_validator(mode="after")
     def normalize_required_values(self) -> PlatformTenantCreateRequest:
