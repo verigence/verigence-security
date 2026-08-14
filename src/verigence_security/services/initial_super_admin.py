@@ -117,7 +117,7 @@ class InitialSuperAdminProvisioningService:
                      operation_key,resource_type,resource_id,outcome,before_state_json,
                      after_state_json,occurred_at_utc)
                     VALUES (:change_id,:correlation_id,'PLATFORM',NULL,:user_id,
-                            :operation_key,'platform_user',:user_id,'SUCCESS',NULL,
+                            :operation_key,'platform_user',:resource_id,'SUCCESS',NULL,
                             CAST(:after_state AS jsonb),:now)
                     """
                 ),
@@ -125,6 +125,7 @@ class InitialSuperAdminProvisioningService:
                     "change_id": str(uuid4()),
                     "correlation_id": str(uuid4()),
                     "user_id": user_id,
+                    "resource_id": user_id,
                     "operation_key": self._OPERATION_KEY,
                     "after_state": json.dumps(
                         {
