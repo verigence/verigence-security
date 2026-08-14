@@ -9,45 +9,44 @@ The current canonical execution tracker is:
 docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md
 ```
 
-Do not use older execution pointers in this file from repository history to determine the next implementation
-increment.
+## Current governing model
 
-## Current governing correction
+`docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md` remains authoritative for the global USER lifecycle:
 
-`docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md` freezes the current model:
+> **Human USER onboarding is Platform-global and one-time. Tenant access is authorization assignment, not identity onboarding.**
 
-> **Human USER onboarding is Platform-global and one-time. Tenant access is authorization assignment, not
-> identity onboarding.**
+`docs/SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md` clarifies initial system administration:
+
+> **The built-in Platform Super Admin can initialize and administer the entire Security platform without another administrator provisioning additional roles first.**
 
 Therefore:
 
 - there is one global Security USER per person;
 - there is one Platform-global onboarding key;
-- Security validates the onboarding key before Clerk provisioning;
-- Security USER remains PENDING until Security Admin activation;
+- Security validates onboarding before Clerk provisioning;
+- Security USER activation remains Security-controlled;
 - Tenant membership is not a USER access prerequisite;
-- the same active USER may receive roles/groups/locations/schedules in multiple Tenants;
-- per-user/per-Tenant authorization versioning uses `user_tenant_authorization_state`;
-- Tenant-scoped identity onboarding routes from historical Increment F are retired from active runtime.
+- the same USER may receive Tenant-scoped authorization in multiple Tenants;
+- `platform.super_admin` is a built-in system role;
+- `platform.super_admin` owns every ACTIVE Security permission and inherits future ACTIVE permissions automatically;
+- Platform Super Admin authority applies to Tenant provisioning without requiring a Tenant-specific role assignment.
 
-## Historical trackers/evidence
+## Promoted baseline
 
-Use these only for the implementation state they record:
+Global USER onboarding v1.4.2 is merged and deployed:
 
 ```text
-docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.1.md
-docs/CLERK_IDENTITY_INTEGRATION_TEST_REPORT_v1.4.1.md
-docs/ADMIN_CONTROL_PLANE_INCREMENT_A_VALIDATION.md
-docs/ADMIN_CONTROL_PLANE_INCREMENT_B_VALIDATION.md
+DEV commit:             9856d7398e0af9937506033e1cf60d69d91e2d71
+PR:                     #48 — MERGED
+Neon/PostgreSQL:        31768537758 — PASS
+Post-merge Security CI: 31768624655 — PASS
+Railway DEV:            31768624692 — PASS
 ```
-
-The v1.4.1 tracker records the historical Admin Control Plane and Clerk work before the v1.4.2 architecture
-correction. It is not the current execution authority for human onboarding or Tenant membership.
 
 ## Current execution pointer
 
 ```text
-feature/global-user-onboarding-v1.4.2
+feature/super-admin-full-authority-v1.4.3
    ↓
 Security CI + real Neon/PostgreSQL validation
    ↓
@@ -57,7 +56,7 @@ exact-commit Security CI
    ↓
 immutable GHCR image -> Railway DEV
    ↓
-live Clerk E2E when required Clerk IDs/secrets are configured
+live initial Clerk Super Admin binding
 ```
 
-Increment G remains paused until the v1.4.2 corrected identity/authorization foundation is green.
+Increment G remains paused until this Super Admin authority clarification and the live initial Clerk identity bootstrap are green.
