@@ -15,11 +15,12 @@ After a context reset, read in this order:
 4. `docs/SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md`;
 5. `docs/SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md` for unchanged global lifecycle/Tenant authorization rules;
 6. `docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md`;
-7. `docs/INITIAL_SUPER_ADMIN_PROVISIONING_TEST_REPORT_v1.4.4.md`;
-8. `docs/SECURITY_CLERK_IDENTITY_BOUNDARY_DESIGN_v1.4.1.md`;
-9. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`;
-10. `docs/IMPLEMENTATION_STATUS.md`;
-11. current `dev`, open Security PRs and CI/Railway state.
+7. `docs/PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_TEST_REPORT_v1.4.5.md`;
+8. `docs/INITIAL_SUPER_ADMIN_PROVISIONING_TEST_REPORT_v1.4.4.md`;
+9. `docs/SECURITY_CLERK_IDENTITY_BOUNDARY_DESIGN_v1.4.1.md`;
+10. `docs/SECURITY_ADMIN_CONTROL_PLANE_DESIGN_v1.4.md`;
+11. `docs/IMPLEMENTATION_STATUS.md`;
+12. current `dev`, open Security PRs and CI/Railway state.
 
 ## 2. Invariants that must survive every reset
 
@@ -38,7 +39,7 @@ Initial administrator     = operator-selected Clerk user_... provisioned as setu
 
 Do not reconstruct Tenant-scoped identity onboarding, Clerk invitations, the `/bind` flow, a dummy Clerk phone number, or a Phase 1 MFA requirement.
 
-## 3. Phase 1 self-onboarding v1.4.5
+## 3. Phase 1 self-onboarding v1.4.5 — DONE / DEPLOYED
 
 The person receives the current Platform onboarding key from an authorized Security administrator and submits one registration form:
 
@@ -51,7 +52,7 @@ Indian mobile
 password
 ```
 
-The authoritative order is:
+Authoritative order:
 
 ```text
 Security validates onboarding key
@@ -80,13 +81,19 @@ Password is transient registration transport only. It must never be persisted, h
 
 If Clerk creation succeeds and Security persistence then fails, Security attempts `DELETE /v1/users/{user_id}` compensation. If that delete also fails, no local usable Security USER is committed, so Verigence access remains fail-closed and the Clerk orphan requires operational reconciliation.
 
-## 4. Current promoted runtime baseline
+Promotion evidence:
 
 ```text
-DEV runtime commit: 951a7694b31c195ccbde45d13346e0eea8ae9f14
+Feature Security CI:      31779990307 — PASS
+Feature Neon/PostgreSQL:  31779986825 — PASS
+PR #54:                   MERGED
+DEV runtime commit:       7765e72a6078a15981cffb42c0d7e3bdbdc269de
+Post-merge Security CI:   31780116228 — PASS
+Railway DEV:              31780116188 — PASS
+readiness/liveness/correlation: PASS
 ```
 
-DEV initial Super Admin:
+## 4. Initial DEV Super Admin
 
 ```text
 Clerk User ID:     user_3HtNkIWp32cD9HC7KzDbZdJkr2h
@@ -95,37 +102,38 @@ Role:              platform.super_admin
 Status:            ACTIVE
 ```
 
-## 5. Current workstream
-
-**NOW:** PR #54 — Phase 1 self-onboarding and Clerk integration v1.4.5.
-
-Required sequence:
+## 5. Active Phase 1 API
 
 ```text
-feature/phase1-self-onboarding-clerk-v1.4.5
-   ↓
-Security CI + real Neon/PostgreSQL
-   ↓
-merge PR #54 to dev
-   ↓
-exact-commit Security CI
-   ↓
-immutable GHCR image -> Railway DEV
-   ↓
-readiness + liveness + correlation
-   ↓
-record v1.4.5 evidence
-   ↓
-resume Increment G maker-checker
+POST /security/v1/onboarding/users
+X-Onboarding-Key: <Platform global key>
 ```
 
-The active Phase 1 onboarding API is one `POST /security/v1/onboarding/users` request with `X-Onboarding-Key`. `/security/v1/onboarding/users/{requestId}/bind` is retired from active OpenAPI.
+Request contains first name, last name, email, mobile and password. `/security/v1/onboarding/users/{requestId}/bind` is retired from active OpenAPI.
+
+The deployed endpoint requires backend-only `CLERK_SECRET_KEY` for the same Clerk application instance. Keep this value in deployment-secret configuration only.
 
 ## 6. Tenant authorization rule
 
 Normal people are onboarded once as global Security USERs. The same `user_id` can receive independent roles, Groups, locations and schedules in multiple Tenants without another onboarding event or Tenant membership requirement.
 
-## 7. Promotion discipline
+## 7. Current workstream
+
+**NEXT:** Increment G maker-checker.
+
+```text
+Phase 1 self-onboarding v1.4.5  DONE / DEPLOYED
+   ↓
+Increment G maker-checker
+   ↓
+Increment H
+   ↓
+Increment I
+   ↓
+Increment J
+```
+
+## 8. Promotion discipline
 
 ```text
 feature/*
@@ -135,5 +143,3 @@ feature/*
 immutable GHCR image -> Railway DEV
    ↓ readiness + liveness + correlation
 ```
-
-Do not resume Increment G until v1.4.5 is merged and deployed green.
