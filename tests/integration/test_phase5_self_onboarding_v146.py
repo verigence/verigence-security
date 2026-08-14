@@ -108,17 +108,16 @@ def test_clerk_verified_email_is_required_before_pending_security_user() -> None
                 correlation_id=str(uuid4()),
             )
 
-        with Session(engine) as session:
-            with pytest.raises(SecurityError):
-                Phase1SelfOnboardingService(session).start(
-                    first_name="Wrong",
-                    last_name="Key",
-                    email=email,
-                    mobile=mobile,
-                    onboarding_key="VGN-WRONG846",
-                    source_ip="127.0.0.1",
-                    correlation_id=str(uuid4()),
-                )
+        with Session(engine) as session, pytest.raises(SecurityError):
+            Phase1SelfOnboardingService(session).start(
+                first_name="Wrong",
+                last_name="Key",
+                email=email,
+                mobile=mobile,
+                onboarding_key="VGN-WRONG846",
+                source_ip="127.0.0.1",
+                correlation_id=str(uuid4()),
+            )
 
         with engine.connect() as conn:
             assert conn.execute(
@@ -165,27 +164,25 @@ def test_clerk_verified_email_is_required_before_pending_security_user() -> None
                 {"email": email.lower()},
             ).first() is None
 
-        with Session(engine) as session:
-            with pytest.raises(ValueError, match="active signup attempt"):
-                Phase1SelfOnboardingService(session).start(
-                    first_name="Duplicate",
-                    last_name="Attempt",
-                    email=email,
-                    mobile="+918123456789",
-                    onboarding_key="VGN-PHASE846",
-                    source_ip="127.0.0.1",
-                    correlation_id=str(uuid4()),
-                )
+        with Session(engine) as session, pytest.raises(ValueError, match="active signup attempt"):
+            Phase1SelfOnboardingService(session).start(
+                first_name="Duplicate",
+                last_name="Attempt",
+                email=email,
+                mobile="+918123456789",
+                onboarding_key="VGN-PHASE846",
+                source_ip="127.0.0.1",
+                correlation_id=str(uuid4()),
+            )
 
-        with Session(engine) as session:
-            with pytest.raises(ValueError, match="not verified"):
-                Phase1SelfOnboardingService(session).complete(
-                    signup_attempt_id=attempt_id,
-                    identity=identity,
-                    source_ip="127.0.0.1",
-                    correlation_id=str(uuid4()),
-                    clerk=clerk,  # type: ignore[arg-type]
-                )
+        with Session(engine) as session, pytest.raises(ValueError, match="not verified"):
+            Phase1SelfOnboardingService(session).complete(
+                signup_attempt_id=attempt_id,
+                identity=identity,
+                source_ip="127.0.0.1",
+                correlation_id=str(uuid4()),
+                clerk=clerk,  # type: ignore[arg-type]
+            )
         assert clerk.verify_calls == [(clerk_user_id, email.lower())]
         assert clerk.profile_calls == []
 
@@ -241,15 +238,14 @@ def test_clerk_verified_email_is_required_before_pending_security_user() -> None
             assert row["attempt_status"] == "COMPLETED"
             assert row["attempt_clerk_user_id"] == clerk_user_id
 
-        with Session(engine) as session:
-            with pytest.raises(ValueError, match="no longer available"):
-                Phase1SelfOnboardingService(session).complete(
-                    signup_attempt_id=attempt_id,
-                    identity=identity,
-                    source_ip="127.0.0.1",
-                    correlation_id=str(uuid4()),
-                    clerk=clerk,  # type: ignore[arg-type]
-                )
+        with Session(engine) as session, pytest.raises(ValueError, match="no longer available"):
+            Phase1SelfOnboardingService(session).complete(
+                signup_attempt_id=attempt_id,
+                identity=identity,
+                source_ip="127.0.0.1",
+                correlation_id=str(uuid4()),
+                clerk=clerk,  # type: ignore[arg-type]
+            )
 
         with Session(engine) as session:
             assert not GlobalUserOnboardingService(session, _settings()).precheck(email)
@@ -260,7 +256,8 @@ def test_clerk_verified_email_is_required_before_pending_security_user() -> None
                     text(
                         """
                         DELETE FROM security.security_events
-                        WHERE principal_id=:user_id::uuid OR entity_id=CAST(:user_id AS varchar)
+                        WHERE principal_id=CAST(:user_id AS uuid)
+                           OR entity_id=CAST(:user_id AS varchar)
                         """
                     ),
                     {"user_id": user_id},
