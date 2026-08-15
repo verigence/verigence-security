@@ -5,12 +5,17 @@ import secrets
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Protocol
 
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from verigence_security.settings import Settings
+
+
+class RolePermissionResolver(Protocol):
+    def permissions_for_role(self, tenant_id: str, role_key: str) -> frozenset[str] | None: ...
 
 
 class TokenError(Exception):
@@ -37,19 +42,27 @@ class IssuedToken:
 
 
 class TokenService:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        role_permission_resolver: RolePermissionResolver | None = None,
+    ):
         self.settings = settings
+        self.role_permission_resolver = role_permission_resolver
         self._private_key = serialization.load_pem_private_key(
             settings.private_key_pem.encode("utf-8"), password=None
         )
         self._public_key = self._private_key.public_key()
 
     def effective_permissions(
-        self, roles: Iterable[str], direct_permissions: Iterable[str] = ()
+        self,
+        tenant_id: str,
+        roles: Iterable[str],
+        direct_permissions: Iterable[str] = (),
     ) -> frozenset[str]:
         permissions = set(direct_permissions)
         for role in roles:
-            bundle = self.settings.role_permission_bundles.get(role)
+            bundle = self._permissions_for_role(tenant_id, role)
             if bundle is None:
                 raise UnknownRole(role)
             permissions.update(bundle)
@@ -64,7 +77,7 @@ class TokenService:
         direct_permissions: Iterable[str] = (),
     ) -> IssuedToken:
         role_list = list(roles)
-        permissions = self.effective_permissions(role_list, direct_permissions)
+        permissions = self.effective_permissions(tenant_id, role_list, direct_permissions)
         return self._issue(
             subject=subject,
             tenant_id=tenant_id,
@@ -160,6 +173,13 @@ class TokenService:
                 }
             ]
         }
+
+    def _permissions_for_role(self, tenant_id: str, role: str) -> frozenset[str] | None:
+        if self.role_permission_resolver is not None:
+            resolved = self.role_permission_resolver.permissions_for_role(tenant_id, role)
+            if resolved is not None:
+                return resolved
+        return self.settings.role_permission_bundles.get(role)
 
     def _client_permissions(self, client_id: str) -> frozenset[str]:
         client = self.settings.integration_clients.get(client_id)
