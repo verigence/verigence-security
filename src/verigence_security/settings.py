@@ -21,6 +21,7 @@ class Settings:
     token_ttl_seconds: int
     role_permission_bundles: dict[str, frozenset[str]]
     integration_clients: dict[str, IntegrationClient]
+    role_database_url: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -40,6 +41,7 @@ class Settings:
             integration_clients=_load_integration_clients(
                 os.environ.get("SECURITY_INTEGRATION_CLIENTS_JSON", "{}")
             ),
+            role_database_url=os.environ.get("SECURITY_ROLE_DATABASE_URL") or None,
         )
 
 
