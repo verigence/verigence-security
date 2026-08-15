@@ -3,8 +3,8 @@ from __future__ import annotations
 import base64
 import secrets
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import jwt
 from cryptography.hazmat.primitives import serialization
@@ -147,7 +147,7 @@ class TokenService:
     def jwks(self) -> dict:
         public_numbers = self._public_key.public_numbers()
         if not isinstance(public_numbers, rsa.RSAPublicNumbers):
-            raise RuntimeError("RS256 requires an RSA key")
+            raise TypeError("RS256 requires an RSA key")
         return {
             "keys": [
                 {
