@@ -23,7 +23,7 @@ class Settings:
     integration_clients: dict[str, IntegrationClient]
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         private_key = os.environ.get("SECURITY_JWT_PRIVATE_KEY_PEM", "").replace("\\n", "\n")
         if not private_key:
             raise RuntimeError("SECURITY_JWT_PRIVATE_KEY_PEM is required")
@@ -56,7 +56,7 @@ def _load_integration_clients(raw: str) -> dict[str, IntegrationClient]:
     clients: dict[str, IntegrationClient] = {}
     for client_id, config in data.items():
         if not isinstance(config, dict):
-            raise ValueError(f"integration client {client_id} must be an object")
+            raise TypeError(f"integration client {client_id} must be an object")
         secret = config.get("secret")
         if not isinstance(secret, str) or not secret:
             raise ValueError(f"integration client {client_id} requires a secret")
