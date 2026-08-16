@@ -68,12 +68,25 @@ jobs:
           from pathlib import Path
 
           data = json.loads(Path('/tmp/status.json').read_text())
-          project = data.get('project', {})
-          environment = data.get('environment', {})
-          print(f"Project token context: {project.get('name', '')} | {project.get('id', '')}")
-          print(f"Environment: {environment.get('name', '')} | {environment.get('id', '')}")
-          services = data.get('services') or data.get('resources', {}).get('services') or []
-          for service in services:
-              if isinstance(service, dict):
-                  print(f"Service: {service.get('name', '')} | {service.get('id', '')}")
+          print('Railway project-token status (safe identifiers only):')
+
+          def emit(prefix, value, depth=0):
+              if depth > 5:
+                  return
+              if isinstance(value, dict):
+                  safe = {}
+                  for key in ('id', 'name', 'projectId', 'projectName', 'environmentId',
+                              'environmentName', 'serviceId', 'serviceName', 'status'):
+                      if key in value and isinstance(value[key], (str, int, bool)):
+                          safe[key] = value[key]
+                  if safe:
+                      print(f'{prefix}: {safe}')
+                  for key in ('project', 'environment', 'service', 'services', 'resources'):
+                      if key in value:
+                          emit(f'{prefix}.{key}', value[key], depth + 1)
+              elif isinstance(value, list):
+                  for index, item in enumerate(value):
+                      emit(f'{prefix}[{index}]', item, depth + 1)
+
+          emit('status', data)
           PY
