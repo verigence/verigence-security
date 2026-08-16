@@ -1,4 +1,4 @@
-name: Prepare Audit Core Railway project
+name: Deploy Audit Core Railway DEV
 
 on:
   push:
@@ -9,22 +9,54 @@ permissions:
   contents: read
 
 jobs:
-  prepare:
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
       AUDIT_CORE_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      AUDIT_CORE_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      AUDIT_CORE_SERVICE_ID: d8fb0a34-9097-40ba-b47c-ac3f82b7a3dd
+      AUDIT_CORE_COMMIT_SHA: bc31486734ea852ff770828ac4741626f320c87c
+      SECURITY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      SECURITY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+      SECURITY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      DI_BASE_URL: https://di-api-dev.verigence.app
     steps:
-      - name: Resolve environment and create service when missing
+      - name: Verify prerequisites
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
-            echo "::error::RAILWAY_API_TOKEN is not configured."
-            exit 1
-          fi
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo "::error::RAILWAY_API_TOKEN is not configured"; exit 1; }
+          [ -n "${MIGRATION_DATABASE_URL:-}" ] || { echo "::error::MIGRATION_DATABASE_URL is not configured"; exit 1; }
 
+      - name: Wait for exact Audit Core CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            response="$(curl --fail-with-body --silent --show-error \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/verigence/verigence-audit-core/actions/runs?head_sha=${AUDIT_CORE_COMMIT_SHA}&per_page=10")"
+            state="$(printf '%s' "$response" | jq -r '[.workflow_runs[] | select(.name == "CI")] | first | [.status, (.conclusion // "")] | @tsv')"
+            status="${state%%$'\t'*}"
+            conclusion="${state#*$'\t'}"
+            if [ "$status" = "completed" ]; then
+              [ "$conclusion" = "success" ] || { echo "::error::Audit Core CI did not pass: $conclusion"; exit 1; }
+              echo "Audit Core CI passed for $AUDIT_CORE_COMMIT_SHA"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Timed out waiting for Audit Core CI"
+          exit 1
+
+      - name: Resolve Security DEV domain and preflight dependencies
+        id: deps
+        shell: bash
+        run: |
+          set -euo pipefail
           api() {
             curl --fail-with-body --silent --show-error \
               --request POST \
@@ -33,29 +65,168 @@ jobs:
               --header 'Content-Type: application/json' \
               --data "$1"
           }
-
-          query='query project($id: String!) { project(id: $id) { id name services { edges { node { id name } } } environments { edges { node { id name } } } } }'
-          variables="$(jq -cn --arg id "$AUDIT_CORE_PROJECT_ID" '{id:$id}')"
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } customDomains { domain } } }'
+          variables="$(jq -cn --arg project "$SECURITY_PROJECT_ID" --arg environment "$SECURITY_ENVIRONMENT_ID" --arg service "$SECURITY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
           response="$(api "$body")"
           if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
             printf '%s\n' "$response" | jq -c '.errors'
             exit 1
           fi
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // .data.domains.customDomains[0].domain // empty')"
+          [ -n "$domain" ] || { echo "::error::Security DEV has no public domain"; exit 1; }
+          security_base_url="https://$domain"
+          echo "security_base_url=$security_base_url" >> "$GITHUB_OUTPUT"
 
-          service_id="$(printf '%s' "$response" | jq -r '.data.project.services.edges[0].node.id // empty')"
-          if [ -z "$service_id" ]; then
-            mutation='mutation serviceCreate($input: ServiceCreateInput!) { serviceCreate(input: $input) { id name } }'
-            input="$(jq -cn --arg project "$AUDIT_CORE_PROJECT_ID" '{projectId:$project,name:"verigence-audit-core",source:{repo:"verigence/verigence-audit-core"}}')"
-            variables="$(jq -cn --argjson input "$input" '{input:$input}')"
-            body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
-            created="$(api "$body")"
-            if [ "$(printf '%s' "$created" | jq -r 'has("errors")')" = "true" ]; then
-              printf '%s\n' "$created" | jq -c '.errors'
-              exit 1
-            fi
-            service_id="$(printf '%s' "$created" | jq -r '.data.serviceCreate.id')"
+          jwks_code="$(curl --silent --show-error --output /tmp/jwks.json --write-out '%{http_code}' "$security_base_url/.well-known/jwks.json" || true)"
+          [ "$jwks_code" = "200" ] || { echo "::error::Security JWKS returned HTTP $jwks_code"; exit 1; }
+          oauth_code="$(curl --silent --show-error --output /tmp/oauth.json --write-out '%{http_code}' -X POST "$security_base_url/oauth/token" || true)"
+          echo "oauth_code=$oauth_code" >> "$GITHUB_OUTPUT"
+          echo "Security JWKS: PASS; OAuth endpoint unauthenticated status: $oauth_code"
+
+          di_code="$(curl --silent --show-error --output /tmp/di-health.json --write-out '%{http_code}' "$DI_BASE_URL/health" || true)"
+          [ "$di_code" = "200" ] || { echo "::error::DI DEV /health returned HTTP $di_code"; exit 1; }
+          echo "DI DEV health: PASS"
+
+      - name: Configure Audit Core Railway variables
+        shell: bash
+        env:
+          SECURITY_BASE_URL: ${{ steps.deps.outputs.security_base_url }}
+        run: |
+          set -euo pipefail
+          raw="$MIGRATION_DATABASE_URL"
+          case "$raw" in
+            postgresql+psycopg://*) database_url="$raw" ;;
+            postgresql://*) database_url="postgresql+psycopg://${raw#postgresql://}" ;;
+            postgres://*) database_url="postgresql+psycopg://${raw#postgres://}" ;;
+            *) echo "::error::Neon secret is not a PostgreSQL URL"; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          variables_json="$(jq -cn \
+            --arg app_env 'dev' \
+            --arg service_name 'verigence-audit-core' \
+            --arg database_url "$database_url" \
+            --arg security_base_url "$SECURITY_BASE_URL" \
+            --arg security_jwks_url "$SECURITY_BASE_URL/.well-known/jwks.json" \
+            --arg security_issuer 'verigence-security' \
+            --arg security_audience 'verigence-platform' \
+            --arg di_base_url "$DI_BASE_URL" \
+            '{APP_ENV:$app_env,SERVICE_NAME:$service_name,DATABASE_URL:$database_url,SECURITY_BASE_URL:$security_base_url,SECURITY_JWKS_URL:$security_jwks_url,SECURITY_ISSUER:$security_issuer,SECURITY_AUDIENCE:$security_audience,DI_BASE_URL:$di_base_url}')"
+          input="$(jq -cn \
+            --arg project "$AUDIT_CORE_PROJECT_ID" \
+            --arg environment "$AUDIT_CORE_ENVIRONMENT_ID" \
+            --arg service "$AUDIT_CORE_SERVICE_ID" \
+            --argjson variables "$variables_json" \
+            '{projectId:$project,environmentId:$environment,serviceId:$service,variables:$variables}')"
+          query='mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }'
+          body="$(jq -cn --arg query "$query" --argjson input "$input" '{query:$query,variables:{input:$input}}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
           fi
+          echo "Audit Core runtime variables configured without printing secret values."
 
-          response="$(api "$(jq -cn --arg query "$query" --argjson variables "$(jq -cn --arg id "$AUDIT_CORE_PROJECT_ID" '{id:$id}')" '{query:$query,variables:$variables}')")"
-          printf '%s\n' "$response" | jq -r '.data.project | "PROJECT \(.name) \(.id)", (.environments.edges[].node | "ENV \(.name) \(.id)"), (.services.edges[].node | "SERVICE \(.name) \(.id)")'
+      - name: Deploy exact Audit Core commit
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='mutation deploy($serviceId: String!, $environmentId: String!, $commitSha: String) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }'
+          variables="$(jq -cn --arg service "$AUDIT_CORE_SERVICE_ID" --arg environment "$AUDIT_CORE_ENVIRONMENT_ID" --arg sha "$AUDIT_CORE_COMMIT_SHA" '{serviceId:$service,environmentId:$environment,commitSha:$sha}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+          deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeployV2 // empty')"
+          [ -n "$deployment_id" ] || { echo "::error::Railway returned no deployment id"; exit 1; }
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "Railway deployment created: $deployment_id"
+
+      - name: Wait for Railway deployment
+        shell: bash
+        env:
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          query='query deployment($id: String!) { deployment(id: $id) { id status } }'
+          variables="$(jq -cn --arg id "$DEPLOYMENT_ID" '{id:$id}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Authorization: Bearer $RAILWAY_API_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+            status="$(printf '%s' "$response" | jq -r '.data.deployment.status // empty')"
+            echo "Railway deployment $DEPLOYMENT_ID status=$status"
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED|SKIPPED) exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for Railway deployment"
+          exit 1
+
+      - name: Resolve or create Audit Core public domain
+        id: domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Authorization: Bearer $RAILWAY_API_TOKEN" --header 'Content-Type: application/json' --data "$1"
+          }
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          variables="$(jq -cn --arg project "$AUDIT_CORE_PROJECT_ID" --arg environment "$AUDIT_CORE_ENVIRONMENT_ID" --arg service "$AUDIT_CORE_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(api "$body")"
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          if [ -z "$domain" ]; then
+            mutation='mutation serviceDomainCreate($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }'
+            input="$(jq -cn --arg environment "$AUDIT_CORE_ENVIRONMENT_ID" --arg service "$AUDIT_CORE_SERVICE_ID" '{environmentId:$environment,serviceId:$service}')"
+            body="$(jq -cn --arg query "$mutation" --argjson input "$input" '{query:$query,variables:{input:$input}}')"
+            response="$(api "$body")"
+            domain="$(printf '%s' "$response" | jq -r '.data.serviceDomainCreate.domain // empty')"
+          fi
+          [ -n "$domain" ] || { echo "::error::No Audit Core public domain available"; exit 1; }
+          echo "base_url=https://$domain" >> "$GITHUB_OUTPUT"
+          echo "Audit Core public URL: https://$domain"
+
+      - name: Verify deployed Audit Core health
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="${{ steps.domain.outputs.base_url }}"
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' "$base_url/health" || true)"
+            if [ "$code" = "200" ]; then
+              jq -e '.status == "ok"' /tmp/health.json >/dev/null
+              cat /tmp/health.json
+              echo "Audit Core deployed health: PASS"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Audit Core health check did not reach 200"
+          exit 1
+
+      - name: Report integration readiness
+        shell: bash
+        run: |
+          echo "audit_core_deployment=${{ steps.deploy.outputs.deployment_id }}"
+          echo "audit_core_base_url=${{ steps.domain.outputs.base_url }}"
+          echo "security_oauth_unauthenticated_http=${{ steps.deps.outputs.oauth_code }}"
+          if [ "${{ steps.deps.outputs.oauth_code }}" = "401" ]; then
+            echo "security_oauth_endpoint=AVAILABLE"
+          else
+            echo "security_oauth_endpoint=NOT_CONFIRMED"
+          fi
