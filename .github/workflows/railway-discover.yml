@@ -19,6 +19,7 @@ jobs:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       SECURITY_RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      SECURITY_RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
 
     steps:
       - name: Check managed Railway project token
@@ -53,34 +54,69 @@ jobs:
           print(f'Security Railway project: {project_name} | {project_id}')
           PY
 
-      - name: Resolve environments
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          env -u RAILWAY_API_TOKEN railway environment list --json > /tmp/environments.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path('/tmp/environments.json').read_text())
-          print('Railway environments:')
-          for item in data:
-              if isinstance(item, dict):
-                  print(f"- {item.get('name', '')} | {item.get('id', '')}")
-          PY
-
       - name: Resolve services
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           env -u RAILWAY_API_TOKEN railway service list --json > /tmp/services.json
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
           data = json.loads(Path('/tmp/services.json').read_text())
+          expected = os.environ['SECURITY_RAILWAY_SERVICE_ID']
+          found = False
           print('Railway services:')
           for item in data:
               if isinstance(item, dict):
                   print(f"- {item.get('name', '')} | {item.get('id', '')}")
+                  if item.get('id') == expected:
+                      found = True
+          if not found:
+              raise SystemExit(f'Expected Security service {expected} was not found')
+          PY
+
+      - name: Inspect configured variable names only
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway variable list --service "$SECURITY_RAILWAY_SERVICE_ID" --json > /tmp/variables.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path('/tmp/variables.json').read_text())
+          if isinstance(data, dict):
+              names = sorted(data)
+          elif isinstance(data, list):
+              names = sorted(
+                  item.get('name', '') for item in data
+                  if isinstance(item, dict) and isinstance(item.get('name'), str)
+              )
+          else:
+              raise SystemExit('Unexpected Railway variable-list response shape')
+          print('Security Railway configured variable names (values intentionally not shown):')
+          for name in names:
+              print(f'- {name}')
+          required = {
+              'SECURITY_JWT_PRIVATE_KEY_PEM',
+              'SECURITY_INTEGRATION_CLIENTS_JSON',
+              'SECURITY_ROLE_DATABASE_URL',
+          }
+          missing = required - set(names)
+          if missing:
+              raise SystemExit(f'Missing required Security runtime variables: {sorted(missing)}')
+          clerk = {
+              'CLERK_OAUTH_AUTHORIZE_URL',
+              'CLERK_OAUTH_TOKEN_URL',
+              'CLERK_OAUTH_USERINFO_URL',
+              'CLERK_OAUTH_CLIENT_ID',
+              'CLERK_OAUTH_CLIENT_SECRET',
+              'CLERK_OAUTH_REDIRECT_URI',
+          }
+          missing_clerk = clerk - set(names)
+          if missing_clerk:
+              print(f'Clerk interactive-auth variables not yet configured: {sorted(missing_clerk)}')
+          else:
+              print('All Clerk interactive-auth variable names are configured')
           PY
