@@ -1,7 +1,7 @@
 # Verigence Security — Cross-Module Authentication Design
 
 **Document ID:** VSEC-SD-INT-001  
-**Version:** 1.1  
+**Version:** 1.2  
 **Status:** APPROVED ARCHITECTURE INPUT  
 **Date:** 2026-08-15  
 **Updated:** 2026-08-16  
@@ -76,7 +76,7 @@ Rules:
 - Security SHALL resolve the Verigence user, permitted Tenant membership, role assignments and approved direct grants from authoritative Security-owned data/configuration.
 - Security SHALL resolve role templates for the selected Tenant and calculate authoritative `permissions[]` before issuing a USER token.
 - A requested/selected Tenant must be validated against the authenticated user's membership; the caller cannot self-assert Tenant access.
-- `/auth/logout` terminates/revokes the applicable Security authentication session according to the implemented session contract.
+- `/auth/logout` terminates the applicable Security authentication session. Already-issued short-lived access tokens are not silently extended by that session and expire according to their own `exp`; a separate token-revocation mechanism is not introduced by this design.
 - `/session` reports the applicable Security authentication/session state without becoming an authorization bypass.
 - Public clients that cannot safely hold a secret SHALL use the approved authorization-code protection mechanism (PKCE); confidential module backends authenticate according to the registered OAuth-client contract.
 
@@ -108,19 +108,22 @@ Use this flow for module-owned administrative/system operations and for backgrou
 
 ```text
 Audit Core workload
-    -> Security system-integration authentication
+    -> Security /oauth/token using client_credentials
     -> Security-issued short-lived SERVICE token
     -> DI
 ```
 
 Security SHALL:
 
-- authenticate the Audit Core workload/service identity;
+- authenticate the Audit Core workload/service identity as a registered confidential OAuth client;
+- require a Security-known active Tenant for Tenant-scoped service issuance rather than signing an arbitrary caller-supplied Tenant string;
 - issue a short-lived downstream JWT with `actor_type=SERVICE` for Tenant-scoped DI work;
 - include the applicable `tenant_id` for Tenant-scoped operations;
 - issue only the downstream `permissions[]` assigned to the Audit Core integration identity and requested for the operation;
-- audit service-token issuance and the requesting service identity;
+- audit service-token issuance/denial and the requesting service identity;
 - support revocation/rotation of the workload credential used to obtain tokens.
+
+A typical Tenant-scoped SERVICE token therefore identifies the caller in `sub` (for example `audit-core`), the Tenant in `tenant_id`, `actor_type=SERVICE`, and only the requested approved downstream `permissions[]`.
 
 The service token SHALL NOT be used for a new PC/TL/PM/CRM/Executive workflow action merely because Audit Core is the module making the HTTP call.
 
@@ -165,6 +168,15 @@ This rule is essential for Audit Core. For example, a PC who may capture/upload 
 
 The downstream token carries only the requested/approved downstream subset, even though the subject user's original Security token may contain a larger platform permission bundle.
 
+For `client_credentials`, the equivalent least-privilege rule is:
+
+```text
+registered integration-client authority
+INTERSECT requested downstream operation authority
+```
+
+and the requested Tenant must also be known/active in Security for Tenant-scoped issuance.
+
 ## 7. Background continuation
 
 When a user-driven operation has already been authorized and Audit Core has durably accepted/committed it, later background polling, retry, recovery or processing continuation may use the Audit Core `SERVICE` identity.
@@ -183,7 +195,28 @@ No direct shared API-key bypass between Audit Core and DI is part of this design
 
 A Verigence module SHALL NOT bypass Security by accepting an upstream IdP token as sufficient Verigence authorization unless a separately approved Security design explicitly introduces such a contract.
 
-## 9. JWT compatibility contract
+## 9. Resource-module token validation contract
+
+Resource modules such as DI SHALL validate Security-issued access tokens locally using Security's published JWKS. Security is not called synchronously for every protected API request.
+
+For a Security JWT, a resource module SHALL fail closed unless all applicable checks pass:
+
+- the JWT signature validates against the Security JWKS key identified by `kid` using the approved signing algorithm;
+- `iss` is the approved Security issuer;
+- `aud` contains/is the approved Verigence platform/resource audience;
+- `exp` is valid and the token is not expired;
+- `sub` is present;
+- Tenant-scoped USER/SERVICE operations contain a valid `tenant_id` and the request is constrained to that Tenant;
+- `actor_type` is recognized for the endpoint/context;
+- authoritative `permissions[]` contains the permission required by the resource operation.
+
+`roles[]` remains informational and SHALL NOT replace `permissions[]` enforcement in the resource module.
+
+A resource module does not need the calling module's OAuth client secret. The confidential client credential is used only between the calling module and Security; the resource module needs the Security trust configuration/JWKS and its own permission checks.
+
+For delegated tokens, `act.sub` identifies the calling/delegating module for audit attribution while `sub` remains the initiating user. For SERVICE tokens, `sub` identifies the service/client itself.
+
+## 10. JWT compatibility contract
 
 The current DI implementation validates Security-issued JWTs through Security JWKS and currently expects:
 
@@ -199,7 +232,7 @@ Security implementation SHALL remain compatible with that contract unless Securi
 
 For delegated tokens, the canonical caller/delegation attribution is the OAuth token-exchange actor claim `act`, with `act.sub` identifying the requesting service/client (initially `audit-core`). DI may ignore the additional claim for authorization but it remains available for audit attribution.
 
-## 10. OAuth token endpoint contract
+## 11. OAuth token endpoint contract
 
 Security SHALL expose:
 
@@ -223,22 +256,24 @@ Security signs JWTs with RS256 using a managed private key and exposes the publi
 GET /.well-known/jwks.json
 ```
 
-## 11. Credential and session handling
+## 12. Credential and session handling
 
 Security owns:
 
 - the mechanism by which a module proves its OAuth-client/workload identity;
 - Security's upstream IdP credentials/configuration;
 - Security signing keys;
-- Security authentication/session state and its revocation/expiry rules;
+- Security authentication/session state and its expiry/termination rules;
 - OAuth authorization-code issuance/validation; and
 - service/delegated token issuance.
 
 Managed secrets and rotation are required. Modules must not contain a hard-coded shared credential.
 
+Raw session tokens and authorization codes SHALL be stored only in non-recoverable/hash form where Security persists them. Authorization codes are short-lived and single-use.
+
 A future workload-identity mechanism may replace bootstrap client secrets without changing the token semantics defined here.
 
-## 12. Required Security audit events
+## 13. Required Security audit events
 
 At minimum, Security SHALL retain safe audit records for:
 
@@ -257,10 +292,12 @@ At minimum, Security SHALL retain safe audit records for:
 
 Raw bearer tokens, authorization codes, session secrets and client secrets SHALL NOT be logged.
 
-## 13. Implementation dependencies
+## 14. Implementation dependencies
 
-Existing Security task `SEC-INT-001` remains the completed implementation for platform permission JWTs, `client_credentials`, JWKS and downstream delegated token exchange.
+`SEC-INT-001` is the completed implementation for platform permission JWTs, `client_credentials`, JWKS and downstream delegated token exchange.
 
-This v1.1 architecture adds Security task `SEC-AUTH-001` for the missing Security-owned interactive authentication/session and OAuth authorization-code flow.
+`SEC-RBAC-001` is the completed implementation for the default PC/TL/PM/CRM cross-module role templates and Tenant customization.
 
-The current DEV deployment issue where `/oauth/token` returns HTTP 404 is an operational/deployment gap, not a reason to redefine the already-approved token semantics. It must be resolved before Audit Core cross-module DEV verification can complete.
+`SEC-AUTH-001` implements the Security-owned interactive authentication/session and OAuth authorization-code flow, including persisted Verigence user/Tenant membership and Clerk as the configured upstream identity provider behind Security.
+
+`SEC-DEPLOY-001` remains the operational gate: the current verified code, database schema and managed deployment configuration must be present in DEV and the live OAuth/authentication flows must be proven before Audit Core cross-module DEV readiness is closed.
