@@ -46,6 +46,14 @@ class Settings:
             raise RuntimeError("SECURITY_JWT_PRIVATE_KEY_PEM or SECURITY_PRIVATE_KEY_PEM is required")
 
         raw_database_url = _first_env("SECURITY_ROLE_DATABASE_URL", "DATABASE_URL")
+        integration_clients = _load_integration_clients(
+            os.environ.get("SECURITY_INTEGRATION_CLIENTS_JSON", "{}")
+        )
+        integration_clients.update(
+            _load_integration_clients(
+                os.environ.get("SECURITY_ADDITIONAL_INTEGRATION_CLIENTS_JSON", "{}")
+            )
+        )
         return cls(
             private_key_pem=private_key,
             key_id=_first_env("SECURITY_JWT_KID", "SECURITY_KEY_ID") or "security-1",
@@ -57,9 +65,7 @@ class Settings:
             role_permission_bundles=_load_role_bundles(
                 os.environ.get("SECURITY_ROLE_PERMISSION_BUNDLES_JSON", "{}")
             ),
-            integration_clients=_load_integration_clients(
-                os.environ.get("SECURITY_INTEGRATION_CLIENTS_JSON", "{}")
-            ),
+            integration_clients=integration_clients,
             role_database_url=normalize_database_url(raw_database_url) if raw_database_url else None,
             session_ttl_seconds=int(os.environ.get("SECURITY_SESSION_TTL_SECONDS", "28800")),
             authorization_code_ttl_seconds=int(
