@@ -1,0 +1,117 @@
+name: One-off Audit Core Neon DEV deployment
+
+on:
+  push:
+    branches:
+      - ops/audit-core-neon-deploy-20260816
+    paths:
+      - .github/workflows/audit-core-neon-oneoff.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-audit-core-schema:
+    name: Deploy Audit Core schema on shared Neon DEV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Check out Audit Core
+        uses: actions/checkout@v6
+        with:
+          repository: verigence/verigence-audit-core
+          ref: main
+          path: audit-core
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Audit Core
+        working-directory: audit-core
+        run: python -m pip install -e .
+
+      - name: Resolve Neon migration connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          if [ -z "$raw" ]; then
+            echo "::error::Neither MIGRATION_DATABASE_URL nor DEV_DATABASE_URL is configured."
+            exit 1
+          fi
+
+          case "$raw" in
+          postgresql+psycopg://*) sqlalchemy_url="$raw" ;;
+          postgresql+asyncpg://*) sqlalchemy_url="postgresql+psycopg://${raw#postgresql+asyncpg://}" ;;
+          postgresql://*) sqlalchemy_url="postgresql+psycopg://${raw#postgresql://}" ;;
+          postgres://*) sqlalchemy_url="postgresql+psycopg://${raw#postgres://}" ;;
+          *)
+            echo "::error::Configured Neon database secret is not a PostgreSQL URL."
+            exit 1
+            ;;
+          esac
+
+          echo "::add-mask::$sqlalchemy_url"
+          echo "DATABASE_URL=$sqlalchemy_url" >> "$GITHUB_ENV"
+
+      - name: Preflight shared database
+        working-directory: audit-core
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.connect() as connection:
+              audit_schema = connection.execute(text("select to_regnamespace('auditcore')::text")).scalar_one()
+              version_table = connection.execute(text("select to_regclass('public.alembic_version')::text")).scalar_one()
+              if version_table:
+                  versions = [row[0] for row in connection.execute(text("select version_num from public.alembic_version"))]
+                  allowed = {"0001_vac_db_002", "0002_runtime_role_rls"}
+                  unknown = [value for value in versions if value not in allowed]
+                  if unknown:
+                      raise SystemExit(
+                          "public.alembic_version is owned by another migration lineage; refusing to modify shared Neon DB"
+                      )
+              print(f"auditcore schema present before migration: {bool(audit_schema)}")
+          engine.dispose()
+          PY
+
+      - name: Apply Audit Core migrations
+        working-directory: audit-core
+        run: alembic upgrade head
+
+      - name: Verify deployed Audit Core schema
+        working-directory: audit-core
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.connect() as connection:
+              schema = connection.execute(text("select to_regnamespace('auditcore')::text")).scalar_one()
+              if schema != "auditcore":
+                  raise SystemExit("auditcore schema not found after migration")
+              version = connection.execute(text("select version_num from public.alembic_version")).scalar_one()
+              if version != "0002_runtime_role_rls":
+                  raise SystemExit(f"unexpected Audit Core migration version: {version}")
+              tables = connection.execute(text("select count(*) from pg_tables where schemaname='auditcore'" )).scalar_one()
+              if tables <= 0:
+                  raise SystemExit("auditcore schema contains no tables")
+              role = connection.execute(text("select rolname from pg_roles where rolname='audit_core_runtime'" )).scalar_one_or_none()
+              if role != "audit_core_runtime":
+                  raise SystemExit("audit_core_runtime role not found")
+              security_schema = connection.execute(text("select to_regnamespace('security')::text")).scalar_one()
+              print(f"Audit Core schema deployed with {tables} tables; Security schema still present: {security_schema == 'security'}")
+          engine.dispose()
+          PY
