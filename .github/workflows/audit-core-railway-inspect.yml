@@ -1,4 +1,4 @@
-name: Inspect Audit Core Railway project
+name: Prepare Audit Core Railway project
 
 on:
   push:
@@ -9,14 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       AUDIT_CORE_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
     steps:
-      - name: Inspect project resources
+      - name: Resolve environment and create service when missing
         shell: bash
         run: |
           set -euo pipefail
@@ -24,17 +24,38 @@ jobs:
             echo "::error::RAILWAY_API_TOKEN is not configured."
             exit 1
           fi
+
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$1"
+          }
+
           query='query project($id: String!) { project(id: $id) { id name services { edges { node { id name } } } environments { edges { node { id name } } } } }'
           variables="$(jq -cn --arg id "$AUDIT_CORE_PROJECT_ID" '{id:$id}')"
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
-          response="$(curl --fail-with-body --silent --show-error \
-            --request POST \
-            --url 'https://backboard.railway.com/graphql/v2' \
-            --header "Authorization: Bearer $RAILWAY_API_TOKEN" \
-            --header 'Content-Type: application/json' \
-            --data "$body")"
+          response="$(api "$body")"
           if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
             printf '%s\n' "$response" | jq -c '.errors'
             exit 1
           fi
+
+          service_id="$(printf '%s' "$response" | jq -r '.data.project.services.edges[0].node.id // empty')"
+          if [ -z "$service_id" ]; then
+            mutation='mutation serviceCreate($input: ServiceCreateInput!) { serviceCreate(input: $input) { id name } }'
+            input="$(jq -cn --arg project "$AUDIT_CORE_PROJECT_ID" '{projectId:$project,name:"verigence-audit-core",source:{repo:"verigence/verigence-audit-core"}}')"
+            variables="$(jq -cn --argjson input "$input" '{input:$input}')"
+            body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+            created="$(api "$body")"
+            if [ "$(printf '%s' "$created" | jq -r 'has("errors")')" = "true" ]; then
+              printf '%s\n' "$created" | jq -c '.errors'
+              exit 1
+            fi
+            service_id="$(printf '%s' "$created" | jq -r '.data.serviceCreate.id')"
+          fi
+
+          response="$(api "$(jq -cn --arg query "$query" --argjson variables "$(jq -cn --arg id "$AUDIT_CORE_PROJECT_ID" '{id:$id}')" '{query:$query,variables:$variables}')")"
           printf '%s\n' "$response" | jq -r '.data.project | "PROJECT \(.name) \(.id)", (.environments.edges[].node | "ENV \(.name) \(.id)"), (.services.edges[].node | "SERVICE \(.name) \(.id)")'
