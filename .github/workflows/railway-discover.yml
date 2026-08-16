@@ -24,27 +24,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${RAILWAY_API_TOKEN:-}" ]; then
-            echo "RAILWAY_AUTH_MODE=account" >> "$GITHUB_ENV"
-            echo "Railway account/workspace token is configured"
-          elif [ -n "${RAILWAY_TOKEN:-}" ]; then
-            echo "RAILWAY_AUTH_MODE=project" >> "$GITHUB_ENV"
-            echo "Railway project token is configured"
-          else
+          if [ -z "${RAILWAY_API_TOKEN:-}" ] && [ -z "${RAILWAY_TOKEN:-}" ]; then
             echo "::error::Neither RAILWAY_API_TOKEN nor RAILWAY_TOKEN is configured for the Security repository."
             exit 1
           fi
+          echo "Railway credential(s) are configured; testing them without exposing values"
 
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
-      - name: Discover accessible Railway project context
+      - name: Try account/workspace Railway token
+        if: env.RAILWAY_API_TOKEN != ''
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$RAILWAY_AUTH_MODE" = "account" ]; then
-            env -u RAILWAY_TOKEN railway list --json > /tmp/projects.json
-            python - <<'PY'
+          env -u RAILWAY_TOKEN railway list --json > /tmp/projects.json
+          python - <<'PY'
           import json
           from pathlib import Path
 
@@ -60,6 +56,24 @@ jobs:
           if matches == 0:
               print('- no matching project names found')
           PY
-          else
-            echo "Project-scoped Railway token is present but the project ID is not stored in the repository; account-level discovery is unavailable."
-          fi
+
+      - name: Try project-scoped Railway token
+        if: env.RAILWAY_TOKEN != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway status --json > /tmp/status.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path('/tmp/status.json').read_text())
+          project = data.get('project', {})
+          environment = data.get('environment', {})
+          print(f"Project token context: {project.get('name', '')} | {project.get('id', '')}")
+          print(f"Environment: {environment.get('name', '')} | {environment.get('id', '')}")
+          services = data.get('services') or data.get('resources', {}).get('services') or []
+          for service in services:
+              if isinstance(service, dict):
+                  print(f"Service: {service.get('name', '')} | {service.get('id', '')}")
+          PY
