@@ -94,7 +94,7 @@ def _load_integration_clients(raw: str) -> dict[str, IntegrationClient]:
         if not public and (not isinstance(secret, str) or not secret):
             raise ValueError(f"integration client {client_id} requires a secret")
         if not isinstance(secret, str):
-            raise ValueError(f"integration client {client_id} secret must be a string")
+            raise TypeError(f"integration client {client_id} secret must be a string")
         clients[client_id] = IntegrationClient(
             secret=secret,
             permissions=frozenset(
