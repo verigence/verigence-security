@@ -8,6 +8,15 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from verigence_security.auth import (
+    AccessDenied,
+    AuthService,
+    InvalidGrant,
+    create_auth_store,
+    create_upstream_provider,
+    register_auth_routes,
+)
+from verigence_security.auth_store import AuthStore
 from verigence_security.role_templates import (
     InvalidRoleTemplate,
     MemoryRoleTemplateStore,
@@ -22,6 +31,7 @@ from verigence_security.role_templates import (
 )
 from verigence_security.settings import Settings
 from verigence_security.tokens import InvalidToken, PermissionDenied, TokenService
+from verigence_security.upstream import UpstreamIdentityProvider
 
 TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
@@ -31,16 +41,28 @@ logger = logging.getLogger("verigence_security.oauth")
 def create_app(
     settings: Settings | None = None,
     role_store: RoleTemplateStore | None = None,
+    auth_store: AuthStore | None = None,
+    upstream_provider: UpstreamIdentityProvider | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
-    resolved_store = role_store or _role_store_from_settings(resolved_settings)
-    role_templates = RoleTemplateService(resolved_store)
+    resolved_role_store = role_store or _role_store_from_settings(resolved_settings)
+    role_templates = RoleTemplateService(resolved_role_store)
     role_templates.seed_platform_defaults()
     tokens = TokenService(resolved_settings, role_permission_resolver=role_templates)
+    resolved_auth_store = auth_store or create_auth_store(resolved_settings)
+    auth = AuthService(
+        settings=resolved_settings,
+        store=resolved_auth_store,
+        role_templates=role_templates,
+        upstream=upstream_provider or create_upstream_provider(resolved_settings),
+    )
+
     app = FastAPI(title="Verigence Security", docs_url=None, redoc_url=None)
     app.state.token_service = tokens
     app.state.role_template_service = role_templates
-    app.state.role_template_store = resolved_store
+    app.state.role_template_store = resolved_role_store
+    app.state.auth_service = auth
+    app.state.auth_store = resolved_auth_store
     app.state.settings = resolved_settings
 
     @app.get("/health")
@@ -53,24 +75,43 @@ def create_app(
 
     @app.post("/oauth/token")
     async def oauth_token(request: Request) -> JSONResponse:
-        client_id = _authenticate_client(request, resolved_settings)
+        form = _parse_form(await request.body())
+        grant_type = form.get("grant_type", "")
+        client_id = _authenticate_oauth_client(request, form, resolved_settings, grant_type)
         if client_id is None:
-            _audit("token_denied", client_id=None, grant_type=None, reason="invalid_client")
+            auth.audit(
+                event_type="token_denied",
+                outcome="DENIED",
+                detail="invalid_client",
+            )
+            _audit("token_denied", client_id=None, grant_type=grant_type, reason="invalid_client")
             return JSONResponse(
                 status_code=401,
                 content={"error": "invalid_client"},
                 headers={"WWW-Authenticate": "Basic"},
             )
 
-        form = _parse_form(await request.body())
-        grant_type = form.get("grant_type", "")
         requested_permissions = form.get("scope", "").split()
 
         try:
-            if grant_type == "client_credentials":
+            if grant_type == "authorization_code":
+                code = form.get("code", "")
+                redirect_uri = form.get("redirect_uri", "")
+                if not code or not redirect_uri:
+                    return _oauth_error("invalid_request", "code and redirect_uri are required")
+                issued = auth.exchange_authorization_code(
+                    client_id=client_id,
+                    code=code,
+                    redirect_uri=redirect_uri,
+                    code_verifier=form.get("code_verifier"),
+                    tokens=tokens,
+                )
+            elif grant_type == "client_credentials":
                 tenant_id = form.get("tenant_id", "")
                 if not tenant_id:
                     return _oauth_error("invalid_request", "tenant_id is required")
+                if not auth.tenant_exists(tenant_id):
+                    return _oauth_error("invalid_grant", "tenant_id is unknown or inactive")
                 issued = tokens.issue_service_token(
                     client_id=client_id,
                     tenant_id=tenant_id,
@@ -89,13 +130,48 @@ def create_app(
                 )
             else:
                 return _oauth_error("unsupported_grant_type", "unsupported grant_type")
+        except InvalidGrant:
+            auth.audit(
+                event_type="token_denied",
+                outcome="DENIED",
+                client_id=client_id,
+                detail="invalid_grant",
+            )
+            _audit("token_denied", client_id=client_id, grant_type=grant_type, reason="invalid_grant")
+            return _oauth_error("invalid_grant", "authorization grant is invalid")
+        except AccessDenied:
+            auth.audit(
+                event_type="token_denied",
+                outcome="DENIED",
+                client_id=client_id,
+                detail="access_denied",
+            )
+            return _oauth_error("invalid_grant", "authorization grant is no longer allowed")
         except InvalidToken:
+            auth.audit(
+                event_type="token_denied",
+                outcome="DENIED",
+                client_id=client_id,
+                detail="invalid_subject_token",
+            )
             _audit("token_denied", client_id=client_id, grant_type=grant_type, reason="invalid_grant")
             return _oauth_error("invalid_grant", "subject token is invalid")
         except PermissionDenied:
+            auth.audit(
+                event_type="token_denied",
+                outcome="DENIED",
+                client_id=client_id,
+                detail="invalid_scope",
+            )
             _audit("token_denied", client_id=client_id, grant_type=grant_type, reason="invalid_scope")
             return _oauth_error("invalid_scope", "requested permission is not authorized")
 
+        auth.audit(
+            event_type="token_issued",
+            outcome="SUCCESS",
+            client_id=client_id,
+            detail=grant_type,
+        )
         _audit(
             "token_issued",
             client_id=client_id,
@@ -128,6 +204,7 @@ def create_app(
             correlation_id=request.headers.get("X-Correlation-ID"),
             replace=replace,
         )
+        auth.ensure_tenant(tenant_id)
         return JSONResponse(content={"roles": [_template_payload(row) for row in rows]})
 
     @app.get("/v1/tenants/{tenant_id}/role-templates")
@@ -139,6 +216,7 @@ def create_app(
         if denied is not None:
             return denied
         rows = role_templates.list_tenant(tenant_id)
+        auth.ensure_tenant(tenant_id)
         return JSONResponse(content={"roles": [_template_payload(row) for row in rows]})
 
     @app.put("/v1/tenants/{tenant_id}/role-templates/{role_key}")
@@ -169,6 +247,7 @@ def create_app(
                 status_code=400,
                 content={"error": "invalid_role_template", "detail": str(exc)},
             )
+        auth.ensure_tenant(tenant_id)
         return JSONResponse(content=_template_payload(row))
 
     @app.get("/v1/platform/role-templates")
@@ -206,6 +285,7 @@ def create_app(
             )
         return JSONResponse(content=_template_payload(row))
 
+    register_auth_routes(app, auth)
     return app
 
 
@@ -220,6 +300,25 @@ def _parse_form(body: bytes) -> dict[str, str]:
     return {key: items[-1] for key, items in values.items() if items}
 
 
+def _authenticate_oauth_client(
+    request: Request,
+    form: dict[str, str],
+    settings: Settings,
+    grant_type: str,
+) -> str | None:
+    basic_client = _authenticate_client(request, settings)
+    if basic_client is not None:
+        return basic_client
+
+    if grant_type != "authorization_code":
+        return None
+    client_id = form.get("client_id", "")
+    client = settings.integration_clients.get(client_id)
+    if client is None or not client.public:
+        return None
+    return client_id
+
+
 def _authenticate_client(request: Request, settings: Settings) -> str | None:
     authorization = request.headers.get("Authorization", "")
     if not authorization.startswith("Basic "):
@@ -230,7 +329,7 @@ def _authenticate_client(request: Request, settings: Settings) -> str | None:
     except (ValueError, UnicodeDecodeError):
         return None
     client = settings.integration_clients.get(client_id)
-    if client is None or not hmac.compare_digest(client.secret, client_secret):
+    if client is None or client.public or not hmac.compare_digest(client.secret, client_secret):
         return None
     return client_id
 
