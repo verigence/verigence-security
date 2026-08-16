@@ -41,7 +41,15 @@ def settings() -> Settings:
                         "di.operations.read",
                     }
                 ),
-            )
+                redirect_uris=frozenset({"https://audit-core.test/oauth/callback"}),
+            ),
+            "mobile-test": IntegrationClient(
+                secret="",
+                permissions=frozenset(),
+                redirect_uris=frozenset({"verigence://oauth/callback"}),
+                public=True,
+            ),
         },
         role_database_url=None,
+        session_cookie_secure=False,
     )
