@@ -1,0 +1,314 @@
+name: Finalize and verify Security DEV
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/security-dev-finalize.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-dev-finalize
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      SECURITY_RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      SECURITY_RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      SECURITY_DEV_TEST_TENANT_ID: dev-auth-test
+      SECURITY_DEV_TEST_USER_EMAIL: verigence.security.devtest@example.com
+      SECURITY_DEV_TEST_ROLE: PC
+      SECURITY_DEV_TEST_CLIENT_ID: security-dev-test
+      SECURITY_DEV_TEST_REDIRECT_URI: https://example.invalid/security-dev/oauth/callback
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime
+        run: python -m pip install -e .
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Verify Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway status --json > /tmp/status.json
+          env -u RAILWAY_API_TOKEN railway service list --json > /tmp/services.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          project = json.loads(Path('/tmp/status.json').read_text())
+          services = json.loads(Path('/tmp/services.json').read_text())
+          assert project.get('id') == os.environ['SECURITY_RAILWAY_PROJECT_ID']
+          assert any(item.get('id') == os.environ['SECURITY_RAILWAY_SERVICE_ID'] for item in services)
+          print(f"Security Railway target verified: {project.get('name')} | {project.get('id')}")
+          PY
+
+      - name: Configure Clerk OAuth application
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway run --service "$SECURITY_RAILWAY_SERVICE_ID" --no-local \
+            python scripts/configure_clerk_oauth_app.py > /tmp/clerk-oauth.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          values = json.loads(Path('/tmp/clerk-oauth.json').read_text())
+          required = {
+              'CLERK_OAUTH_AUTHORIZE_URL', 'CLERK_OAUTH_TOKEN_URL',
+              'CLERK_OAUTH_USERINFO_URL', 'CLERK_OAUTH_CLIENT_ID',
+              'CLERK_OAUTH_CLIENT_SECRET', 'CLERK_OAUTH_REDIRECT_URI'
+          }
+          assert set(values) == required and all(values.values())
+          print('Clerk OAuth application configuration verified')
+          PY
+
+      - name: Configure controlled DEV OAuth client and dummy-user password
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, secrets, subprocess
+          from pathlib import Path
+
+          service = os.environ['SECURITY_RAILWAY_SERVICE_ID']
+          values = json.loads(Path('/tmp/clerk-oauth.json').read_text())
+          client_secret = secrets.token_urlsafe(48)
+          user_password = secrets.token_urlsafe(32) + 'Aa1!'
+          values.update({
+              'SECURITY_INTEGRATION_CLIENTS_JSON': json.dumps({
+                  os.environ['SECURITY_DEV_TEST_CLIENT_ID']: {
+                      'secret': client_secret,
+                      'permissions': ['di.document.read', 'di.document.upload'],
+                      'redirect_uris': [os.environ['SECURITY_DEV_TEST_REDIRECT_URI']],
+                      'public': False,
+                  }
+              }, separators=(',', ':')),
+              'SECURITY_DEV_TEST_CLIENT_SECRET': client_secret,
+              'SECURITY_DEV_TEST_USER_PASSWORD': user_password,
+              'SECURITY_SESSION_COOKIE_SECURE': 'true',
+          })
+          env = os.environ.copy()
+          env.pop('RAILWAY_API_TOKEN', None)
+          for key, value in values.items():
+              print(f'::add-mask::{value}')
+              subprocess.run(
+                  ['railway', 'variable', 'set', key, '--service', service,
+                   '--stdin', '--skip-deploys'],
+                  input=value, text=True, check=True, env=env,
+                  stdout=subprocess.DEVNULL,
+              )
+          print('Controlled DEV OAuth/client credentials configured in Railway')
+          PY
+
+      - name: Apply Security DEV schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway run --service "$SECURITY_RAILWAY_SERVICE_ID" --no-local \
+            python - <<'PY'
+          import os
+          from pathlib import Path
+          import psycopg
+          from verigence_security.settings import normalize_database_url
+
+          raw = os.environ.get('SECURITY_ROLE_DATABASE_URL') or os.environ.get('DATABASE_URL')
+          if not raw:
+              raise SystemExit('Security DEV database URL is missing')
+          with psycopg.connect(normalize_database_url(raw)) as conn, conn.cursor() as cur:
+              for path in sorted(Path('database').glob('*.sql')):
+                  cur.execute(path.read_text(encoding='utf-8'))
+              conn.commit()
+          print('Security DEV schema applied')
+          PY
+
+      - name: Provision retained DEV dummy user
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway run --service "$SECURITY_RAILWAY_SERVICE_ID" --no-local \
+            python scripts/provision_dev_test_user.py
+
+      - name: Deploy current Security code
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway up \
+            --service "$SECURITY_RAILWAY_SERVICE_ID" \
+            --ci --message "Security auth/OAuth DEV $GITHUB_SHA"
+
+      - name: Wait for live health and run OAuth smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway run --service "$SECURITY_RAILWAY_SERVICE_ID" --no-local \
+            python - <<'PY'
+          import hashlib
+          import os
+          import secrets
+          import time
+          from urllib.parse import parse_qs, urlparse
+
+          import httpx
+          import jwt
+          import psycopg
+          from verigence_security.settings import normalize_database_url
+
+          domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN') or os.environ.get('RAILWAY_STATIC_URL')
+          if not domain:
+              raise SystemExit('Security Railway public domain is missing')
+          base = domain.rstrip('/') if domain.startswith(('http://', 'https://')) else 'https://' + domain.rstrip('/')
+          client_id = os.environ['SECURITY_DEV_TEST_CLIENT_ID']
+          client_secret = os.environ['SECURITY_DEV_TEST_CLIENT_SECRET']
+          tenant_id = os.environ['SECURITY_DEV_TEST_TENANT_ID']
+          redirect_uri = os.environ['SECURITY_DEV_TEST_REDIRECT_URI']
+          email = os.environ['SECURITY_DEV_TEST_USER_EMAIL']
+          raw_db = os.environ.get('SECURITY_ROLE_DATABASE_URL') or os.environ.get('DATABASE_URL')
+          database_url = normalize_database_url(raw_db)
+
+          with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+              for _ in range(30):
+                  try:
+                      response = client.get(base + '/health')
+                      if response.status_code == 200 and response.json().get('status') == 'ok':
+                          break
+                  except Exception:
+                      pass
+                  time.sleep(4)
+              else:
+                  raise SystemExit('Security DEV did not become healthy')
+
+              jwks_response = client.get(base + '/.well-known/jwks.json')
+              assert jwks_response.status_code == 200
+              jwks = jwks_response.json()
+
+              unauth = client.post(base + '/oauth/token', data={'grant_type': 'client_credentials'})
+              assert unauth.status_code == 401 and unauth.json()['error'] == 'invalid_client'
+
+              with psycopg.connect(database_url) as conn, conn.cursor() as cur:
+                  cur.execute(
+                      'SELECT user_id FROM security_users WHERE email = %s AND active = TRUE',
+                      (email,),
+                  )
+                  row = cur.fetchone()
+                  if row is None:
+                      raise SystemExit('Retained DEV dummy user is missing')
+                  user_id = str(row[0])
+
+              session_token = secrets.token_urlsafe(48)
+              session_hash = hashlib.sha256(session_token.encode()).hexdigest()
+              with psycopg.connect(database_url) as conn, conn.cursor() as cur:
+                  cur.execute(
+                      'INSERT INTO security_auth_sessions (session_hash, user_id, expires_at, created_at) '
+                      "VALUES (%s, %s, now() + interval '10 minutes', now())",
+                      (session_hash, user_id),
+                  )
+                  conn.commit()
+
+              authorize = client.get(
+                  base + '/oauth/authorize',
+                  params={
+                      'response_type': 'code', 'client_id': client_id,
+                      'redirect_uri': redirect_uri, 'state': 'dev-smoke',
+                      'tenant_id': tenant_id,
+                  },
+                  cookies={'verigence_session': session_token},
+              )
+              assert authorize.status_code == 302
+              values = parse_qs(urlparse(authorize.headers['location']).query)
+              code = values['code'][0]
+              assert values['state'] == ['dev-smoke']
+
+              token = client.post(
+                  base + '/oauth/token', auth=(client_id, client_secret),
+                  data={
+                      'grant_type': 'authorization_code', 'code': code,
+                      'redirect_uri': redirect_uri,
+                  },
+              )
+              assert token.status_code == 200, token.text
+              user_token = token.json()['access_token']
+
+              header = jwt.get_unverified_header(user_token)
+              jwk = next(item for item in jwks['keys'] if item['kid'] == header['kid'])
+              key = jwt.PyJWK.from_dict(jwk).key
+              user_claims = jwt.decode(
+                  user_token, key, algorithms=['RS256'],
+                  audience='verigence-platform', issuer='verigence-security',
+              )
+              assert user_claims['sub'] == user_id
+              assert user_claims['tenant_id'] == tenant_id
+              assert user_claims['actor_type'] == 'USER'
+              assert 'audit.evidence.upload' in user_claims['permissions']
+              assert 'di.document.upload' in user_claims['permissions']
+              assert 'di.verification.write' not in user_claims['permissions']
+
+              service = client.post(
+                  base + '/oauth/token', auth=(client_id, client_secret),
+                  data={
+                      'grant_type': 'client_credentials', 'tenant_id': tenant_id,
+                      'scope': 'di.document.read',
+                  },
+              )
+              assert service.status_code == 200, service.text
+              service_claims = jwt.decode(
+                  service.json()['access_token'], key, algorithms=['RS256'],
+                  audience='verigence-platform', issuer='verigence-security',
+              )
+              assert service_claims['sub'] == client_id
+              assert service_claims['tenant_id'] == tenant_id
+              assert service_claims['actor_type'] == 'SERVICE'
+              assert service_claims['permissions'] == ['di.document.read']
+
+              delegated = client.post(
+                  base + '/oauth/token', auth=(client_id, client_secret),
+                  data={
+                      'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                      'subject_token': user_token,
+                      'subject_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+                      'scope': 'di.document.upload',
+                  },
+              )
+              assert delegated.status_code == 200, delegated.text
+              delegated_claims = jwt.decode(
+                  delegated.json()['access_token'], key, algorithms=['RS256'],
+                  audience='verigence-platform', issuer='verigence-security',
+              )
+              assert delegated_claims['sub'] == user_id
+              assert delegated_claims['tenant_id'] == tenant_id
+              assert delegated_claims['permissions'] == ['di.document.upload']
+              assert delegated_claims['act'] == {'sub': client_id}
+
+              no_session = client.get(
+                  base + '/oauth/authorize',
+                  params={
+                      'response_type': 'code', 'client_id': client_id,
+                      'redirect_uri': redirect_uri, 'state': 'clerk-route',
+                      'tenant_id': tenant_id,
+                  },
+              )
+              assert no_session.status_code == 302
+              assert no_session.headers['location'].startswith('/auth/login?')
+              login = client.get(base + no_session.headers['location'])
+              assert login.status_code == 302
+              assert login.headers['location'].startswith(os.environ['CLERK_OAUTH_AUTHORIZE_URL'])
+
+          print('LIVE_SECURITY_USER_SERVICE_DELEGATED_SMOKE=PASS')
+          print(f'RETAINED_DEV_TEST_USER={email}')
+          print(f'RETAINED_DEV_TEST_TENANT={tenant_id}')
+          PY
