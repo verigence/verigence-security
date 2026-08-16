@@ -43,18 +43,22 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$RAILWAY_AUTH_MODE" = "account" ]; then
-            railway list --json > /tmp/projects.json
+            env -u RAILWAY_TOKEN railway list --json > /tmp/projects.json
             python - <<'PY'
           import json
           from pathlib import Path
 
           data = json.loads(Path('/tmp/projects.json').read_text())
-          print('Accessible Railway projects:')
+          print('Accessible Railway projects matching Verigence/Security:')
+          matches = 0
           for item in data:
               name = item.get('name') or item.get('project', {}).get('name') or ''
               project_id = item.get('id') or item.get('project', {}).get('id') or ''
               if 'verigence' in name.lower() or 'security' in name.lower():
+                  matches += 1
                   print(f'- {name} | {project_id}')
+          if matches == 0:
+              print('- no matching project names found')
           PY
           else
             echo "Project-scoped Railway token is present but the project ID is not stored in the repository; account-level discovery is unavailable."
