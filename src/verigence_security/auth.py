@@ -4,16 +4,16 @@ import base64
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from verigence_security.auth_store import (
-    AuthStore,
     AuthorizationCode,
     AuthorizationRequest,
+    AuthStore,
     MemoryAuthStore,
     PostgresAuthStore,
     SecurityUser,
@@ -96,6 +96,8 @@ class AuthService:
     def tenant_exists(self, tenant_id: str) -> bool:
         if self.store.tenant_exists(tenant_id):
             return True
+        # Existing installations may already have Tenant role templates from before
+        # the Security tenant registry existed. Treat those as authoritative onboarding evidence.
         return bool(self.role_templates.store.list("TENANT", tenant_id))
 
     def client(self, client_id: str) -> IntegrationClient:
@@ -176,9 +178,7 @@ class AuthService:
             raise InvalidRequest("authorization request is missing or expired")
         upstream_state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(24)
-        if not self.store.bind_upstream_state(
-            request_id, upstream_state=upstream_state, nonce=nonce
-        ):
+        if not self.store.bind_upstream_state(request_id, upstream_state=upstream_state, nonce=nonce):
             raise InvalidRequest("authorization request is missing or expired")
         target = self.upstream.authorization_url(state=upstream_state)
         self.audit(
@@ -254,9 +254,10 @@ class AuthService:
             raise InvalidGrant("authorization code is invalid, expired or already used")
         if auth_code.client_id != client_id or auth_code.redirect_uri != redirect_uri:
             raise InvalidGrant("authorization code is not bound to this client/redirect URI")
-        if auth_code.code_challenge:
-            if not code_verifier or _pkce_s256(code_verifier) != auth_code.code_challenge:
-                raise InvalidGrant("PKCE verification failed")
+        if auth_code.code_challenge and (
+            not code_verifier or _pkce_s256(code_verifier) != auth_code.code_challenge
+        ):
+            raise InvalidGrant("PKCE verification failed")
         membership = self._active_membership(auth_code.user_id, auth_code.tenant_id)
         user = self.store.get_user(auth_code.user_id)
         if user is None or not user.active:
@@ -327,11 +328,7 @@ class AuthService:
             tenant_id=membership.tenant_id,
             client_id=pending.client_id,
         )
-        return AuthorizationResult(
-            redirect_uri=pending.redirect_uri,
-            code=code,
-            state=pending.state,
-        )
+        return AuthorizationResult(redirect_uri=pending.redirect_uri, code=code, state=pending.state)
 
 
 def create_auth_store(settings: Settings) -> AuthStore:
@@ -368,10 +365,7 @@ def register_auth_routes(app: FastAPI, auth: AuthService) -> None:
                 code_challenge_method=code_challenge_method,
             )
         except InvalidClient as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "invalid_client", "detail": str(exc)},
-            )
+            return JSONResponse(status_code=400, content={"error": "invalid_client", "detail": str(exc)})
         except AccessDenied as exc:
             return _authorization_error_redirect(redirect_uri, state, "access_denied", str(exc))
         except InvalidRequest as exc:
@@ -412,10 +406,7 @@ def register_auth_routes(app: FastAPI, auth: AuthService) -> None:
         except UpstreamConfigurationError:
             return JSONResponse(status_code=503, content={"error": "authentication_unavailable"})
         except InvalidRequest as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "invalid_request", "detail": str(exc)},
-            )
+            return JSONResponse(status_code=400, content={"error": "invalid_request", "detail": str(exc)})
         return RedirectResponse(target, status_code=302)
 
     @app.get("/auth/callback")
@@ -433,10 +424,7 @@ def register_auth_routes(app: FastAPI, auth: AuthService) -> None:
         except InvalidGrant:
             return JSONResponse(status_code=400, content={"error": "invalid_grant"})
         except AccessDenied as exc:
-            return JSONResponse(
-                status_code=403,
-                content={"error": "access_denied", "detail": str(exc)},
-            )
+            return JSONResponse(status_code=403, content={"error": "access_denied", "detail": str(exc)})
 
         response = RedirectResponse(_authorization_success_url(result), status_code=302)
         response.set_cookie(
@@ -493,4 +481,4 @@ def _pkce_s256(verifier: str) -> str:
 
 
 def _future(seconds: int) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
