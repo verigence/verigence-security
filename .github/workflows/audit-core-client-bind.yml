@@ -1,0 +1,155 @@
+name: Bind Audit Core OAuth client
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/audit-core-client-bind.yml
+      - src/verigence_security/settings.py
+      - src/verigence_security/app.py
+      - tests/test_hashed_integration_client.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-core-client-bind
+  cancel-in-progress: false
+
+jobs:
+  bind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      SECURITY_RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      SECURITY_RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      AUDIT_CORE_CLIENT_ID: audit-core
+      AUDIT_CORE_CLIENT_SECRET_SHA256: 06fd76dc52d593d232329fc958f148be1757a88e7ecf710a41d7718a9c60be81
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime and Railway CLI
+        run: |
+          python -m pip install -e .
+          npm install --global @railway/cli
+
+      - name: Verify Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway status --json > /tmp/status.json
+          env -u RAILWAY_API_TOKEN railway service list --json > /tmp/services.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          project = json.loads(Path('/tmp/status.json').read_text())
+          services = json.loads(Path('/tmp/services.json').read_text())
+          assert project.get('id') == os.environ['SECURITY_RAILWAY_PROJECT_ID']
+          assert any(item.get('id') == os.environ['SECURITY_RAILWAY_SERVICE_ID'] for item in services)
+          print(f"Security Railway target verified: {project.get('name')} | {project.get('id')}")
+          PY
+
+      - name: Register Audit Core verifier and least-privilege scopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          verifier = os.environ['AUDIT_CORE_CLIENT_SECRET_SHA256'].lower()
+          if len(verifier) != 64 or any(ch not in '0123456789abcdef' for ch in verifier):
+              raise SystemExit('Audit Core client verifier is not a SHA-256 hex digest')
+
+          value = json.dumps(
+              {
+                  os.environ['AUDIT_CORE_CLIENT_ID']: {
+                      'secret_sha256': verifier,
+                      'permissions': ['di.document.read', 'di.document.upload'],
+                      'redirect_uris': [],
+                      'public': False,
+                  }
+              },
+              separators=(',', ':'),
+          )
+          env = os.environ.copy()
+          env.pop('RAILWAY_API_TOKEN', None)
+          subprocess.run(
+              [
+                  'railway', 'variable', 'set',
+                  'SECURITY_ADDITIONAL_INTEGRATION_CLIENTS_JSON',
+                  '--service', os.environ['SECURITY_RAILWAY_SERVICE_ID'],
+                  '--stdin', '--skip-deploys',
+              ],
+              input=value,
+              text=True,
+              check=True,
+              env=env,
+              stdout=subprocess.DEVNULL,
+          )
+          print('Audit Core OAuth client verifier registered in Security Railway')
+          PY
+
+      - name: Verify merged Security configuration before deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway run --service "$SECURITY_RAILWAY_SERVICE_ID" --no-local python - <<'PY'
+          import os
+          from verigence_security.settings import Settings
+
+          settings = Settings.from_env()
+          client = settings.integration_clients[os.environ['AUDIT_CORE_CLIENT_ID']]
+          assert client.secret == ''
+          assert client.secret_sha256 == os.environ['AUDIT_CORE_CLIENT_SECRET_SHA256']
+          assert client.permissions == frozenset({'di.document.read', 'di.document.upload'})
+          assert not client.public
+          print('SECURITY_AUDIT_CORE_CLIENT_CONFIG=PASS')
+          PY
+
+      - name: Deploy Security with Audit Core client binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway up \
+            --service "$SECURITY_RAILWAY_SERVICE_ID" \
+            --ci --message "Bind Audit Core OAuth client $GITHUB_SHA"
+
+      - name: Verify live Security health
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway run --service "$SECURITY_RAILWAY_SERVICE_ID" --no-local python - <<'PY'
+          import os
+          import time
+          import httpx
+
+          domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN') or os.environ.get('RAILWAY_STATIC_URL')
+          if not domain:
+              raise SystemExit('Security Railway public domain is missing')
+          base = domain.rstrip('/') if domain.startswith(('http://', 'https://')) else 'https://' + domain.rstrip('/')
+
+          with httpx.Client(timeout=15.0) as client:
+              for _ in range(30):
+                  try:
+                      response = client.get(base + '/health')
+                      if response.status_code == 200 and response.json().get('status') == 'ok':
+                          print('SECURITY_AUDIT_CORE_BIND_DEPLOY=PASS')
+                          break
+                  except Exception:
+                      pass
+                  time.sleep(4)
+              else:
+                  raise SystemExit('Security did not become healthy after Audit Core client binding deploy')
+          PY
