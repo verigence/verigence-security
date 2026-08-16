@@ -12,6 +12,7 @@ class IntegrationClient:
     permissions: frozenset[str]
     redirect_uris: frozenset[str] = field(default_factory=frozenset)
     public: bool = False
+    secret_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,11 +106,20 @@ def _load_integration_clients(raw: str) -> dict[str, IntegrationClient]:
         if not isinstance(config, dict):
             raise TypeError(f"integration client {client_id} must be an object")
         secret = config.get("secret", "")
+        secret_sha256 = config.get("secret_sha256")
         public = bool(config.get("public", False))
-        if not public and (not isinstance(secret, str) or not secret):
-            raise ValueError(f"integration client {client_id} requires a secret")
         if not isinstance(secret, str):
             raise TypeError(f"integration client {client_id} secret must be a string")
+        if secret_sha256 is not None:
+            if not isinstance(secret_sha256, str) or not _is_sha256_hex(secret_sha256):
+                raise ValueError(
+                    f"integration client {client_id} secret_sha256 must be a 64-character hex digest"
+                )
+            secret_sha256 = secret_sha256.lower()
+        if not public and not secret and secret_sha256 is None:
+            raise ValueError(
+                f"integration client {client_id} requires a secret or secret_sha256"
+            )
         clients[client_id] = IntegrationClient(
             secret=secret,
             permissions=frozenset(
@@ -119,8 +129,13 @@ def _load_integration_clients(raw: str) -> dict[str, IntegrationClient]:
                 _string_list(config.get("redirect_uris", []), f"client {client_id} redirect_uris")
             ),
             public=public,
+            secret_sha256=secret_sha256,
         )
     return clients
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdefABCDEF" for character in value)
 
 
 def _string_list(value: Any, name: str) -> list[str]:
