@@ -12,6 +12,7 @@ class IntegrationClient:
     permissions: frozenset[str]
     redirect_uris: frozenset[str] = field(default_factory=frozenset)
     public: bool = False
+    secret_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -38,15 +39,19 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        private_key = os.environ.get("SECURITY_JWT_PRIVATE_KEY_PEM", "").replace("\\n", "\n")
+        private_key = _first_env("SECURITY_JWT_PRIVATE_KEY_PEM", "SECURITY_PRIVATE_KEY_PEM").replace(
+            "\\n", "\n"
+        )
         if not private_key:
-            raise RuntimeError("SECURITY_JWT_PRIVATE_KEY_PEM is required")
+            raise RuntimeError("SECURITY_JWT_PRIVATE_KEY_PEM or SECURITY_PRIVATE_KEY_PEM is required")
 
         return cls(
             private_key_pem=private_key,
-            key_id=os.environ.get("SECURITY_JWT_KID", "security-1"),
-            issuer=os.environ.get("SECURITY_JWT_ISSUER", "verigence-security"),
-            audience=os.environ.get("SECURITY_JWT_AUDIENCE", "verigence-platform"),
+            key_id=_first_env("SECURITY_JWT_KID", "SECURITY_KEY_ID") or "security-1",
+            issuer=_first_env("SECURITY_JWT_ISSUER", "SECURITY_TOKEN_ISSUER")
+            or "verigence-security",
+            audience=_first_env("SECURITY_JWT_AUDIENCE", "SECURITY_TOKEN_AUDIENCE")
+            or "verigence-platform",
             token_ttl_seconds=int(os.environ.get("SECURITY_TOKEN_TTL_SECONDS", "300")),
             role_permission_bundles=_load_role_bundles(
                 os.environ.get("SECURITY_ROLE_PERMISSION_BUNDLES_JSON", "{}")
@@ -54,7 +59,7 @@ class Settings:
             integration_clients=_load_integration_clients(
                 os.environ.get("SECURITY_INTEGRATION_CLIENTS_JSON", "{}")
             ),
-            role_database_url=os.environ.get("SECURITY_ROLE_DATABASE_URL") or None,
+            role_database_url=_first_env("SECURITY_ROLE_DATABASE_URL", "DATABASE_URL") or None,
             session_ttl_seconds=int(os.environ.get("SECURITY_SESSION_TTL_SECONDS", "28800")),
             authorization_code_ttl_seconds=int(
                 os.environ.get("SECURITY_AUTHORIZATION_CODE_TTL_SECONDS", "300")
@@ -90,13 +95,15 @@ def _load_integration_clients(raw: str) -> dict[str, IntegrationClient]:
         if not isinstance(config, dict):
             raise TypeError(f"integration client {client_id} must be an object")
         secret = config.get("secret", "")
+        secret_sha256 = config.get("secret_sha256", "")
         public = bool(config.get("public", False))
-        if not public and (not isinstance(secret, str) or not secret):
-            raise ValueError(f"integration client {client_id} requires a secret")
-        if not isinstance(secret, str):
-            raise TypeError(f"integration client {client_id} secret must be a string")
+        if not isinstance(secret, str) or not isinstance(secret_sha256, str):
+            raise TypeError(f"integration client {client_id} secret fields must be strings")
+        if not public and not secret and not secret_sha256:
+            raise ValueError(f"integration client {client_id} requires a secret or secret_sha256")
         clients[client_id] = IntegrationClient(
             secret=secret,
+            secret_sha256=secret_sha256.lower(),
             permissions=frozenset(
                 _string_list(config.get("permissions", []), f"client {client_id} permissions")
             ),
@@ -119,3 +126,11 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _first_env(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
