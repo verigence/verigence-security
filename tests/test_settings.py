@@ -17,7 +17,7 @@ def test_from_env_accepts_existing_railway_security_names(monkeypatch, settings)
         json.dumps(
             {
                 "audit-core": {
-                    "secret_sha256": "a" * 64,
+                    "secret": "managed-client-secret",
                     "permissions": ["di.document.read"],
                     "redirect_uris": ["https://audit-core.test/oauth/callback"],
                 }
@@ -32,4 +32,4 @@ def test_from_env_accepts_existing_railway_security_names(monkeypatch, settings)
     assert resolved.issuer == "verigence-security"
     assert resolved.audience == "verigence-platform"
     assert resolved.role_database_url == "postgresql://example.invalid/security"
-    assert resolved.integration_clients["audit-core"].secret_sha256 == "a" * 64
+    assert resolved.integration_clients["audit-core"].secret == "managed-client-secret"
