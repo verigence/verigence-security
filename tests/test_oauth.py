@@ -33,6 +33,7 @@ def test_user_token_contains_default_cross_module_pc_permissions(settings):
 
 def test_service_flow_is_limited_to_integration_permissions(settings):
     app = create_app(settings)
+    app.state.auth_service.ensure_tenant("tenant-1")
     client = TestClient(app)
     response = client.post(
         "/oauth/token",
