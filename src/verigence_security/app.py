@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import logging
 from urllib.parse import parse_qs
@@ -329,7 +330,15 @@ def _authenticate_client(request: Request, settings: Settings) -> str | None:
     except (ValueError, UnicodeDecodeError):
         return None
     client = settings.integration_clients.get(client_id)
-    if client is None or client.public or not hmac.compare_digest(client.secret, client_secret):
+    if client is None or client.public:
+        return None
+
+    plaintext_matches = bool(client.secret) and hmac.compare_digest(client.secret, client_secret)
+    digest_matches = client.secret_sha256 is not None and hmac.compare_digest(
+        client.secret_sha256,
+        hashlib.sha256(client_secret.encode()).hexdigest(),
+    )
+    if not plaintext_matches and not digest_matches:
         return None
     return client_id
 
