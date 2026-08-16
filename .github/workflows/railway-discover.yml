@@ -18,75 +18,69 @@ jobs:
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SECURITY_RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
 
     steps:
-      - name: Check managed Railway credential availability
+      - name: Check managed Railway project token
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${RAILWAY_API_TOKEN:-}" ] && [ -z "${RAILWAY_TOKEN:-}" ]; then
-            echo "::error::Neither RAILWAY_API_TOKEN nor RAILWAY_TOKEN is configured for the Security repository."
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_TOKEN is not configured for the Security repository."
             exit 1
           fi
-          echo "Railway credential(s) are configured; testing them without exposing values"
+          echo "Security Railway project token is configured"
 
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
-      - name: Try account/workspace Railway token
-        if: env.RAILWAY_API_TOKEN != ''
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          env -u RAILWAY_TOKEN railway list --json > /tmp/projects.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          data = json.loads(Path('/tmp/projects.json').read_text())
-          print('Accessible Railway projects matching Verigence/Security:')
-          matches = 0
-          for item in data:
-              name = item.get('name') or item.get('project', {}).get('name') or ''
-              project_id = item.get('id') or item.get('project', {}).get('id') or ''
-              if 'verigence' in name.lower() or 'security' in name.lower():
-                  matches += 1
-                  print(f'- {name} | {project_id}')
-          if matches == 0:
-              print('- no matching project names found')
-          PY
-
-      - name: Try project-scoped Railway token
-        if: env.RAILWAY_TOKEN != ''
+      - name: Confirm Security project context
         shell: bash
         run: |
           set -euo pipefail
           env -u RAILWAY_API_TOKEN railway status --json > /tmp/status.json
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           data = json.loads(Path('/tmp/status.json').read_text())
-          print('Railway project-token status (safe identifiers only):')
+          project_id = data.get('id', '')
+          project_name = data.get('name', '')
+          expected = os.environ['SECURITY_RAILWAY_PROJECT_ID']
+          if project_id != expected:
+              raise SystemExit(f'Project token resolved unexpected project: {project_name} | {project_id}')
+          print(f'Security Railway project: {project_name} | {project_id}')
+          PY
 
-          def emit(prefix, value, depth=0):
-              if depth > 5:
-                  return
-              if isinstance(value, dict):
-                  safe = {}
-                  for key in ('id', 'name', 'projectId', 'projectName', 'environmentId',
-                              'environmentName', 'serviceId', 'serviceName', 'status'):
-                      if key in value and isinstance(value[key], (str, int, bool)):
-                          safe[key] = value[key]
-                  if safe:
-                      print(f'{prefix}: {safe}')
-                  for key in ('project', 'environment', 'service', 'services', 'resources'):
-                      if key in value:
-                          emit(f'{prefix}.{key}', value[key], depth + 1)
-              elif isinstance(value, list):
-                  for index, item in enumerate(value):
-                      emit(f'{prefix}[{index}]', item, depth + 1)
+      - name: Resolve environments
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway environment list --json > /tmp/environments.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/environments.json').read_text())
+          print('Railway environments:')
+          for item in data:
+              if isinstance(item, dict):
+                  print(f"- {item.get('name', '')} | {item.get('id', '')}")
+          PY
 
-          emit('status', data)
+      - name: Resolve services
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_API_TOKEN railway service list --json > /tmp/services.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('/tmp/services.json').read_text())
+          print('Railway services:')
+          for item in data:
+              if isinstance(item, dict):
+                  print(f"- {item.get('name', '')} | {item.get('id', '')}")
           PY
