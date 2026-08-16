@@ -17,6 +17,18 @@ def _decode(app, token: str) -> dict:
     return app.state.token_service.decode(token)
 
 
+def _decode_with_jwks(client: TestClient, settings, token: str) -> dict:
+    jwk = client.get("/.well-known/jwks.json").json()["keys"][0]
+    public_key = jwt.PyJWK.from_dict(jwk).key
+    return jwt.decode(
+        token,
+        public_key,
+        algorithms=["RS256"],
+        audience=settings.audience,
+        issuer=settings.issuer,
+    )
+
+
 def test_user_token_contains_default_cross_module_pc_permissions(settings):
     app = create_app(settings)
     issued = app.state.token_service.issue_user_access_token(
@@ -31,7 +43,7 @@ def test_user_token_contains_default_cross_module_pc_permissions(settings):
     assert "di.verification.write" not in claims["permissions"]
 
 
-def test_service_flow_is_limited_to_integration_permissions(settings):
+def test_service_flow_is_limited_to_integration_permissions_and_validates_via_jwks(settings):
     app = create_app(settings)
     app.state.auth_service.ensure_tenant("tenant-1")
     client = TestClient(app)
@@ -45,7 +57,7 @@ def test_service_flow_is_limited_to_integration_permissions(settings):
         },
     )
     assert response.status_code == 200
-    claims = _decode(app, response.json()["access_token"])
+    claims = _decode_with_jwks(client, settings, response.json()["access_token"])
     assert claims["sub"] == "audit-core"
     assert claims["tenant_id"] == "tenant-1"
     assert claims["actor_type"] == "SERVICE"
@@ -162,16 +174,7 @@ def test_jwks_validates_delegated_token_and_matches_di_contract(settings):
             "scope": "di.document.read",
         },
     )
-    token = response.json()["access_token"]
-    jwk = client.get("/.well-known/jwks.json").json()["keys"][0]
-    public_key = jwt.PyJWK.from_dict(jwk).key
-    claims = jwt.decode(
-        token,
-        public_key,
-        algorithms=["RS256"],
-        audience=settings.audience,
-        issuer=settings.issuer,
-    )
+    claims = _decode_with_jwks(client, settings, response.json()["access_token"])
 
     assert claims["iss"] == "verigence-security"
     assert claims["aud"] == "verigence-platform"
