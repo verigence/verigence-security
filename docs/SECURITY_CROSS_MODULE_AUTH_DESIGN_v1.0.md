@@ -1,30 +1,92 @@
 # Verigence Security — Cross-Module Authentication Design
 
 **Document ID:** VSEC-SD-INT-001  
-**Version:** 1.0  
+**Version:** 1.1  
 **Status:** APPROVED ARCHITECTURE INPUT  
 **Date:** 2026-08-15  
+**Updated:** 2026-08-16  
 **Initial consumer:** Verigence Audit Core -> Verigence Document Intelligence (DI)  
-**Owner decision:** System integration for module-owned/admin execution; OAuth delegated authorization for user-driven business workflows
+**Owner decision:** Security owns the complete Verigence authentication/OAuth lifecycle; modules are OAuth clients; system integration is used for module-owned/admin execution and OAuth delegation is used for user-driven downstream workflows
 
 ## 1. Purpose
 
 Security is the authority that authenticates actors and issues the effective authorization context used between Verigence modules.
 
-This design defines the Security capabilities required when Audit Core calls DI. The same pattern may be reused by other modules only where their own approved design requires it.
+This design defines both:
 
-Security SHALL prevent two unsafe shortcuts:
+1. the user-facing authentication/OAuth boundary through which Verigence modules obtain a Security user token; and
+2. the downstream service/delegated token flows used when one Verigence module calls another.
 
-1. a module minting its own downstream permissions or JWTs; and
-2. a module using a privileged service identity to bypass the authorization of a user-driven business action.
+Security SHALL prevent three unsafe shortcuts:
 
-## 2. Platform role and permission model
+1. a module implementing its own independent Verigence authentication/authorization authority;
+2. a module minting its own downstream permissions or JWTs; and
+3. a module using a privileged service identity to bypass the authorization of a user-driven business action.
+
+## 2. Security ownership boundary
+
+Security owns the complete Verigence authentication and OAuth authorization lifecycle.
+
+Verigence business modules such as Audit Core are OAuth clients of Security. They do not implement password/identity-provider logic, role resolution, permission calculation, JWT signing or token issuance.
+
+Security owns the canonical endpoints/behaviours for:
+
+```text
+/auth/login
+/auth/callback
+/auth/logout
+/session
+/oauth/authorize
+/oauth/token
+/.well-known/jwks.json
+```
+
+The exact HTTP payloads and session-storage mechanism are implementation contracts and may be versioned independently, but ownership does not move out of Security.
+
+An upstream identity provider such as Clerk may be used by Security to perform primary human authentication, MFA, SSO or social login. That provider is behind the Security boundary: other Verigence modules SHALL NOT need Clerk-specific validation or Clerk-specific authorization logic.
+
+The browser/mobile client may be redirected through Security for the normal OAuth authorization flow, but privileged token operations and confidential-client credentials SHALL NOT be exposed to browser JavaScript.
+
+A module may have its own OAuth redirect/callback endpoint solely to receive an authorization code from Security. That callback does not authenticate the user or calculate permissions; it completes the module's OAuth-client flow with Security.
+
+## 3. Initial user authentication and Verigence session
+
+The approved initial user flow is the standard OAuth authorization-code model with Security acting as the Verigence Authorization Server and authentication broker.
+
+Conceptually:
+
+```text
+User
+  -> Verigence module
+  -> Security /oauth/authorize
+  -> Security /auth/login when no valid Security session exists
+  -> upstream IdP through Security when required
+  -> Security /auth/callback
+  -> Security resolves Verigence user + Tenant membership + roles + effective permissions
+  -> Security establishes/uses the Verigence authentication session
+  -> Security returns an authorization code to the registered module redirect URI
+  -> module backend exchanges the code at Security /oauth/token
+  -> Security issues the Verigence USER access token
+```
+
+Rules:
+
+- Security is the only Verigence component that turns an authenticated human identity into a Verigence user authorization context.
+- The module SHALL NOT submit trusted `roles[]` or `permissions[]` for Security to copy into a token.
+- Security SHALL resolve the Verigence user, permitted Tenant membership, role assignments and approved direct grants from authoritative Security-owned data/configuration.
+- Security SHALL resolve role templates for the selected Tenant and calculate authoritative `permissions[]` before issuing a USER token.
+- A requested/selected Tenant must be validated against the authenticated user's membership; the caller cannot self-assert Tenant access.
+- `/auth/logout` terminates/revokes the applicable Security authentication session according to the implemented session contract.
+- `/session` reports the applicable Security authentication/session state without becoming an authorization bypass.
+- Public clients that cannot safely hold a secret SHALL use the approved authorization-code protection mechanism (PKCE); confidential module backends authenticate according to the registered OAuth-client contract.
+
+## 4. Platform role and permission model
 
 A Security role is a convenience bundle that may contain permissions belonging to multiple Verigence modules. Security SHALL resolve the user's Tenant-scoped role assignments and approved direct grants into one authoritative effective `permissions[]` set.
 
 The normal Security user access token therefore represents the user's **effective platform authorization for that Tenant**, not authorization for only the first module the user calls.
 
-For example, an approved PC role may resolve to a combination of Audit Core permissions plus DI permissions needed for PC activities performed indirectly through Audit Core. The exact PC/TL/PM/CRM/Executive permission names and contents belong to the canonical Security permission catalogue; this cross-module design does not invent them.
+For example, an approved PC role may resolve to a combination of Audit Core permissions plus DI permissions needed for PC activities performed indirectly through Audit Core. The approved PC/TL/PM/CRM defaults are defined in the canonical Security role-template design and remain Tenant-customizable under the approved administration rules.
 
 Rules:
 
@@ -38,9 +100,9 @@ Rules:
 
 This gives Security one canonical answer to what a user may do across the Verigence platform while retaining least privilege at each downstream call.
 
-## 3. Two supported flows
+## 5. Downstream OAuth/service flows
 
-### 3.1 System integration / service flow
+### 5.1 System integration / service flow
 
 Use this flow for module-owned administrative/system operations and for background continuation/retry of an operation that was already authorized and durably accepted under a user context.
 
@@ -62,19 +124,19 @@ Security SHALL:
 
 The service token SHALL NOT be used for a new PC/TL/PM/CRM/Executive workflow action merely because Audit Core is the module making the HTTP call.
 
-### 3.2 OAuth delegated user flow
+### 5.2 OAuth delegated user flow
 
 Use this flow when a user-driven synchronous business action requires Audit Core to call DI, including booking, delivery, evidence and review workflows.
 
 The approved pattern is OAuth 2.0 delegated token exchange / on-behalf-of semantics:
 
 ```text
-User -> Security user token -> Audit Core
+User -> Security USER token -> Audit Core
 Audit Core -> Security token exchange -> delegated downstream token
 Audit Core -> DI with delegated downstream token
 ```
 
-Security SHALL validate both the requesting Audit Core client/service and the subject user token before issuing a downstream token.
+Security SHALL validate both the requesting Audit Core client/service and the subject Security user token before issuing a downstream token.
 
 The downstream delegated token SHALL:
 
@@ -85,9 +147,9 @@ The downstream delegated token SHALL:
 - be short-lived and suitable only for the downstream operation/context;
 - not grant broader authority than the user and the Audit Core integration are jointly allowed to exercise.
 
-Audit Core SHALL NOT need to store user refresh tokens or long-lived delegated credentials.
+Audit Core SHALL NOT need to store user refresh tokens or long-lived delegated credentials for downstream DI delegation.
 
-## 4. Permission calculation
+## 6. Permission calculation
 
 For delegated issuance, Security SHALL calculate downstream authority as no broader than:
 
@@ -103,7 +165,7 @@ This rule is essential for Audit Core. For example, a PC who may capture/upload 
 
 The downstream token carries only the requested/approved downstream subset, even though the subject user's original Security token may contain a larger platform permission bundle.
 
-## 5. Background continuation
+## 7. Background continuation
 
 When a user-driven operation has already been authorized and Audit Core has durably accepted/committed it, later background polling, retry, recovery or processing continuation may use the Audit Core `SERVICE` identity.
 
@@ -111,7 +173,7 @@ This is a continuation of existing authorized work, not a new user authorization
 
 Security is not required to keep the original user access token alive for this purpose. Audit Core retains the initiating actor/correlation/operation linkage in its own durable audit metadata.
 
-## 6. Fail-closed rules
+## 8. Fail-closed rules
 
 Security SHALL NOT permit Audit Core to silently substitute a service token when delegated issuance for a new user-driven action is denied or unavailable.
 
@@ -119,7 +181,9 @@ If delegated token exchange is denied, the downstream operation is denied. If Se
 
 No direct shared API-key bypass between Audit Core and DI is part of this design.
 
-## 7. JWT compatibility contract
+A Verigence module SHALL NOT bypass Security by accepting an upstream IdP token as sufficient Verigence authorization unless a separately approved Security design explicitly introduces such a contract.
+
+## 9. JWT compatibility contract
 
 The current DI implementation validates Security-issued JWTs through Security JWKS and currently expects:
 
@@ -135,22 +199,23 @@ Security implementation SHALL remain compatible with that contract unless Securi
 
 For delegated tokens, the canonical caller/delegation attribution is the OAuth token-exchange actor claim `act`, with `act.sub` identifying the requesting service/client (initially `audit-core`). DI may ignore the additional claim for authorization but it remains available for audit attribution.
 
-## 8. Phase-1 token endpoint contract
+## 10. OAuth token endpoint contract
 
-Security SHALL expose one internal OAuth token endpoint for confidential module clients:
+Security SHALL expose:
 
 ```text
 POST /oauth/token
 ```
 
-Phase 1 supports:
+The approved OAuth responsibilities are:
 
-1. `grant_type=client_credentials` for module-owned/admin/background `SERVICE` tokens; and
-2. `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with a Security user access token as `subject_token` for user-driven delegated calls.
+1. `grant_type=authorization_code` for the initial module OAuth flow after Security-owned user authentication/authorization;
+2. `grant_type=client_credentials` for module-owned/admin/background `SERVICE` tokens; and
+3. `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with a Security USER access token as `subject_token` for user-driven delegated downstream calls.
 
-The requesting module authenticates as a confidential client. For the initial Railway deployment, client credentials are supplied through managed environment secrets and HTTP Basic client authentication. No client secret is committed to source control. This is an implementation bootstrap mechanism, not a private Audit Core-to-DI bypass: Security validates the client and Security alone issues the downstream JWT.
+The requesting confidential module authenticates as a registered OAuth client. For the initial Railway deployment, confidential-client credentials may be supplied through managed environment secrets and HTTP Basic client authentication. No client secret is committed to source control.
 
-Requested downstream permissions are supplied as OAuth `scope` values. Security denies the request if any requested scope is outside the permitted intersection; it does not silently elevate or substitute authority.
+Requested downstream permissions for service/delegated flows are supplied as OAuth `scope` values. Security denies the request if any requested scope is outside the permitted authority; it does not silently elevate or substitute authority.
 
 Security signs JWTs with RS256 using a managed private key and exposes the public key through:
 
@@ -158,31 +223,44 @@ Security signs JWTs with RS256 using a managed private key and exposes the publi
 GET /.well-known/jwks.json
 ```
 
-Role-to-permission bundles and module-integration permission bundles are configuration-driven in this first implementation so that no unapproved business permission catalogue is hard-coded.
+## 11. Credential and session handling
 
-## 9. Credential handling
+Security owns:
 
-Security owns the mechanism by which Audit Core proves its workload identity to obtain service or delegated tokens. The implementation must use managed secret/workload credentials and rotation; Audit Core must not contain a hard-coded shared credential.
+- the mechanism by which a module proves its OAuth-client/workload identity;
+- Security's upstream IdP credentials/configuration;
+- Security signing keys;
+- Security authentication/session state and its revocation/expiry rules;
+- OAuth authorization-code issuance/validation; and
+- service/delegated token issuance.
 
-The initial confidential-client secret and signing key are deployment secrets. A future workload-identity mechanism may replace the bootstrap credential without changing the token semantics defined here.
+Managed secrets and rotation are required. Modules must not contain a hard-coded shared credential.
 
-## 10. Required Security audit events
+A future workload-identity mechanism may replace bootstrap client secrets without changing the token semantics defined here.
+
+## 12. Required Security audit events
 
 At minimum, Security SHALL retain safe audit records for:
 
+- interactive login success/denial;
+- logout/session termination where applicable;
+- authorization-code issuance/denial;
+- authorization-code token exchange success/denial;
 - service-token issuance/denial;
 - delegated token-exchange issuance/denial;
 - requesting client/service identity;
-- subject user for delegated exchange;
+- subject user for user/delegated flows;
 - Tenant;
 - requested/effective permission set or permission-set reference;
 - correlation/request identifier where available;
 - issuance/expiry timestamps and outcome.
 
-Raw bearer tokens and secrets SHALL NOT be logged.
+Raw bearer tokens, authorization codes, session secrets and client secrets SHALL NOT be logged.
 
-## 11. Implementation dependency
+## 13. Implementation dependencies
 
-This design creates Security implementation task `SEC-INT-001` in `docs/SECURITY_IMPLEMENTATION_TASKS.md`.
+Existing Security task `SEC-INT-001` remains the completed implementation for platform permission JWTs, `client_credentials`, JWKS and downstream delegated token exchange.
 
-Audit Core G-01 cannot be implementation-complete until that Security task is implemented and a controlled Audit Core -> Security -> DI authentication test passes for both the service flow and delegated user flow.
+This v1.1 architecture adds Security task `SEC-AUTH-001` for the missing Security-owned interactive authentication/session and OAuth authorization-code flow.
+
+The current DEV deployment issue where `/oauth/token` returns HTTP 404 is an operational/deployment gap, not a reason to redefine the already-approved token semantics. It must be resolved before Audit Core cross-module DEV verification can complete.
