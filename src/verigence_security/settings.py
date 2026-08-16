@@ -12,7 +12,6 @@ class IntegrationClient:
     permissions: frozenset[str]
     redirect_uris: frozenset[str] = field(default_factory=frozenset)
     public: bool = False
-    secret_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,15 +94,13 @@ def _load_integration_clients(raw: str) -> dict[str, IntegrationClient]:
         if not isinstance(config, dict):
             raise TypeError(f"integration client {client_id} must be an object")
         secret = config.get("secret", "")
-        secret_sha256 = config.get("secret_sha256", "")
         public = bool(config.get("public", False))
-        if not isinstance(secret, str) or not isinstance(secret_sha256, str):
-            raise TypeError(f"integration client {client_id} secret fields must be strings")
-        if not public and not secret and not secret_sha256:
-            raise ValueError(f"integration client {client_id} requires a secret or secret_sha256")
+        if not public and (not isinstance(secret, str) or not secret):
+            raise ValueError(f"integration client {client_id} requires a secret")
+        if not isinstance(secret, str):
+            raise TypeError(f"integration client {client_id} secret must be a string")
         clients[client_id] = IntegrationClient(
             secret=secret,
-            secret_sha256=secret_sha256.lower(),
             permissions=frozenset(
                 _string_list(config.get("permissions", []), f"client {client_id} permissions")
             ),
