@@ -1,0 +1,152 @@
+name: Setup Security auth in DEV
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/security-dev-setup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-auth-dev-setup
+  cancel-in-progress: false
+
+jobs:
+  setup-dev:
+    name: Apply auth schema and provision retained DEV test user
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+      SECURITY_DEV_TEST_USER_PASSWORD: ${{ secrets.SECURITY_DEV_TEST_USER_PASSWORD }}
+      SECURITY_DEV_TEST_USER_EMAIL: verigence.security.devtest@example.com
+      SECURITY_DEV_TEST_TENANT_ID: dev-auth-test
+      SECURITY_DEV_TEST_ROLE: PC
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security
+        run: python -m pip install -e .
+
+      - name: Resolve managed DEV database connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          if [ -z "$raw" ]; then
+            echo "::error::Neither MIGRATION_DATABASE_URL nor DEV_DATABASE_URL is configured."
+            exit 1
+          fi
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*) database_url="$raw" ;;
+            postgres://*) database_url="postgresql://${raw#postgres://}" ;;
+            *)
+              echo "::error::Configured DEV database secret is not a PostgreSQL URL."
+              exit 1
+              ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "SECURITY_ROLE_DATABASE_URL=$database_url" >> "$GITHUB_ENV"
+
+      - name: Apply Security SQL migrations
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import psycopg
+
+          database_url = os.environ["SECURITY_ROLE_DATABASE_URL"]
+          with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+              for path in sorted(Path("database").glob("*.sql")):
+                  cursor.execute(path.read_text(encoding="utf-8"))
+              connection.commit()
+          print("Security DEV SQL migrations applied")
+          PY
+
+      - name: Verify Security auth schema
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          expected = {
+              "security_role_templates",
+              "security_role_template_audit",
+              "security_tenants",
+              "security_users",
+              "security_user_tenant_memberships",
+              "security_auth_sessions",
+              "security_oauth_authorization_requests",
+              "security_oauth_authorization_codes",
+              "security_auth_audit",
+          }
+          with psycopg.connect(os.environ["SECURITY_ROLE_DATABASE_URL"]) as connection, connection.cursor() as cursor:
+              cursor.execute(
+                  "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY(%s)",
+                  (list(expected),),
+              )
+              found = {row[0] for row in cursor.fetchall()}
+          missing = expected - found
+          if missing:
+              raise SystemExit(f"Missing Security DEV tables after migration: {sorted(missing)}")
+          print(f"Security DEV auth schema verification passed ({len(found)} expected tables present)")
+          PY
+
+      - name: Check managed Clerk test-user credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CLERK_SECRET_KEY:-}" ]; then
+            echo "::error::CLERK_SECRET_KEY is not configured for the Security repository."
+            exit 1
+          fi
+          if [ -z "${SECURITY_DEV_TEST_USER_PASSWORD:-}" ]; then
+            echo "::error::SECURITY_DEV_TEST_USER_PASSWORD is not configured for the Security repository."
+            exit 1
+          fi
+          echo "Required managed Clerk/test-user credentials are present"
+
+      - name: Provision retained DEV test user and Tenant membership
+        run: python scripts/provision_dev_test_user.py
+
+      - name: Verify retained DEV membership
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          email = os.environ["SECURITY_DEV_TEST_USER_EMAIL"]
+          tenant_id = os.environ["SECURITY_DEV_TEST_TENANT_ID"]
+          with psycopg.connect(os.environ["SECURITY_ROLE_DATABASE_URL"]) as connection, connection.cursor() as cursor:
+              cursor.execute(
+                  """
+                  SELECT u.user_id, m.roles, m.active
+                  FROM security_users u
+                  JOIN security_user_tenant_memberships m ON m.user_id = u.user_id
+                  WHERE u.email = %s AND m.tenant_id = %s AND u.active = TRUE
+                  """,
+                  (email, tenant_id),
+              )
+              row = cursor.fetchone()
+          if row is None or row[2] is not True or "PC" not in row[1]:
+              raise SystemExit("Retained DEV test-user membership was not verified")
+          print(f"Retained DEV test user verified: {email}, Tenant={tenant_id}, role=PC")
+          PY
