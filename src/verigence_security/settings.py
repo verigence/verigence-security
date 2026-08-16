@@ -44,6 +44,7 @@ class Settings:
         if not private_key:
             raise RuntimeError("SECURITY_JWT_PRIVATE_KEY_PEM or SECURITY_PRIVATE_KEY_PEM is required")
 
+        raw_database_url = _first_env("SECURITY_ROLE_DATABASE_URL", "DATABASE_URL")
         return cls(
             private_key_pem=private_key,
             key_id=_first_env("SECURITY_JWT_KID", "SECURITY_KEY_ID") or "security-1",
@@ -58,7 +59,7 @@ class Settings:
             integration_clients=_load_integration_clients(
                 os.environ.get("SECURITY_INTEGRATION_CLIENTS_JSON", "{}")
             ),
-            role_database_url=_first_env("SECURITY_ROLE_DATABASE_URL", "DATABASE_URL") or None,
+            role_database_url=normalize_database_url(raw_database_url) if raw_database_url else None,
             session_ttl_seconds=int(os.environ.get("SECURITY_SESSION_TTL_SECONDS", "28800")),
             authorization_code_ttl_seconds=int(
                 os.environ.get("SECURITY_AUTHORIZATION_CODE_TTL_SECONDS", "300")
@@ -77,6 +78,16 @@ class Settings:
             clerk_oauth_client_secret=os.environ.get("CLERK_OAUTH_CLIENT_SECRET", ""),
             clerk_oauth_redirect_uri=os.environ.get("CLERK_OAUTH_REDIRECT_URI", ""),
         )
+
+
+def normalize_database_url(raw: str) -> str:
+    if raw.startswith("postgresql+psycopg://"):
+        return "postgresql://" + raw[len("postgresql+psycopg://") :]
+    if raw.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + raw[len("postgresql+asyncpg://") :]
+    if raw.startswith("postgres://"):
+        return "postgresql://" + raw[len("postgres://") :]
+    return raw
 
 
 def _load_role_bundles(raw: str) -> dict[str, frozenset[str]]:
