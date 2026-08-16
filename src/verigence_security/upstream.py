@@ -42,7 +42,7 @@ class ClerkOAuthProvider:
                 "response_type": "code",
                 "client_id": self.settings.clerk_oauth_client_id,
                 "redirect_uri": self.settings.clerk_oauth_redirect_uri,
-                "scope": "openid profile email",
+                "scope": "profile email",
                 "state": state,
             }
         )
