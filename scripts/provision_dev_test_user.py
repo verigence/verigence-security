@@ -7,21 +7,24 @@ import httpx
 
 from verigence_security.auth_store import PostgresAuthStore
 from verigence_security.role_templates import PostgresRoleTemplateStore, RoleTemplateService
+from verigence_security.settings import normalize_database_url
 
 CLERK_API = "https://api.clerk.com/v1"
 
 
 def main() -> None:
     clerk_secret = _required("CLERK_SECRET_KEY")
-    database_url = (
+    raw_database_url = (
         os.environ.get("SECURITY_ROLE_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
         or os.environ.get("MIGRATION_DATABASE_URL")
         or os.environ.get("DEV_DATABASE_URL")
     )
-    if not database_url:
+    if not raw_database_url:
         raise RuntimeError(
-            "SECURITY_ROLE_DATABASE_URL, MIGRATION_DATABASE_URL or DEV_DATABASE_URL is required"
+            "SECURITY_ROLE_DATABASE_URL, DATABASE_URL, MIGRATION_DATABASE_URL or DEV_DATABASE_URL is required"
         )
+    database_url = normalize_database_url(raw_database_url)
 
     email = os.environ.get("SECURITY_DEV_TEST_USER_EMAIL", "verigence.security.devtest@example.com")
     password = _required("SECURITY_DEV_TEST_USER_PASSWORD")
