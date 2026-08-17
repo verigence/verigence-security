@@ -22,7 +22,8 @@ class PlatformTokenResponse(BaseModel):
 
 
 class PlatformPasswordChangeRequest(BaseModel):
-    newPassword: SecretStr
+    # Legacy local-password migration debt only. Do not use in the active Clerk backend flow.
+    newPassword: str = Field(min_length=1)
 
 
 class PlatformMeResponse(BaseModel):
