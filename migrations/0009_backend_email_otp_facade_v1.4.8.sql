@@ -17,8 +17,7 @@ SET description=(
   'validates the onboarding key, creates a banned Clerk identity server-to-server, forces the '
   'signup email to unverified, sends and verifies Clerk email OTP through the Backend API, then '
   'creates a PENDING Security USER for administrator approval. Mobile/Web never calls Clerk.'
-),
-    introduced_version='1.4.8'
+)
 WHERE control_key='admin.global_user_onboarding';
 
 COMMIT;
