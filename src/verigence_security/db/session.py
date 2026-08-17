@@ -11,6 +11,26 @@ from sqlalchemy.orm import Session, sessionmaker
 from verigence_security.config import Settings
 
 
+def _runtime_database_url(database_url: str) -> str:
+    """Normalize Railway/Neon PostgreSQL URLs to the installed psycopg v3 driver.
+
+    Railway and Neon commonly expose `postgres://` / `postgresql://` URLs. SQLAlchemy interprets
+    bare `postgresql://` as the legacy psycopg2 DBAPI, while this service intentionally installs
+    `psycopg[binary]` v3. Normalize only PostgreSQL URLs; leave any other supported SQLAlchemy URL
+    unchanged for tests/tooling.
+    """
+
+    if database_url.startswith("postgresql+psycopg://"):
+        return database_url
+    if database_url.startswith("postgresql+asyncpg://"):
+        return "postgresql+psycopg://" + database_url.removeprefix("postgresql+asyncpg://")
+    if database_url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + database_url.removeprefix("postgresql://")
+    if database_url.startswith("postgres://"):
+        return "postgresql+psycopg://" + database_url.removeprefix("postgres://")
+    return database_url
+
+
 @lru_cache(maxsize=8)
 def _engine_for_url(database_url: str) -> Engine:
     return create_engine(
@@ -23,9 +43,9 @@ def _engine_for_url(database_url: str) -> Engine:
 def build_engine(settings: Settings) -> Engine | None:
     if not settings.database_url:
         return None
-    # Reuse one Engine/pool per configured URL. Creating an Engine per request would defeat the
+    # Reuse one Engine/pool per normalized URL. Creating an Engine per request would defeat the
     # Neon pooled-runtime design and leak connection pools across requests.
-    return _engine_for_url(settings.database_url)
+    return _engine_for_url(_runtime_database_url(settings.database_url))
 
 
 @lru_cache(maxsize=8)
@@ -40,7 +60,7 @@ def _session_factory_for_url(database_url: str) -> sessionmaker[Session]:
 def build_session_factory(settings: Settings) -> sessionmaker[Session] | None:
     if not settings.database_url:
         return None
-    return _session_factory_for_url(settings.database_url)
+    return _session_factory_for_url(_runtime_database_url(settings.database_url))
 
 
 def session_dependency(factory: sessionmaker[Session] | None) -> Generator[Session, None, None]:
@@ -51,12 +71,14 @@ def session_dependency(factory: sessionmaker[Session] | None) -> Generator[Sessi
 
 
 def database_is_ready(settings: Settings) -> bool:
-    engine = build_engine(settings)
-    if engine is None:
-        return False
     try:
+        engine = build_engine(settings)
+        if engine is None:
+            return False
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
         return True
-    except SQLAlchemyError:
+    except (SQLAlchemyError, ImportError, ValueError):
+        # Readiness must fail closed with HTTP 503 rather than raising HTTP 500 for a bad runtime
+        # DB URL/driver/configuration. The underlying exception remains an operational concern.
         return False
