@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,10 +87,8 @@ class ClerkBackendClient:
         except Exception:
             # Best-effort compensation. A failed onboarding preparation must not leave a usable
             # Clerk identity. The user was created banned, so even failed cleanup remains safe.
-            try:
+            with suppress(Exception):
                 self.delete_user(clerk_user_id)
-            except Exception:
-                pass
             raise
         return clerk_user_id, email_address_id
 
@@ -336,9 +335,9 @@ class ClerkBackendClient:
                 and value.strip().lower() == expected
                 and isinstance(item_id, str)
                 and item_id
+                and (primary_id is None or item_id == primary_id)
             ):
-                if primary_id is None or item_id == primary_id:
-                    return item_id
+                return item_id
         raise ClerkBackendError("Clerk user response did not contain the signup email address ID")
 
     @staticmethod
