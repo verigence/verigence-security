@@ -1,21 +1,24 @@
 # Verigence Security — Implementation Status v1.4.6
 
-**Status:** UNDER VALIDATION  
-**Current focus:** Clerk-owned email OTP onboarding.
+**Status:** SUPERSEDED / HISTORICAL  
+**Superseded:** 2026-08-17 by v1.4.8.
 
-The active Phase 1 model is now:
+The v1.4.6 client-Clerk SDK/session-JWT path is no longer approved.
+
+Current status:
 
 ```text
-Security onboarding-key + duplicate precheck
-  -> short-lived signup attempt
-  -> client-to-Clerk email/password signup
-  -> Clerk email OTP
-  -> Clerk verified session JWT
-  -> Security completion
-  -> global USER=PENDING
-  -> Security Admin approval
+docs/IMPLEMENTATION_STATUS.md
 ```
 
-The v1.4.5 backend Clerk `POST /v1/users` flow is superseded for active onboarding because backend-created email addresses are automatically treated as verified by Clerk. Password is no longer part of the active Security onboarding API.
+Current authoritative authentication design:
 
-Validation is pending exact-head Security CI, Neon/PostgreSQL, merge, Railway DEV promotion, and one live Clerk OTP E2E with manual Clerk inspection before cleanup.
+```text
+docs/SECURITY_BACKEND_AUTH_AND_EMAIL_OTP_DESIGN_v1.4.8.md
+```
+
+Active boundary:
+
+```text
+Web / Mobile -> Audit Core -> Security -> Clerk Backend API
+```

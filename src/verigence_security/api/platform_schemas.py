@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 class PlatformLoginRequest(BaseModel):
     loginName: str = Field(min_length=1, max_length=320)
-    password: str = Field(min_length=1)
+    password: SecretStr
+    totpCode: SecretStr | None = None
 
 
 class PlatformTokenResponse(BaseModel):
@@ -21,6 +22,7 @@ class PlatformTokenResponse(BaseModel):
 
 
 class PlatformPasswordChangeRequest(BaseModel):
+    # Legacy local-password migration debt only. Do not use in the active Clerk backend flow.
     newPassword: str = Field(min_length=1)
 
 

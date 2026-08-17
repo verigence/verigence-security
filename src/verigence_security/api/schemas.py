@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from verigence_security.core.types import ActorType, GeoIntegrityStatus, GeoSource
 
@@ -22,6 +22,12 @@ class AccessSessionRequest(BaseModel):
     tenantId: UUID
     deviceId: UUID
     geo: GeoContext
+
+
+class CredentialAccessSessionRequest(AccessSessionRequest):
+    identifier: str = Field(min_length=1, max_length=320)
+    password: SecretStr
+    totpCode: SecretStr | None = None
 
 
 class RefreshAccessSessionRequest(BaseModel):

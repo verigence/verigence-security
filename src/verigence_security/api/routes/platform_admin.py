@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.identity import ClerkJwtIdentityProvider
-from verigence_security.api.dependencies import bearer_token
+from verigence_security.adapters.identity import AuthenticatedIdentity
 from verigence_security.api.platform_dependencies import (
     platform_claims,
     platform_session,
     require_platform_permission,
 )
 from verigence_security.api.platform_schemas import (
+    PlatformLoginRequest,
     PlatformMeResponse,
     PlatformTenantCreateRequest,
     PlatformTenantResponse,
@@ -21,52 +22,65 @@ from verigence_security.api.platform_schemas import (
     PlatformTokenResponse,
 )
 from verigence_security.config import Settings, get_settings
+from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.platform_admin import PlatformTenantService
-from verigence_security.services.platform_identity import PlatformIdentityService
+from verigence_security.services.platform_identity import PlatformIdentityResult, PlatformIdentityService
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
 
 
+def _credential_identity(body: PlatformLoginRequest, settings: Settings) -> AuthenticatedIdentity:
+    authenticated = ClerkCredentialService(settings).authenticate(
+        identifier=body.loginName,
+        password=body.password.get_secret_value(),
+        totp_code=body.totpCode.get_secret_value() if body.totpCode is not None else None,
+    )
+    return AuthenticatedIdentity(
+        provider="CLERK",
+        provider_subject=authenticated.clerk_user.user_id,
+        session_id=f"clerk-backend-{uuid4()}",
+    )
+
+
+def _token_response(result: PlatformIdentityResult) -> dict[str, object]:
+    return {
+        "accessToken": result.access_token,
+        "expiresAtUtc": result.expires_at_utc,
+        "userId": result.user_id,
+        "roles": list(result.roles),
+        "permissions": list(result.permissions),
+        "mustChangePassword": False,
+    }
+
+
 @router.post("/bootstrap/claim", response_model=PlatformTokenResponse)
 def claim_platform_super_admin(
+    body: PlatformLoginRequest,
     request: Request,
-    authorization_token: str = Depends(bearer_token),
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    identity = ClerkJwtIdentityProvider(settings).verify(authorization_token)
+    """Backend-only first Super Admin claim; Clerk credentials never leave Security."""
+
+    identity = _credential_identity(body, settings)
     result = PlatformIdentityService(session, settings).bootstrap_claim(
         identity=identity,
         correlation_id=request.state.correlation_id,
     )
-    return {
-        "accessToken": result.access_token,
-        "expiresAtUtc": result.expires_at_utc,
-        "userId": result.user_id,
-        "roles": list(result.roles),
-        "permissions": list(result.permissions),
-        "mustChangePassword": False,
-    }
+    return _token_response(result)
 
 
 @router.post("/auth/login", response_model=PlatformTokenResponse)
 def platform_login(
-    authorization_token: str = Depends(bearer_token),
+    body: PlatformLoginRequest,
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    """Exchange a Clerk-authenticated human identity for a Security Platform Admin JWT."""
+    """Verify credentials through Clerk Backend API and issue Security Platform Admin JWT."""
 
-    identity = ClerkJwtIdentityProvider(settings).verify(authorization_token)
+    identity = _credential_identity(body, settings)
     result = PlatformIdentityService(session, settings).login(identity=identity)
-    return {
-        "accessToken": result.access_token,
-        "expiresAtUtc": result.expires_at_utc,
-        "userId": result.user_id,
-        "roles": list(result.roles),
-        "permissions": list(result.permissions),
-        "mustChangePassword": False,
-    }
+    return _token_response(result)
 
 
 @router.get("/me", response_model=PlatformMeResponse)

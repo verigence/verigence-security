@@ -1,103 +1,115 @@
 # Verigence Security — Implementation Progress Tracker
 
-**Status:** POINTER TO CURRENT VERSIONED TRACKER  
-**Last updated:** 2026-08-15
+**Status:** ACTIVE POINTER  
+**Last updated:** 2026-08-17
 
-The current canonical execution tracker is:
-
-```text
-docs/IMPLEMENTATION_PROGRESS_TRACKER_v1.4.2.md
-```
-
-## Current governing model
-
-- `SECURITY_PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_DESIGN_v1.4.5.md`: Phase 1 normal USER registration is single-submit self-onboarding. Email is the sign-in ID; Indian mobile is Verigence-only; no invitation, bind step, separate username or MFA is used.
-- `SECURITY_GLOBAL_USER_ONBOARDING_DESIGN_v1.4.2.md`: human USER identity remains Platform-global and one-time; v1.4.5 supersedes its invitation/bind registration sequence.
-- `SECURITY_SUPER_ADMIN_AUTHORITY_DESIGN_v1.4.3.md`: one built-in `platform.super_admin` role supplies full effective Security authority and inherits future ACTIVE permissions.
-- `SECURITY_INITIAL_SUPER_ADMIN_PROVISIONING_DESIGN_v1.4.4.md`: initial environment administrator is controlled setup data selected by immutable Clerk `user_...` ID.
-
-Tenant membership is not a USER onboarding/access prerequisite. The same USER may receive Tenant-scoped authorization across multiple Tenants.
-
-## Current promoted state
+## Current canonical authentication design
 
 ```text
-Runtime code commit:       7765e72a6078a15981cffb42c0d7e3bdbdc269de
-Phase 1 self-onboarding:   DONE / DEPLOYED
-Global USER onboarding:    DONE / DEPLOYED / registration flow amended by v1.4.5
-Super Admin authority:     DONE / DEPLOYED
-Initial Super Admin v1.4.4 DONE / PROVISIONED / DEPLOYED
-Feature Security CI:       31779990307 — PASS
-Feature Neon/PostgreSQL:   31779986825 — PASS
-Post-merge Security CI:    31780116228 — PASS
-Railway DEV:               31780116188 — PASS
-readiness/liveness/correlation: PASS
+docs/SECURITY_BACKEND_AUTH_AND_EMAIL_OTP_DESIGN_v1.4.8.md
 ```
 
-## Frozen Phase 1 registration flow
+The active channel boundary is:
 
 ```text
-User submits:
-  onboarding key
-  first name
-  last name
-  email
-  Indian mobile
-  password
-       ↓
-Security validates onboarding key + email/mobile uniqueness
-       ↓
-Security -> Clerk POST /v1/users
-  first_name + last_name + email_address + password
-  NO phone
-  NO username
-       ↓
-Clerk returns user_...
-       ↓
-Security creates USER=PENDING + CLERK mapping + PENDING_ADMIN_APPROVAL
-       ↓
-Security Admin/Super Admin later activates USER
+Web / Mobile -> Audit Core -> Security -> Clerk Backend API
 ```
 
-Password is transient registration transport only and is never stored, hashed, logged or audited by Security. MFA is deferred to Phase 2.
+There is no approved Web/Mobile direct-Clerk path.
 
-Detailed v1.4.5 evidence:
+## Current implementation candidate
 
 ```text
-docs/PHASE1_SELF_ONBOARDING_CLERK_INTEGRATION_TEST_REPORT_v1.4.5.md
+Branch: feat/signup-approval-v1
+Status: IMPLEMENTED / VALIDATION IN PROGRESS
+Base:   Security dev
 ```
 
-DEV initial administrator remains:
+Implemented scope:
 
 ```text
-Clerk User ID:    user_3HtNkIWp32cD9HC7KzDbZdJkr2h
-Security user_id: 55d20cae-406d-4918-9a9d-bc63dfcd633c
-Role:             platform.super_admin
-Status:           ACTIVE
+signup start
+  -> Security validates onboarding key/duplicates
+  -> Clerk user created banned
+  -> email explicitly reset unverified
+  -> Clerk email OTP prepared
+
+signup verify
+  -> OTP submitted to Security
+  -> Clerk Backend attempt_verification
+  -> Security USER=PENDING
+  -> PENDING_ADMIN_APPROVAL
+  -> Clerk remains banned until administrator activation
+
+normal login
+  -> Security receives identifier/password/(optional TOTP)
+  -> Clerk Backend verifies credentials
+  -> Security applies Tenant/device/geo/access policy
+  -> Verigence Security JWT
+
+Platform Admin login/bootstrap
+  -> same backend credential boundary
+  -> existing Platform authorization/token service
 ```
 
-## Current execution pointer
+No password, email OTP or TOTP value is persisted by Security.
+
+## Route contract
+
+Active:
 
 ```text
-Increment I — DI authorization alignment      DONE
-       ↓
-Increment J — Security -> DI deployed E2E    DEFERRED / NOT STARTED
-       ↓
-Resume only on explicit user direction
+POST /security/v1/onboarding/users
+POST /security/v1/onboarding/users/{signupAttemptId}/verify-email
+POST /security/v1/onboarding/users/{signupAttemptId}/resend-email-code
+POST /security/v1/auth/login
+POST /security/v1/platform/auth/login
+POST /security/v1/platform/bootstrap/claim
 ```
 
-### DI write-protection rule for Increment J
-
-No write change may be made to `verigence/verigence-di` without explicit user approval first.
-
-If a DI modification appears necessary, first disclose:
+Retired from the active onboarding contract:
 
 ```text
-exact file path(s)
-why each file needs to change
-exact intended change
-expected effect/risk
+POST /security/v1/onboarding/users/{signupAttemptId}/complete
+Authorization: Bearer <Clerk session JWT>
 ```
 
-Only after explicit approval may the DI repository be modified. DI may be inspected/read for diagnosis without making changes.
+Deprecated compatibility only:
 
-Do not reintroduce Clerk invitations, Tenant-scoped identity onboarding, Tenant membership for onboarding, a separate Phase 1 username, dummy Clerk phone numbers, or Phase 1 MFA.
+```text
+POST /security/v1/access-sessions
+```
+
+The deprecated bridge must not be used by the new Audit Core/Web/Mobile path.
+
+## Validation sequence
+
+```text
+1. Security CI
+2. static/design integrity
+3. compile + Ruff + Mypy
+4. route-contract gate
+5. pytest
+6. package build
+7. PostgreSQL migration validation
+8. Railway DEV promotion
+9. live Clerk email OTP onboarding E2E
+10. live credential login -> Security JWT E2E
+```
+
+Only after all relevant gates pass may this become the promoted `dev` authentication baseline.
+
+## Preserved architecture
+
+- Security remains the identity, authorization and access-policy authority.
+- Clerk remains the human credential store/verifier only.
+- Global USER and administrator approval semantics are unchanged.
+- Tenant RBAC remains Security-owned.
+- DI authorization/system integration work already completed is not changed by this increment.
+- No DI repository change is part of v1.4.8.
+
+## Historical documents
+
+`SECURITY_PHASE1_CLERK_EMAIL_OTP_DESIGN_v1.4.6.md` and
+`CLERK_EMAIL_OTP_INTEGRATION_CONTRACT_v1.4.6.md` are explicitly marked superseded. Git history retains their
+client-Clerk design for traceability, but it is not an implementation source.

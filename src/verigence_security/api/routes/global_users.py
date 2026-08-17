@@ -3,18 +3,16 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy.orm import Session
 
 from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
-from verigence_security.adapters.identity import AuthenticatedIdentity
-from verigence_security.api.dependencies import bearer_token, identity_from_token, source_ip
+from verigence_security.api.dependencies import source_ip
 from verigence_security.api.platform_dependencies import (
     platform_session,
     require_platform_permission,
 )
 from verigence_security.config import Settings, get_settings
-from verigence_security.core.errors import security_error
 from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
 from verigence_security.services.phase1_self_onboarding import Phase1SelfOnboardingService
 
@@ -31,6 +29,11 @@ class GlobalUserOnboardingRequest(BaseModel):
     lastName: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=3, max_length=320)
     mobile: str = Field(min_length=10, max_length=40)
+    password: SecretStr
+
+
+class EmailOtpRequest(BaseModel):
+    code: SecretStr
 
 
 class GlobalUserStatusRequest(BaseModel):
@@ -46,17 +49,13 @@ def _clerk(settings: Settings) -> ClerkBackendClient:
     try:
         return ClerkBackendClient(settings)
     except ClerkBackendError as exc:
-        raise HTTPException(status_code=503, detail="Clerk lifecycle integration is not configured") from exc
+        raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
 
 
-def _clerk_identity(
-    token: str = Depends(bearer_token),
-    settings: Settings = Depends(get_settings),
-) -> AuthenticatedIdentity:
-    identity = identity_from_token(token, settings)
-    if identity.provider != "CLERK":
-        raise security_error("AUTH_TOKEN_INVALID")
-    return identity
+def _clerk_failure(exc: ClerkBackendError) -> HTTPException:
+    if exc.status_code in {400, 409, 422}:
+        return HTTPException(status_code=422, detail="Identity provider rejected the signup request")
+    return HTTPException(status_code=503, detail="Identity provider is temporarily unavailable")
 
 
 @router.get("/platform/user-onboarding/key")
@@ -141,6 +140,7 @@ def start_global_user_onboarding(
     body: GlobalUserOnboardingRequest,
     request: Request,
     onboarding_key: str = Header(min_length=8, max_length=64, alias="X-Onboarding-Key"),
+    settings: Settings = Depends(get_settings),
     client_ip: str = Depends(source_ip),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
@@ -150,30 +150,53 @@ def start_global_user_onboarding(
             last_name=body.lastName,
             email=body.email,
             mobile=body.mobile,
+            password=body.password.get_secret_value(),
             onboarding_key=onboarding_key,
             source_ip=client_ip,
             correlation_id=request.state.correlation_id,
+            clerk=_clerk(settings),
         )
+    except ClerkBackendError as exc:
+        raise _clerk_failure(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/onboarding/users/{signupAttemptId}/resend-email-code")
+def resend_global_user_email_code(
+    signupAttemptId: str,
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    try:
+        return Phase1SelfOnboardingService(session).resend_email_code(
+            signup_attempt_id=signupAttemptId,
+            clerk=_clerk(settings),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ClerkBackendError as exc:
+        raise _clerk_failure(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post(
-    "/onboarding/users/{signupAttemptId}/complete",
+    "/onboarding/users/{signupAttemptId}/verify-email",
     status_code=status.HTTP_201_CREATED,
 )
-def complete_global_user_onboarding(
+def verify_global_user_email(
     signupAttemptId: str,
+    body: EmailOtpRequest,
     request: Request,
-    identity: AuthenticatedIdentity = Depends(_clerk_identity),
     settings: Settings = Depends(get_settings),
     client_ip: str = Depends(source_ip),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     try:
-        return Phase1SelfOnboardingService(session).complete(
+        return Phase1SelfOnboardingService(session).verify_email_code(
             signup_attempt_id=signupAttemptId,
-            identity=identity,
+            code=body.code.get_secret_value(),
             source_ip=client_ip,
             correlation_id=request.state.correlation_id,
             clerk=_clerk(settings),
@@ -181,7 +204,7 @@ def complete_global_user_onboarding(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ClerkBackendError as exc:
-        raise HTTPException(status_code=502, detail="Clerk identity verification failed") from exc
+        raise _clerk_failure(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -221,7 +244,7 @@ def change_global_user_status(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ClerkBackendError as exc:
-        raise HTTPException(status_code=502, detail="Clerk lifecycle synchronization failed") from exc
+        raise HTTPException(status_code=502, detail="Identity-provider lifecycle synchronization failed") from exc
 
 
 @router.post("/auth/precheck")
@@ -230,6 +253,5 @@ def authentication_precheck(
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> dict[str, bool]:
-    # Deliberately returns only an allow/deny boolean so the UI can gate Clerk sign-in without
-    # exposing detailed Security lifecycle state through the public endpoint.
+    # Deliberately returns only allow/deny so callers cannot enumerate Security lifecycle detail.
     return {"allowed": GlobalUserOnboardingService(session, settings).precheck(body.email)}
