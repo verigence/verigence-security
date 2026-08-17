@@ -26,8 +26,8 @@ app = FastAPI(
     title="Verigence Security API",
     version="0.3.0",
     description=(
-        "Security runtime plus Admin Control Plane v1.4, Clerk identity boundary v1.4.1, "
-        "and Platform-global one-time USER onboarding v1.4.2"
+        "Security runtime, Admin Control Plane v1.4, Platform-global USER onboarding, "
+        "and backend-only Clerk authentication/email OTP boundary v1.4.8"
     ),
     dependencies=[Depends(correlation_header_parameter)],
 )
