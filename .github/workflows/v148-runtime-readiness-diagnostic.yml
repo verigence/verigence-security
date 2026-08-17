@@ -1,0 +1,92 @@
+name: Security v1.4.8 Runtime Readiness Diagnostic
+
+on:
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/v148-runtime-readiness-diagnostic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Inspect deployed runtime without exposing secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: a6808842-2e90-44f8-9172-63a905b24b5c
+      RAILWAY_ENVIRONMENT_ID: 09e12bb5-9781-4b01-974b-fde54d01e37c
+      RAILWAY_SERVICE_ID: cfc90262-4b33-419d-a874-4592de9e8db1
+      DEPLOYMENT_ID: 715aace2-b2c0-4a13-a1c2-95ce22ace474
+
+    steps:
+      - name: Verify Project Token scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"query":"query { projectToken { projectId environmentId } }"}')"
+          [ "$(printf '%s' "$response" | jq -r '.data.projectToken.projectId // empty')" = "$RAILWAY_PROJECT_ID" ]
+          [ "$(printf '%s' "$response" | jq -r '.data.projectToken.environmentId // empty')" = "$RAILWAY_ENVIRONMENT_ID" ]
+
+      - name: Inspect safe runtime configuration shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg environment "$RAILWAY_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+          vars="$(printf '%s' "$response" | jq -c '.data.variables // {}')"
+          database_url="$(printf '%s' "$vars" | jq -r '.DATABASE_URL // empty')"
+          scheme="${database_url%%://*}"
+          if [ "$scheme" = "$database_url" ]; then scheme="missing-or-invalid"; fi
+          printf 'DATABASE_URL_present=%s\n' "$([ -n "$database_url" ] && echo yes || echo no)"
+          printf 'DATABASE_URL_scheme=%s\n' "$scheme"
+          printf 'CLERK_SECRET_KEY_present=%s\n' "$(printf '%s' "$vars" | jq -r 'if ((.CLERK_SECRET_KEY // "")|length)>0 then "yes" else "no" end')"
+          printf 'SECURITY_PRIVATE_KEY_PEM_present=%s\n' "$(printf '%s' "$vars" | jq -r 'if ((.SECURITY_PRIVATE_KEY_PEM // "")|length)>0 then "yes" else "no" end')"
+          printf 'SECURITY_PUBLIC_KEY_PEM_present=%s\n' "$(printf '%s' "$vars" | jq -r 'if ((.SECURITY_PUBLIC_KEY_PEM // "")|length)>0 then "yes" else "no" end')"
+          printf 'SECURITY_KEY_ID_present=%s\n' "$(printf '%s' "$vars" | jq -r 'if ((.SECURITY_KEY_ID // "")|length)>0 then "yes" else "no" end')"
+          printf 'APP_ENV=%s\n' "$(printf '%s' "$vars" | jq -r '.APP_ENV // "missing"')"
+          printf 'PORT=%s\n' "$(printf '%s' "$vars" | jq -r '.PORT // "Railway-managed"')"
+
+      - name: Fetch relevant runtime log lines
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query deploymentLogs($deploymentId: String!, $limit: Int) { deploymentLogs(deploymentId: $deploymentId, limit: $limit) { timestamp message severity } }'
+          variables="$(jq -cn --arg deployment "$DEPLOYMENT_ID" '{deploymentId:$deployment,limit:300}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          fi
+          printf '%s' "$response" | jq -r '
+            .data.deploymentLogs[]
+            | select((.message | test("Traceback|ERROR|Exception|ModuleNotFound|psycopg|sqlalchemy|health/ready|ready"; "i")) or (.severity == "error"))
+            | [.timestamp, .severity, (.message
+                | gsub("postgres(ql)?://[^ ]+"; "postgresql://[REDACTED]")
+                | gsub("Bearer [A-Za-z0-9._-]+"; "Bearer [REDACTED]"))]
+            | @tsv'
