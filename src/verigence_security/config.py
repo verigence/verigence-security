@@ -18,13 +18,14 @@ class Settings(BaseSettings):
     database_url: str = ""
     migration_database_url: str = ""
 
+    # Clerk is backend-only in the active human-authentication contract. The secret key is held
+    # only by Security. Issuer/JWT-key fields remain transitional compatibility configuration for
+    # the deprecated identity-token bridge and must not be required by Web/Mobile.
+    clerk_secret_key: str = ""
+    clerk_backend_api_url: str = "https://api.clerk.com/v1"
     clerk_issuer: str = ""
     clerk_jwt_key: str = ""
     clerk_authorized_parties: str = ""
-    # v1.4.2 lifecycle operations use Clerk's Backend API only after Security has accepted a
-    # global onboarding request or when Security USER status is synchronized to Clerk.
-    clerk_secret_key: str = ""
-    clerk_backend_api_url: str = "https://api.clerk.com/v1"
 
     security_token_issuer: str = "verigence-security"
     security_token_audience: str = "verigence-platform"
@@ -32,17 +33,14 @@ class Settings(BaseSettings):
     security_private_key_pem: str = ""
     security_public_key_pem: str = ""
 
-    # Platform-global onboarding-key encryption key. Expected value is URL-safe base64 for
-    # exactly 32 bytes. It is intentionally required only by onboarding-key management routes,
-    # not by ordinary authentication/runtime startup.
     security_user_onboarding_key_encryption_key: str = ""
 
-    # v1.4.1 Clerk bootstrap. This replaces the local-password bootstrap runtime path.
+    # Backend-only first Super Admin claim. Security verifies the human credential via Clerk
+    # Backend API and additionally requires this immutable Clerk user ID.
     security_bootstrap_enabled: bool = False
     security_bootstrap_super_admin_clerk_user_id: str = ""
 
     # Increment-B local bootstrap configuration is retained only as migration debt.
-    # The v1.4.1+ runtime no longer invokes the local bootstrap/login path.
     platform_bootstrap_enabled: bool = False
     platform_bootstrap_login: str = ""
     platform_bootstrap_password: str = ""
@@ -75,8 +73,8 @@ class Settings(BaseSettings):
             raise ValueError("DEV mock authentication is prohibited in UAT/production")
         if self.app_env in protected and self.network_risk_mode.lower() == "mock":
             raise ValueError("Mock network-risk adapter is prohibited in UAT/production")
-        if self.app_env in protected and (not self.clerk_issuer or not self.clerk_jwt_key):
-            raise ValueError("Clerk issuer and public key are required in UAT/production")
+        if self.app_env in protected and not self.clerk_secret_key.strip():
+            raise ValueError("Clerk Backend secret key is required in UAT/production")
         if self.app_env == AppEnvironment.PRODUCTION and not self.database_url:
             raise ValueError("DATABASE_URL is required in production")
         if self.dev_mock_auth_enabled:
@@ -85,8 +83,6 @@ class Settings(BaseSettings):
             if self.dev_mock_token_ttl_minutes is None:
                 raise ValueError("DEV mock token TTL is required when mock auth is enabled")
 
-        # Transitional Increment-B validation is intentionally retained for historical/local use.
-        # No application runtime route or startup hook consumes it after the v1.4.1 cutover.
         if self.platform_bootstrap_enabled:
             allowed_bootstrap_envs = {
                 AppEnvironment.LOCAL,
@@ -107,8 +103,8 @@ class Settings(BaseSettings):
         if self.security_bootstrap_enabled:
             if not self.database_url:
                 raise ValueError("DATABASE_URL is required when Clerk bootstrap is enabled")
-            if not self.clerk_issuer or not self.clerk_jwt_key:
-                raise ValueError("Clerk issuer and public key are required for Clerk bootstrap")
+            if not self.clerk_secret_key.strip():
+                raise ValueError("Clerk Backend secret key is required for Clerk bootstrap")
             if not self.security_bootstrap_super_admin_clerk_user_id.strip():
                 raise ValueError(
                     "Security bootstrap Super Admin Clerk user ID is required "
