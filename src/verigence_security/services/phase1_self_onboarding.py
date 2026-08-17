@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.clerk_backend import ClerkBackendClient
+from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
 from verigence_security.core.errors import security_error
 
 _HASHER = PasswordHasher()
@@ -181,11 +181,14 @@ class Phase1SelfOnboardingService:
         mobile = str(attempt["mobile"])
 
         # Never hold a database transaction open across Clerk network calls. Password and OTP
-        # values are never written to Security storage/audit/log state.
+        # values are never written to Security storage/audit/log state. If a prior attempt already
+        # verified the exact email but Security failed before commit, accept that same provider state.
         self.s.rollback()
-        if not clerk.attempt_email_verification(email_address_id, code.strip()):
+        verification_accepted = clerk.attempt_email_verification(email_address_id, code.strip())
+        email_verified = clerk.is_email_verified(clerk_user_id, expected_email)
+        if not verification_accepted and not email_verified:
             raise ValueError("Invalid or expired email verification code")
-        if not clerk.is_email_verified(clerk_user_id, expected_email):
+        if not email_verified:
             raise ValueError("Email verification did not complete for the signup address")
 
         now = datetime.now(UTC)
@@ -383,8 +386,13 @@ class Phase1SelfOnboardingService:
         self.s.commit()
         for row in rows:
             clerk_user_id = row["clerk_user_id"]
-            if clerk_user_id:
+            if not clerk_user_id:
+                continue
+            try:
                 clerk.delete_user(str(clerk_user_id))
+            except ClerkBackendError as exc:
+                if exc.status_code != 404:
+                    raise
 
     def _require_valid_onboarding_key(self, supplied: str) -> None:
         row = self.s.execute(
