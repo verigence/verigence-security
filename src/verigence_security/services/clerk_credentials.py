@@ -46,12 +46,14 @@ class ClerkCredentialService:
                 password=password,
             ):
                 raise security_error("AUTH_TOKEN_INVALID")
-            if user.totp_enabled:
-                if not totp_code or not self.clerk.verify_totp(
+            if user.totp_enabled and (
+                not totp_code
+                or not self.clerk.verify_totp(
                     clerk_user_id=user.user_id,
                     code=totp_code,
-                ):
-                    raise security_error("AUTH_TOKEN_INVALID")
+                )
+            ):
+                raise security_error("AUTH_TOKEN_INVALID")
             return ClerkCredentialResult(clerk_user=user)
         except SecurityError:
             raise
