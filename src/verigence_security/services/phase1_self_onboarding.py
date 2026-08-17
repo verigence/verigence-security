@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -130,10 +131,8 @@ class Phase1SelfOnboardingService:
             )
             self.s.commit()
             if clerk_user_id is not None:
-                try:
+                with suppress(Exception):
                     clerk.delete_user(clerk_user_id)
-                except Exception:
-                    pass
             raise
 
         return {
