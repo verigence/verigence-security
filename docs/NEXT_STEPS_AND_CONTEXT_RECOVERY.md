@@ -3,6 +3,7 @@
 **Repository:** `verigence/verigence-security`  
 **Primary integration branch:** `dev`  
 **Current authentication/onboarding authority:** Backend Authentication and Email OTP v1.4.8  
+**Current DEV status:** Implemented, promoted, Railway healthy  
 **Last updated:** 2026-08-17
 
 ## 1. Governing recovery rule
@@ -112,23 +113,19 @@ Deprecated migration/test bridge only:
 POST /security/v1/access-sessions
 ```
 
-## 5. Current implementation workstream
+## 5. Current implementation state
+
+v1.4.8 is merged into `dev`. The Security CI, route contract, package build, Neon migration, Railway immutable-image
+deployment, readiness, liveness and correlation-ID gates have passed.
+
+The only remaining Security provider-facing acceptance evidence is intentionally controlled:
 
 ```text
-feat/signup-approval-v1
-   ↓
-Security CI + static + Ruff + Mypy + pytest
-   ↓
-PostgreSQL migration validation
-   ↓
-Railway DEV
-   ↓
-live Clerk OTP onboarding E2E
-   ↓
-live approved-user credential login E2E
-   ↓
-Promote only after exact-commit evidence
+live Clerk email delivery -> user-entered OTP -> PENDING administrator approval
+live approved USER credential login -> Verigence Security JWT
 ```
+
+These require a controlled test mailbox/identity and must not be simulated or marked complete without that evidence.
 
 ## 6. Initial DEV Super Admin
 
@@ -140,9 +137,10 @@ changes how credentials reach Clerk; it does not create another bootstrap admini
 People are onboarded once as global Security USERs. The same `user_id` can receive independent roles, Groups,
 locations and schedules in multiple Tenants without another human identity-onboarding event.
 
-## 8. Next platform dependency after Security is green
+## 8. Next platform workstream
 
-Implement the Audit Core authentication/onboarding facade so the channel boundary becomes real in runtime:
+Implement the Audit Core authentication/onboarding facade so the designed channel boundary becomes enforced in
+runtime:
 
 ```text
 Web / Mobile -> Audit Core -> Security -> Clerk Backend API
