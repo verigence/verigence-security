@@ -236,7 +236,7 @@ def test_backend_email_otp_is_required_before_pending_security_user() -> None:
                 clerk=clerk,  # type: ignore[arg-type]
             )
         assert clerk.attempt_calls == [(email_address_id, "000000")]
-        assert clerk.verify_calls == []
+        assert clerk.verify_calls == [(clerk_user_id, email.lower())]
 
         with engine.connect() as conn:
             assert conn.execute(
