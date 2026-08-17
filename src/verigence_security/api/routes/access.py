@@ -6,6 +6,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy import text
 
+from verigence_security.adapters.identity import AuthenticatedIdentity
 from verigence_security.adapters.network_risk import NetworkRiskAdapter
 from verigence_security.api.dependencies import (
     bearer_token,
@@ -15,11 +16,16 @@ from verigence_security.api.dependencies import (
     source_ip,
     token_service,
 )
-from verigence_security.api.schemas import AccessSessionRequest, AccessTokenResponse
+from verigence_security.api.schemas import (
+    AccessSessionRequest,
+    AccessTokenResponse,
+    CredentialAccessSessionRequest,
+)
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
 from verigence_security.services.access_service import UserAccessService
+from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.geo import GeoSample
 from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.token_service import TokenService
@@ -60,8 +66,6 @@ class GroupAwareSecurityRepository(SecurityRepository):
             raise security_error("PRINCIPAL_NOT_ACTIVE")
         if row["user_status"] != "ACTIVE":
             raise security_error("USER_NOT_ACTIVE")
-        # UserContext retains legacy membership fields until the v1.3 model is physically retired.
-        # They are deliberately inert in v1.4.2; authorization_version comes from the new state row.
         return UserContext(
             user_id=str(row["user_id"]),
             user_status=str(row["user_status"]),
@@ -118,7 +122,54 @@ class GroupAwareSecurityRepository(SecurityRepository):
         return session_id
 
 
-@router.post("/access-sessions", response_model=AccessTokenResponse)
+def _geo(body: AccessSessionRequest) -> GeoSample:
+    return GeoSample(
+        latitude=body.geo.latitude,
+        longitude=body.geo.longitude,
+        accuracy_meters=body.geo.accuracyMeters,
+        captured_at=body.geo.capturedAt,
+        source=body.geo.source,
+        integrity_status=body.geo.integrityStatus,
+        integrity_reason=body.geo.integrityReason,
+    )
+
+
+@router.post("/auth/login", response_model=AccessTokenResponse)
+def credential_login(
+    body: CredentialAccessSessionRequest,
+    request: Request,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", max_length=200),
+    settings: Settings = Depends(get_settings),
+    repo: SecurityRepository = Depends(repository),
+    network: NetworkRiskAdapter = Depends(network_adapter),
+    tokens: TokenService = Depends(token_service),
+    ip: str = Depends(source_ip),
+) -> dict[str, object]:
+    """Authenticate human credentials through Clerk Backend API and issue Verigence access."""
+
+    _ = idempotency_key
+    authenticated = ClerkCredentialService(settings).authenticate(
+        identifier=body.identifier,
+        password=body.password.get_secret_value(),
+        totp_code=body.totpCode.get_secret_value() if body.totpCode is not None else None,
+    )
+    identity = AuthenticatedIdentity(
+        provider="CLERK",
+        provider_subject=authenticated.clerk_user.user_id,
+        session_id=f"clerk-backend-{uuid4()}",
+    )
+    runtime_repo = GroupAwareSecurityRepository(repo.s)
+    return UserAccessService(runtime_repo, network, tokens).create_or_reuse(
+        identity=identity,
+        tenant_id=str(body.tenantId),
+        device_id=str(body.deviceId),
+        geo=_geo(body),
+        source_ip=ip,
+        correlation_id=request.state.correlation_id,
+    )
+
+
+@router.post("/access-sessions", response_model=AccessTokenResponse, deprecated=True)
 def create_access_session(
     body: AccessSessionRequest,
     request: Request,
@@ -130,25 +181,16 @@ def create_access_session(
     tokens: TokenService = Depends(token_service),
     ip: str = Depends(source_ip),
 ) -> dict[str, object]:
-    # Persistent same-key replay across stateless replicas still requires the approved
-    # idempotency store tracked in IMPLEMENTATION_STATUS.
+    """Legacy identity-token bridge retained for migration/test compatibility; not channel-facing."""
+
     _ = idempotency_key
     identity = identity_from_token(authorization_token, settings)
-    geo = GeoSample(
-        latitude=body.geo.latitude,
-        longitude=body.geo.longitude,
-        accuracy_meters=body.geo.accuracyMeters,
-        captured_at=body.geo.capturedAt,
-        source=body.geo.source,
-        integrity_status=body.geo.integrityStatus,
-        integrity_reason=body.geo.integrityReason,
-    )
     runtime_repo = GroupAwareSecurityRepository(repo.s)
     return UserAccessService(runtime_repo, network, tokens).create_or_reuse(
         identity=identity,
         tenant_id=str(body.tenantId),
         device_id=str(body.deviceId),
-        geo=geo,
+        geo=_geo(body),
         source_ip=ip,
         correlation_id=request.state.correlation_id,
     )
