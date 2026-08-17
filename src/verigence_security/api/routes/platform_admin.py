@@ -24,7 +24,7 @@ from verigence_security.api.platform_schemas import (
 from verigence_security.config import Settings, get_settings
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.platform_admin import PlatformTenantService
-from verigence_security.services.platform_identity import PlatformIdentityService
+from verigence_security.services.platform_identity import PlatformIdentityResult, PlatformIdentityService
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
 
@@ -42,13 +42,13 @@ def _credential_identity(body: PlatformLoginRequest, settings: Settings) -> Auth
     )
 
 
-def _token_response(result: object) -> dict[str, object]:
+def _token_response(result: PlatformIdentityResult) -> dict[str, object]:
     return {
-        "accessToken": result.access_token,  # type: ignore[attr-defined]
-        "expiresAtUtc": result.expires_at_utc,  # type: ignore[attr-defined]
-        "userId": result.user_id,  # type: ignore[attr-defined]
-        "roles": list(result.roles),  # type: ignore[attr-defined]
-        "permissions": list(result.permissions),  # type: ignore[attr-defined]
+        "accessToken": result.access_token,
+        "expiresAtUtc": result.expires_at_utc,
+        "userId": result.user_id,
+        "roles": list(result.roles),
+        "permissions": list(result.permissions),
         "mustChangePassword": False,
     }
 
