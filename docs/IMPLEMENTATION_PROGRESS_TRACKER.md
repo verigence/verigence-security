@@ -17,12 +17,11 @@ Web / Mobile -> Audit Core -> Security -> Clerk Backend API
 
 There is no approved Web/Mobile direct-Clerk path.
 
-## Current implementation candidate
+## Current implementation baseline
 
 ```text
-Branch: feat/signup-approval-v1
-Status: IMPLEMENTED / VALIDATION IN PROGRESS
-Base:   Security dev
+Branch: dev
+Status: IMPLEMENTED / PROMOTED / RUNTIME HEALTHY
 ```
 
 Implemented scope:
@@ -82,22 +81,33 @@ POST /security/v1/access-sessions
 
 The deprecated bridge must not be used by the new Audit Core/Web/Mobile path.
 
-## Validation sequence
+## Completed validation
 
 ```text
-1. Security CI
-2. static/design integrity
-3. compile + Ruff + Mypy
-4. route-contract gate
-5. pytest
-6. package build
-7. PostgreSQL migration validation
-8. Railway DEV promotion
-9. live Clerk email OTP onboarding E2E
-10. live credential login -> Security JWT E2E
+1. Security CI                              PASS
+2. static/design integrity                  PASS
+3. compile + Ruff + Mypy                     PASS
+4. v1.4.8 route-contract gate               PASS
+5. pytest                                    PASS
+6. package build                             PASS
+7. PostgreSQL/Neon migration validation      PASS
+8. Railway immutable-image promotion         PASS
+9. Railway readiness                         PASS
+10. Railway liveness                         PASS
+11. correlation-ID propagation               PASS
 ```
 
-Only after all relevant gates pass may this become the promoted `dev` authentication baseline.
+## Controlled provider E2E pending
+
+These require a controlled mailbox/test identity and remain intentionally open:
+
+```text
+live Clerk email delivery -> OTP -> Security PENDING approval
+live approved USER credential login -> Security JWT
+```
+
+This does not change the active DEV design/implementation status; it is provider-facing acceptance evidence still to
+be collected before production/UAT sign-off.
 
 ## Preserved architecture
 
@@ -110,6 +120,15 @@ Only after all relevant gates pass may this become the promoted `dev` authentica
 
 ## Historical documents
 
-`SECURITY_PHASE1_CLERK_EMAIL_OTP_DESIGN_v1.4.6.md` and
-`CLERK_EMAIL_OTP_INTEGRATION_CONTRACT_v1.4.6.md` are explicitly marked superseded. Git history retains their
-client-Clerk design for traceability, but it is not an implementation source.
+The v1.4.1/v1.4.6 client-Clerk documents are explicitly superseded where conflicting. Git history retains them for
+traceability, but they are not implementation sources.
+
+## Next implementation workstream
+
+```text
+Audit Core authentication/onboarding facade
+        ↓
+Web / Mobile -> Audit Core -> Security -> Clerk Backend API
+```
+
+The channel must never call Security or Clerk directly once the Audit Core facade is implemented.
