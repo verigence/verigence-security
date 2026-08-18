@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -20,21 +21,54 @@ env:
   PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
   SECURITY_SERVICE: security
   TARGET_TENANT_ID: 9de3af49-260f-4b15-8263-07c93dcc04d2
+  DEPLOY_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
-  diagnose:
+  diagnose-and-repair:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.head_ref == 'integration/security-dev-convergence-v1'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
 
     steps:
+      - name: Wait for successful Security CI on exact SHA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            response="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${DEPLOY_SHA}&per_page=50")"
+            ci_run="$(printf '%s' "$response" | jq -c \
+              '[.workflow_runs[] | select(.name == "Security CI")] | sort_by(.created_at) | last // empty')"
+            if [ -n "$ci_run" ]; then
+              status="$(printf '%s' "$ci_run" | jq -r '.status')"
+              conclusion="$(printf '%s' "$ci_run" | jq -r '.conclusion // ""')"
+              if [ "$status" = "completed" ]; then
+                [ "$conclusion" = "success" ] || {
+                  echo "::error::Security CI did not pass for exact SHA ${DEPLOY_SHA}."
+                  exit 1
+                }
+                echo "SECURITY_EXACT_SHA_CI=PASS"
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "::error::Timed out waiting for Security CI on exact SHA."
+          exit 1
+
       - name: Check out exact revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -70,15 +104,93 @@ jobs:
           print('SHARED_DEV_TARGET=PASS')
           PY
 
-      - name: Prove exact Security database source candidates
+      - name: Prove exact Security database source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${MIGRATION_DATABASE_URL:-}" ] || {
+            echo "::error::MIGRATION_DATABASE_URL is not configured."
+            exit 1
+          }
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from sqlalchemy import create_engine, text
+
+          value = os.environ['MIGRATION_DATABASE_URL']
+          if value.startswith('postgresql+psycopg://'):
+              runtime_url = value
+          elif value.startswith('postgresql+asyncpg://'):
+              runtime_url = 'postgresql+psycopg://' + value.removeprefix('postgresql+asyncpg://')
+          elif value.startswith('postgresql://'):
+              runtime_url = 'postgresql+psycopg://' + value.removeprefix('postgresql://')
+          elif value.startswith('postgres://'):
+              runtime_url = 'postgresql+psycopg://' + value.removeprefix('postgres://')
+          else:
+              raise SystemExit('MIGRATION_DATABASE_URL is not PostgreSQL')
+
+          engine = create_engine(runtime_url, pool_pre_ping=True)
+          with engine.connect() as connection:
+              tenant = connection.execute(
+                  text(
+                      """
+                      SELECT EXISTS(
+                        SELECT 1 FROM security.tenants
+                        WHERE tenant_id=:tenant_id
+                          AND tenant_code='test-project'
+                          AND tenant_name='TestProject'
+                          AND status='ACTIVE'
+                      )
+                      """
+                  ),
+                  {'tenant_id': os.environ['TARGET_TENANT_ID']},
+              ).scalar_one()
+              binding = connection.execute(
+                  text(
+                      """
+                      SELECT EXISTS(
+                        SELECT 1
+                        FROM security.service_integrations si
+                        JOIN security.principal_tenant_scopes s
+                          ON s.principal_id=si.principal_id
+                        WHERE si.integration_key='audit-core'
+                          AND s.tenant_id=:tenant_id
+                          AND s.status='ACTIVE'
+                      )
+                      """
+                  ),
+                  {'tenant_id': os.environ['TARGET_TENANT_ID']},
+              ).scalar_one()
+          if not tenant or not binding:
+              raise SystemExit('MIGRATION_DATABASE_URL is not the proven Security DEV database')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write('PROVEN_RUNTIME_DATABASE_URL=' + runtime_url + '\n')
+          print('MIGRATION_DATABASE_SECURITY_TARGET=PASS')
+          PY
+
+      - name: Inspect current Security Railway runtime variables
         shell: bash
         run: |
           set -euo pipefail
           env -u RAILWAY_TOKEN railway variable list \
-            --service "Postgres" \
+            --service "$SECURITY_SERVICE" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
-            --json >/tmp/postgres-vars.json
+            --json >/tmp/security-vars-before.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          values = json.loads(Path('/tmp/security-vars-before.json').read_text())
+          print('DATABASE_URL_PRESENT=' + ('PASS' if values.get('DATABASE_URL') else 'FAIL'))
+          print('SECURITY_KEY_ID_PRESENT=' + ('PASS' if values.get('SECURITY_KEY_ID') else 'FAIL'))
+          print('SECURITY_PRIVATE_KEY_PEM_PRESENT=' + ('PASS' if values.get('SECURITY_PRIVATE_KEY_PEM') else 'FAIL'))
+          print('SECURITY_PUBLIC_KEY_PEM_PRESENT=' + ('PASS' if values.get('SECURITY_PUBLIC_KEY_PEM') else 'FAIL'))
+          PY
 
+      - name: Repair only the proven missing readiness variables
+        shell: bash
+        run: |
+          set -euo pipefail
           python - <<'PY'
           from __future__ import annotations
 
@@ -86,86 +198,56 @@ jobs:
           import os
           from pathlib import Path
 
-          from sqlalchemy import create_engine, text
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
-          tenant_id = os.environ['TARGET_TENANT_ID']
-          migration_url = (os.environ.get('MIGRATION_DATABASE_URL') or '').strip()
-          postgres_values = json.loads(Path('/tmp/postgres-vars.json').read_text())
-          railway_postgres_url = str(postgres_values.get('DATABASE_URL') or '')
-
-          def normalize(value: str) -> str:
-              if value.startswith('postgresql+psycopg://'):
-                  return value
-              if value.startswith('postgresql+asyncpg://'):
-                  return 'postgresql+psycopg://' + value.removeprefix('postgresql+asyncpg://')
-              if value.startswith('postgresql://'):
-                  return 'postgresql+psycopg://' + value.removeprefix('postgresql://')
-              if value.startswith('postgres://'):
-                  return 'postgresql+psycopg://' + value.removeprefix('postgres://')
-              return value
-
-          def is_security_target(label: str, value: str) -> bool:
-              if not value:
-                  print(f'{label}=FAIL reason=MISSING')
-                  return False
-              try:
-                  engine = create_engine(normalize(value), pool_pre_ping=True)
-                  with engine.connect() as connection:
-                      tenant = connection.execute(
-                          text(
-                              """
-                              SELECT EXISTS(
-                                SELECT 1 FROM security.tenants
-                                WHERE tenant_id=:tenant_id
-                                  AND tenant_code='test-project'
-                                  AND tenant_name='TestProject'
-                                  AND status='ACTIVE'
-                              )
-                              """
-                          ),
-                          {'tenant_id': tenant_id},
-                      ).scalar_one()
-                      binding = connection.execute(
-                          text(
-                              """
-                              SELECT EXISTS(
-                                SELECT 1
-                                FROM security.service_integrations si
-                                JOIN security.principal_tenant_scopes s
-                                  ON s.principal_id=si.principal_id
-                                WHERE si.integration_key='audit-core'
-                                  AND s.tenant_id=:tenant_id
-                                  AND s.status='ACTIVE'
-                              )
-                              """
-                          ),
-                          {'tenant_id': tenant_id},
-                      ).scalar_one()
-              except Exception as exc:
-                  print(f'{label}=FAIL error_class={type(exc).__name__}')
-                  return False
-              if bool(tenant) and bool(binding):
-                  print(f'{label}=PASS')
-                  return True
-              print(f'{label}=FAIL reason=SECURITY_TARGET_NOT_FOUND')
-              return False
-
-          migration_ok = is_security_target('MIGRATION_DATABASE_SECURITY_TARGET', migration_url)
-          railway_ok = is_security_target('RAILWAY_POSTGRES_SECURITY_TARGET', railway_postgres_url)
-          if not migration_ok:
-              raise SystemExit('MIGRATION_DATABASE_URL does not resolve to the proven Security DEV database')
-          print('DATABASE_SOURCE_PROOF=PASS migration_database=true railway_postgres=' + str(railway_ok).lower())
+          values = json.loads(Path('/tmp/security-vars-before.json').read_text())
+          private_pem = str(values.get('SECURITY_PRIVATE_KEY_PEM') or '').replace('\\n', '\n')
+          if not private_pem:
+              raise SystemExit('SECURITY_PRIVATE_KEY_PEM is missing; refusing signing-key rotation')
+          private_key = serialization.load_pem_private_key(private_pem.encode(), password=None)
+          if not isinstance(private_key, RSAPrivateKey):
+              raise SystemExit('Existing SECURITY_PRIVATE_KEY_PEM is not RSA')
+          public_pem = private_key.public_key().public_bytes(
+              encoding=serialization.Encoding.PEM,
+              format=serialization.PublicFormat.SubjectPublicKeyInfo,
+          ).decode()
+          Path('/tmp/security-public.pem').write_text(public_pem, encoding='utf-8')
+          Path('/tmp/repair-database').write_text('1' if not values.get('DATABASE_URL') else '0')
+          Path('/tmp/repair-public-key').write_text('1' if not values.get('SECURITY_PUBLIC_KEY_PEM') else '0')
+          print('PUBLIC_KEY_DERIVED_FROM_EXISTING_PRIVATE_KEY=PASS')
           PY
 
-      - name: Diagnose live Security readiness inputs without exposing values
+          if [ "$(cat /tmp/repair-database)" = "1" ]; then
+            printf '%s' "$PROVEN_RUNTIME_DATABASE_URL" | env -u RAILWAY_TOKEN railway variable set \
+              DATABASE_URL --stdin \
+              --service "$SECURITY_SERVICE" \
+              --environment "$PLATFORM_ENVIRONMENT_ID" \
+              --skip-deploys >/dev/null
+            echo "DATABASE_URL_REPAIR=APPLIED"
+          else
+            echo "DATABASE_URL_REPAIR=PRESERVED"
+          fi
+
+          if [ "$(cat /tmp/repair-public-key)" = "1" ]; then
+            cat /tmp/security-public.pem | env -u RAILWAY_TOKEN railway variable set \
+              SECURITY_PUBLIC_KEY_PEM --stdin \
+              --service "$SECURITY_SERVICE" \
+              --environment "$PLATFORM_ENVIRONMENT_ID" \
+              --skip-deploys >/dev/null
+            echo "SECURITY_PUBLIC_KEY_REPAIR=APPLIED"
+          else
+            echo "SECURITY_PUBLIC_KEY_REPAIR=PRESERVED"
+          fi
+
+      - name: Verify repaired runtime readiness inputs before deploy
         shell: bash
         run: |
           set -euo pipefail
           env -u RAILWAY_TOKEN railway variable list \
             --service "$SECURITY_SERVICE" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
-            --json >/tmp/security-vars.json
-
+            --json >/tmp/security-vars-after.json
           python - <<'PY'
           from __future__ import annotations
 
@@ -176,92 +258,89 @@ jobs:
           from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
           from sqlalchemy import create_engine, text
 
-          values = json.loads(Path('/tmp/security-vars.json').read_text())
-
+          values = json.loads(Path('/tmp/security-vars-after.json').read_text())
           database_url = str(values.get('DATABASE_URL') or '')
           key_id = str(values.get('SECURITY_KEY_ID') or '')
           private_pem = str(values.get('SECURITY_PRIVATE_KEY_PEM') or '').replace('\\n', '\n')
           public_pem = str(values.get('SECURITY_PUBLIC_KEY_PEM') or '').replace('\\n', '\n')
+          if not database_url or not key_id or not private_pem or not public_pem:
+              raise SystemExit('Required readiness inputs are still missing after repair')
 
-          failures: list[str] = []
-
-          if not database_url:
-              print('DATABASE_URL_PRESENT=FAIL')
-              failures.append('DATABASE_URL_MISSING')
-          else:
-              print('DATABASE_URL_PRESENT=PASS')
-              if database_url.startswith('postgresql+psycopg://'):
-                  runtime_url = database_url
-              elif database_url.startswith('postgresql+asyncpg://'):
-                  runtime_url = 'postgresql+psycopg://' + database_url.removeprefix('postgresql+asyncpg://')
-              elif database_url.startswith('postgresql://'):
-                  runtime_url = 'postgresql+psycopg://' + database_url.removeprefix('postgresql://')
-              elif database_url.startswith('postgres://'):
-                  runtime_url = 'postgresql+psycopg://' + database_url.removeprefix('postgres://')
-              else:
-                  runtime_url = database_url
-              try:
-                  engine = create_engine(runtime_url, pool_pre_ping=True)
-                  with engine.connect() as connection:
-                      connection.execute(text('SELECT 1'))
-              except Exception as exc:
-                  print(f'DATABASE_READY=FAIL error_class={type(exc).__name__}')
-                  failures.append('DATABASE_CONNECTION_INVALID')
-              else:
-                  print('DATABASE_READY=PASS')
-
-          print('SECURITY_KEY_ID_PRESENT=' + ('PASS' if key_id else 'FAIL'))
-          print('SECURITY_PRIVATE_KEY_PEM_PRESENT=' + ('PASS' if private_pem else 'FAIL'))
-          print('SECURITY_PUBLIC_KEY_PEM_PRESENT=' + ('PASS' if public_pem else 'FAIL'))
-
-          if not key_id:
-              failures.append('SECURITY_KEY_ID_MISSING')
-          if not private_pem:
-              failures.append('SECURITY_PRIVATE_KEY_MISSING')
-          if not public_pem:
-              failures.append('SECURITY_PUBLIC_KEY_MISSING')
-
-          if private_pem and public_pem:
-              try:
-                  private_key = serialization.load_pem_private_key(private_pem.encode(), password=None)
-              except Exception as exc:
-                  print(f'SECURITY_PRIVATE_KEY_PARSE=FAIL error_class={type(exc).__name__}')
-                  failures.append('SECURITY_PRIVATE_KEY_INVALID')
-                  private_key = None
-              else:
-                  print('SECURITY_PRIVATE_KEY_PARSE=PASS')
-
-              try:
-                  public_key = serialization.load_pem_public_key(public_pem.encode())
-              except Exception as exc:
-                  print(f'SECURITY_PUBLIC_KEY_PARSE=FAIL error_class={type(exc).__name__}')
-                  failures.append('SECURITY_PUBLIC_KEY_INVALID')
-                  public_key = None
-              else:
-                  print('SECURITY_PUBLIC_KEY_PARSE=PASS')
-
-              if private_key is not None and not isinstance(private_key, RSAPrivateKey):
-                  print('SECURITY_PRIVATE_KEY_RSA=FAIL')
-                  failures.append('SECURITY_PRIVATE_KEY_NOT_RSA')
-              elif private_key is not None:
-                  print('SECURITY_PRIVATE_KEY_RSA=PASS')
-
-              if public_key is not None and not isinstance(public_key, RSAPublicKey):
-                  print('SECURITY_PUBLIC_KEY_RSA=FAIL')
-                  failures.append('SECURITY_PUBLIC_KEY_NOT_RSA')
-              elif public_key is not None:
-                  print('SECURITY_PUBLIC_KEY_RSA=PASS')
-
-              if isinstance(private_key, RSAPrivateKey) and isinstance(public_key, RSAPublicKey):
-                  if private_key.public_key().public_numbers() == public_key.public_numbers():
-                      print('SECURITY_SIGNING_KEY_PAIR_MATCH=PASS')
-                  else:
-                      print('SECURITY_SIGNING_KEY_PAIR_MATCH=FAIL')
-                      failures.append('SECURITY_SIGNING_KEY_PAIR_MISMATCH')
-
-          if failures:
-              print('READINESS_DIAGNOSIS=' + ','.join(failures))
-              raise SystemExit('Security Railway readiness inputs are invalid; see safe diagnosis above')
-
-          print('READINESS_DIAGNOSIS=PASS')
+          engine = create_engine(database_url, pool_pre_ping=True)
+          with engine.connect() as connection:
+              connection.execute(text('SELECT 1'))
+          private_key = serialization.load_pem_private_key(private_pem.encode(), password=None)
+          public_key = serialization.load_pem_public_key(public_pem.encode())
+          if not isinstance(private_key, RSAPrivateKey) or not isinstance(public_key, RSAPublicKey):
+              raise SystemExit('Configured signing keys are not RSA')
+          if private_key.public_key().public_numbers() != public_key.public_numbers():
+              raise SystemExit('Configured Security signing keys do not match')
+          print('DATABASE_READY=PASS')
+          print('SECURITY_SIGNING_KEY_PAIR_MATCH=PASS')
+          print('READINESS_INPUTS_REPAIRED=PASS')
           PY
+
+      - name: Snapshot current Security deployment
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway deployment list \
+            --service "$SECURITY_SERVICE" --limit 1 --json >/tmp/security-before.json
+          before="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/security-before.json').read_text())
+          print(rows[0].get('id','') if rows else '')
+          PY
+          )"
+          echo "id=$before" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy exact CI-green Security revision only
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway up . --path-as-root \
+            --service "$SECURITY_SERVICE" --detach --yes \
+            --message "Security readiness repair ${DEPLOY_SHA}" >/dev/null
+          echo "SECURITY_READINESS_DEPLOY_SUBMITTED=PASS"
+
+      - name: Require Railway readiness healthcheck success
+        shell: bash
+        env:
+          PREVIOUS_DEPLOYMENT_ID: ${{ steps.before.outputs.id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            env -u RAILWAY_TOKEN railway deployment list \
+              --service "$SECURITY_SERVICE" --limit 1 --json >/tmp/security-deployment.json
+            read -r deployment_id status <<<"$(python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/security-deployment.json').read_text())
+          if rows:
+              print(rows[0].get('id',''), rows[0].get('status',''))
+          else:
+              print('', '')
+          PY
+          )"
+            if [ -z "$deployment_id" ] || [ "$deployment_id" = "${PREVIOUS_DEPLOYMENT_ID:-}" ]; then
+              sleep 5
+              continue
+            fi
+            case "$status" in
+              SUCCESS)
+                echo "SECURITY_RAILWAY_READINESS=PASS deployment_id=$deployment_id"
+                exit 0
+                ;;
+              FAILED|CRASHED|REMOVED|SKIPPED)
+                env -u RAILWAY_TOKEN railway logs \
+                  --service "$SECURITY_SERVICE" --latest --deployment --lines 120 || true
+                echo "::error::Security deployment $deployment_id failed with $status."
+                exit 1
+                ;;
+              *) sleep 5 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for Security deployment readiness."
+          exit 1
