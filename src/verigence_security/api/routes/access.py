@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+import base64
+from datetime import UTC, datetime
+from urllib.parse import parse_qs
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from verigence_security.adapters.identity import AuthenticatedIdentity
@@ -22,15 +25,19 @@ from verigence_security.api.schemas import (
     CredentialAccessSessionRequest,
 )
 from verigence_security.config import Settings, get_settings
-from verigence_security.core.errors import security_error
+from verigence_security.core.errors import SecurityError, security_error
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
-from verigence_security.services.access_service import UserAccessService
+from verigence_security.services.access_service import MachineAccessService, UserAccessService
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.geo import GeoSample
 from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.token_service import TokenService
 
 router = APIRouter(prefix="/security/v1", tags=["Runtime Access"])
+oauth_router = APIRouter(tags=["OAuth"])
+
+TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 
 
 class GroupAwareSecurityRepository(SecurityRepository):
@@ -194,3 +201,136 @@ def create_access_session(
         source_ip=ip,
         correlation_id=request.state.correlation_id,
     )
+
+
+def _parse_form(body: bytes) -> dict[str, str]:
+    values = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return {key: items[-1] for key, items in values.items() if items}
+
+
+def _basic_client(request: Request) -> tuple[str, str] | None:
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Basic "):
+        return None
+    try:
+        decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+        client_id, client_secret = decoded.split(":", 1)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not client_id or not client_secret:
+        return None
+    return client_id, client_secret
+
+
+def _oauth_error(
+    error: str,
+    description: str | None = None,
+    *,
+    status_code: int = 400,
+    basic_challenge: bool = False,
+) -> JSONResponse:
+    content: dict[str, str] = {"error": error}
+    if description:
+        content["error_description"] = description
+    headers = {"WWW-Authenticate": "Basic"} if basic_challenge else None
+    return JSONResponse(status_code=status_code, content=content, headers=headers)
+
+
+def _oauth_success(result: dict[str, object]) -> JSONResponse:
+    access_token = result.get("accessToken")
+    expires_at = result.get("expiresAtUtc")
+    permissions = result.get("permissions")
+    if (
+        not isinstance(access_token, str)
+        or not isinstance(expires_at, datetime)
+        or not isinstance(permissions, list)
+        or not all(isinstance(permission, str) for permission in permissions)
+    ):
+        raise RuntimeError("Machine access service returned an invalid OAuth result")
+    expires_in = max(0, int((expires_at - datetime.now(UTC)).total_seconds()))
+    return JSONResponse(
+        content={
+            "access_token": access_token,
+            "issued_token_type": ACCESS_TOKEN_TYPE,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "scope": " ".join(permissions),
+        }
+    )
+
+
+def _oauth_security_error(exc: SecurityError) -> JSONResponse:
+    if exc.code in {
+        "MACHINE_CREDENTIAL_INVALID",
+        "MACHINE_CREDENTIAL_EXPIRED",
+        "PRINCIPAL_NOT_ACTIVE",
+        "ACTOR_TYPE_NOT_ALLOWED",
+    }:
+        return _oauth_error("invalid_client", status_code=401, basic_challenge=True)
+    if exc.code in {
+        "TENANT_NOT_ACTIVE",
+        "TENANT_OFFBOARDING",
+        "TENANT_SECURITY_NOT_READY",
+        "PRINCIPAL_TENANT_SCOPE_REQUIRED",
+        "AUTH_TOKEN_INVALID",
+        "AUTH_TOKEN_EXPIRED",
+    }:
+        return _oauth_error("invalid_grant", "authorization grant is invalid")
+    if exc.code == "PERMISSION_DENIED":
+        return _oauth_error("invalid_scope", "requested permission is not authorized")
+    raise exc
+
+
+@oauth_router.post("/oauth/token")
+async def oauth_token(
+    request: Request,
+    repo: SecurityRepository = Depends(repository),
+    tokens: TokenService = Depends(token_service),
+    ip: str = Depends(source_ip),
+) -> JSONResponse:
+    try:
+        form = _parse_form(await request.body())
+    except UnicodeDecodeError:
+        return _oauth_error("invalid_request", "request body is not valid form data")
+
+    client = _basic_client(request)
+    if client is None:
+        return _oauth_error("invalid_client", status_code=401, basic_challenge=True)
+    client_id, client_secret = client
+    grant_type = form.get("grant_type", "")
+    requested_permissions = form.get("scope", "").split()
+    service = MachineAccessService(repo, tokens)
+
+    try:
+        if grant_type == "client_credentials":
+            tenant_id = form.get("tenant_id", "")
+            if not tenant_id:
+                return _oauth_error("invalid_request", "tenant_id is required")
+            result = service.issue_machine_token(
+                client_id=client_id,
+                client_secret=client_secret,
+                tenant_id=tenant_id,
+                requested_permissions=requested_permissions,
+                source_ip=ip,
+                correlation_id=request.state.correlation_id,
+            )
+        elif grant_type == TOKEN_EXCHANGE_GRANT:
+            if form.get("subject_token_type", ACCESS_TOKEN_TYPE) != ACCESS_TOKEN_TYPE:
+                return _oauth_error("invalid_request", "unsupported subject_token_type")
+            subject_token = form.get("subject_token", "")
+            if not subject_token:
+                return _oauth_error("invalid_request", "subject_token is required")
+            result = service.exchange_user_token(
+                client_id=client_id,
+                client_secret=client_secret,
+                subject_token=subject_token,
+                requested_permissions=requested_permissions,
+            )
+        else:
+            return _oauth_error("unsupported_grant_type", "unsupported grant_type")
+    except SecurityError as exc:
+        return _oauth_security_error(exc)
+    except ValueError:
+        return _oauth_error("invalid_scope", "requested permission is not authorized")
+
+    return _oauth_success(result)
