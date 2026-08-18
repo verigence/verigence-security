@@ -159,6 +159,26 @@ def update_tenant(
     return _tenant_response(tenant)
 
 
+@router.post("/tenants/{tenantId}/activate", response_model=PlatformTenantResponse)
+def activate_tenant(
+    tenantId: str,
+    request: Request,
+    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.activate")),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    try:
+        tenant = PlatformTenantService(session).activate_tenant(
+            actor_user_id=str(claims["sub"]),
+            tenant_id=tenantId,
+            correlation_id=request.state.correlation_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return _tenant_response(tenant)
+
+
 def _tenant_response(row: dict[str, object]) -> dict[str, object]:
     return {
         "tenantId": str(row["tenant_id"]),
