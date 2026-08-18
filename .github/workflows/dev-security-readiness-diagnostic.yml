@@ -1,0 +1,178 @@
+name: DEV Security Readiness Diagnostic
+
+on:
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/dev-security-readiness-diagnostic.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-dev-readiness-diagnostic
+  cancel-in-progress: true
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+
+jobs:
+  diagnose:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.head_ref == 'integration/security-dev-convergence-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime and Railway CLI
+        run: |
+          python -m pip install -e .
+          npm install --global @railway/cli
+
+      - name: Link approved shared DEV project
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
+            echo "::error::RAILWAY_API_TOKEN is not configured."
+            exit 1
+          }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway status --json >/tmp/railway-status.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          project = json.loads(Path('/tmp/railway-status.json').read_text())
+          if project.get('id') != os.environ['PLATFORM_PROJECT_ID']:
+              raise SystemExit('Linked Railway project is not the approved shared DEV project')
+          print('SHARED_DEV_TARGET=PASS')
+          PY
+
+      - name: Diagnose live Security readiness inputs without exposing values
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/security-vars.json
+
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+          from sqlalchemy import create_engine, text
+
+          values = json.loads(Path('/tmp/security-vars.json').read_text())
+
+          database_url = str(values.get('DATABASE_URL') or '')
+          key_id = str(values.get('SECURITY_KEY_ID') or '')
+          private_pem = str(values.get('SECURITY_PRIVATE_KEY_PEM') or '').replace('\\n', '\n')
+          public_pem = str(values.get('SECURITY_PUBLIC_KEY_PEM') or '').replace('\\n', '\n')
+
+          failures: list[str] = []
+
+          if not database_url:
+              print('DATABASE_URL_PRESENT=FAIL')
+              failures.append('DATABASE_URL_MISSING')
+          else:
+              print('DATABASE_URL_PRESENT=PASS')
+              if database_url.startswith('postgresql+psycopg://'):
+                  runtime_url = database_url
+              elif database_url.startswith('postgresql+asyncpg://'):
+                  runtime_url = 'postgresql+psycopg://' + database_url.removeprefix('postgresql+asyncpg://')
+              elif database_url.startswith('postgresql://'):
+                  runtime_url = 'postgresql+psycopg://' + database_url.removeprefix('postgresql://')
+              elif database_url.startswith('postgres://'):
+                  runtime_url = 'postgresql+psycopg://' + database_url.removeprefix('postgres://')
+              else:
+                  runtime_url = database_url
+              try:
+                  engine = create_engine(runtime_url, pool_pre_ping=True)
+                  with engine.connect() as connection:
+                      connection.execute(text('SELECT 1'))
+              except Exception as exc:
+                  print(f'DATABASE_READY=FAIL error_class={type(exc).__name__}')
+                  failures.append('DATABASE_CONNECTION_INVALID')
+              else:
+                  print('DATABASE_READY=PASS')
+
+          print('SECURITY_KEY_ID_PRESENT=' + ('PASS' if key_id else 'FAIL'))
+          print('SECURITY_PRIVATE_KEY_PEM_PRESENT=' + ('PASS' if private_pem else 'FAIL'))
+          print('SECURITY_PUBLIC_KEY_PEM_PRESENT=' + ('PASS' if public_pem else 'FAIL'))
+
+          if not key_id:
+              failures.append('SECURITY_KEY_ID_MISSING')
+          if not private_pem:
+              failures.append('SECURITY_PRIVATE_KEY_MISSING')
+          if not public_pem:
+              failures.append('SECURITY_PUBLIC_KEY_MISSING')
+
+          if private_pem and public_pem:
+              try:
+                  private_key = serialization.load_pem_private_key(private_pem.encode(), password=None)
+              except Exception as exc:
+                  print(f'SECURITY_PRIVATE_KEY_PARSE=FAIL error_class={type(exc).__name__}')
+                  failures.append('SECURITY_PRIVATE_KEY_INVALID')
+                  private_key = None
+              else:
+                  print('SECURITY_PRIVATE_KEY_PARSE=PASS')
+
+              try:
+                  public_key = serialization.load_pem_public_key(public_pem.encode())
+              except Exception as exc:
+                  print(f'SECURITY_PUBLIC_KEY_PARSE=FAIL error_class={type(exc).__name__}')
+                  failures.append('SECURITY_PUBLIC_KEY_INVALID')
+                  public_key = None
+              else:
+                  print('SECURITY_PUBLIC_KEY_PARSE=PASS')
+
+              if private_key is not None and not isinstance(private_key, RSAPrivateKey):
+                  print('SECURITY_PRIVATE_KEY_RSA=FAIL')
+                  failures.append('SECURITY_PRIVATE_KEY_NOT_RSA')
+              elif private_key is not None:
+                  print('SECURITY_PRIVATE_KEY_RSA=PASS')
+
+              if public_key is not None and not isinstance(public_key, RSAPublicKey):
+                  print('SECURITY_PUBLIC_KEY_RSA=FAIL')
+                  failures.append('SECURITY_PUBLIC_KEY_NOT_RSA')
+              elif public_key is not None:
+                  print('SECURITY_PUBLIC_KEY_RSA=PASS')
+
+              if isinstance(private_key, RSAPrivateKey) and isinstance(public_key, RSAPublicKey):
+                  if private_key.public_key().public_numbers() == public_key.public_numbers():
+                      print('SECURITY_SIGNING_KEY_PAIR_MATCH=PASS')
+                  else:
+                      print('SECURITY_SIGNING_KEY_PAIR_MATCH=FAIL')
+                      failures.append('SECURITY_SIGNING_KEY_PAIR_MISMATCH')
+
+          if failures:
+              print('READINESS_DIAGNOSIS=' + ','.join(failures))
+              raise SystemExit('Security Railway readiness inputs are invalid; see safe diagnosis above')
+
+          print('READINESS_DIAGNOSIS=PASS')
+          PY
