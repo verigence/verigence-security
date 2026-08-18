@@ -23,6 +23,11 @@ on:
       - integration/security-dev-convergence-v1
     paths:
       - ".github/workflows/dev-tenant-admin.yml"
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/dev-tenant-admin.yml"
 
 permissions:
   actions: read
@@ -35,19 +40,20 @@ concurrency:
 jobs:
   tenant-admin:
     name: Create or reuse DEV Tenant as existing SuperAdmin
+    if: github.event_name != 'pull_request' || github.head_ref == 'integration/security-dev-convergence-v1'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
-      SOURCE_SHA: ${{ github.sha }}
-      TENANT_CODE: ${{ github.event_name == 'push' && 'test-project' || inputs.tenant_code }}
-      TENANT_NAME: ${{ github.event_name == 'push' && 'TestProject' || inputs.tenant_name }}
-      ACTIVATE_AFTER_CREATE: ${{ github.event_name == 'push' && 'true' || inputs.activate_after_create }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      TENANT_CODE: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_code || 'test-project' }}
+      TENANT_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_name || 'TestProject' }}
+      ACTIVATE_AFTER_CREATE: ${{ github.event_name == 'workflow_dispatch' && inputs.activate_after_create || 'true' }}
       CORRELATION_ID: dev-tenant-admin-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Wait for successful Security CI on exact SHA
-        if: github.event_name == 'push'
+        if: github.event_name != 'workflow_dispatch'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,7 +86,7 @@ jobs:
       - name: Check out exact revision
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.SOURCE_SHA }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
