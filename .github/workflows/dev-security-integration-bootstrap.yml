@@ -8,12 +8,6 @@ on:
         required: true
         default: 9de3af49-260f-4b15-8263-07c93dcc04d2
         type: string
-  pull_request:
-    branches:
-      - dev
-    paths:
-      - ".github/workflows/dev-security-integration-bootstrap.yml"
-      - "migrations/0010_audit_core_di_permissions.sql"
 
 permissions:
   actions: write
@@ -25,21 +19,17 @@ concurrency:
 
 jobs:
   bootstrap-and-prove:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.head_ref == 'integration/security-dev-convergence-v1'
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     env:
-      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
-      TARGET_TENANT_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_id || '9de3af49-260f-4b15-8263-07c93dcc04d2' }}
+      SOURCE_SHA: ${{ github.sha }}
+      SOURCE_BRANCH: ${{ github.ref_name }}
+      TARGET_TENANT_ID: ${{ inputs.tenant_id }}
       DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
       MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
 
     steps:
       - name: Wait for successful Security CI on exact SHA
-        if: github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,7 +39,7 @@ jobs:
             response="$(gh api \
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
-              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SOURCE_SHA}&event=pull_request&per_page=50")"
+              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SOURCE_SHA}&per_page=50")"
             ci_run="$(printf '%s' "$response" | jq -c \
               '[.workflow_runs[] | select(.name == "Security CI")] | sort_by(.created_at) | last // empty')"
             if [ -n "$ci_run" ]; then
