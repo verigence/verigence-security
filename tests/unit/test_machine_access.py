@@ -128,6 +128,7 @@ def test_client_credentials_uses_service_integration_and_requested_grants_only()
     assert result["permissions"] == ["di.document.read"]
     assert tokens.claims is not None
     assert tokens.claims.principal_id == "principal-audit-core"
+    assert tokens.claims.subject == "audit-core"
     assert tokens.claims.actor_type == ActorType.SERVICE_INTEGRATION
     assert tokens.claims.permissions == ("di.document.read",)
     assert tokens.claims.roles == ()
@@ -193,6 +194,7 @@ def test_delegated_token_preserves_user_and_adds_audit_core_actor() -> None:
     assert result["permissions"] == ["di.document.upload"]
     assert tokens.claims is not None
     assert tokens.claims.principal_id == "user-1"
+    assert tokens.claims.subject is None
     assert tokens.claims.actor_type == ActorType.USER
     assert tokens.claims.tenant_id == "tenant-1"
     assert tokens.claims.access_session_id == "user-session-1"
