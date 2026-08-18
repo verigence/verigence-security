@@ -1,0 +1,314 @@
+name: DEV Security Integration Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: Exact ACTIVE Security DEV Tenant UUID
+        required: true
+        default: 9de3af49-260f-4b15-8263-07c93dcc04d2
+        type: string
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/dev-security-integration-bootstrap.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: security-dev-integration-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-and-prove:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.head_ref == 'integration/security-dev-convergence-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
+      TARGET_TENANT_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_id || '9de3af49-260f-4b15-8263-07c93dcc04d2' }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Wait for successful Security CI on exact SHA
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            response="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SOURCE_SHA}&event=pull_request&per_page=50")"
+            ci_run="$(printf '%s' "$response" | jq -c \
+              '[.workflow_runs[] | select(.name == "Security CI")] | sort_by(.created_at) | last // empty')"
+            if [ -n "$ci_run" ]; then
+              status="$(printf '%s' "$ci_run" | jq -r '.status')"
+              conclusion="$(printf '%s' "$ci_run" | jq -r '.conclusion // ""')"
+              if [ "$status" = "completed" ]; then
+                [ "$conclusion" = "success" ] || {
+                  echo "::error::Security CI did not pass for exact SHA ${SOURCE_SHA}."
+                  exit 1
+                }
+                echo "SECURITY_EXACT_SHA_CI=PASS"
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "::error::Timed out waiting for Security CI on exact SHA."
+          exit 1
+
+      - name: Check out exact revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime
+        run: python -m pip install -e .
+
+      - name: Resolve Security DEV database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          [ -n "$raw" ] || {
+            echo "::error::Neither MIGRATION_DATABASE_URL nor DEV_DATABASE_URL is configured."
+            exit 1
+          }
+          case "$raw" in
+            postgresql+psycopg://*) sqlalchemy_url="$raw" ;;
+            postgresql+asyncpg://*) sqlalchemy_url="postgresql+psycopg://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*) sqlalchemy_url="postgresql+psycopg://${raw#postgresql://}" ;;
+            postgres://*) sqlalchemy_url="postgresql+psycopg://${raw#postgres://}" ;;
+            *) echo "::error::Configured Security DEV database is not PostgreSQL."; exit 1 ;;
+          esac
+          echo "::add-mask::$sqlalchemy_url"
+          echo "DATABASE_URL=$sqlalchemy_url" >> "$GITHUB_ENV"
+
+      - name: Configure exact Tenant ACTIVE Security policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from datetime import UTC, datetime
+          from uuid import UUID
+
+          from sqlalchemy import create_engine, text
+
+          requested = os.environ['TARGET_TENANT_ID'].strip()
+          try:
+              tenant_id = str(UUID(requested))
+          except ValueError as exc:
+              raise SystemExit('TARGET_TENANT_ID must be a UUID') from exc
+
+          approved = {
+              'max_active_devices_per_user': 2,
+              'max_geo_accuracy_meters': 100,
+              'max_geo_age_seconds': 300,
+              'geo_revalidation_interval_seconds': 300,
+              'access_token_ttl_minutes': 10,
+              'machine_token_ttl_minutes': 10,
+              'session_idle_timeout_minutes': 30,
+              'session_max_duration_minutes': 60,
+              'vpn_detected_action': 'DENY',
+              'vpn_unknown_action': 'FLAG',
+              'configuration_version': 1,
+          }
+          now = datetime.now(UTC)
+          engine = create_engine(os.environ['DATABASE_URL'], pool_pre_ping=True)
+
+          with engine.begin() as conn:
+              tenant = conn.execute(
+                  text(
+                      """
+                      SELECT tenant_id,tenant_code,tenant_name,status
+                      FROM security.tenants
+                      WHERE tenant_id=:tenant_id
+                      FOR UPDATE
+                      """
+                  ),
+                  {'tenant_id': tenant_id},
+              ).mappings().first()
+              if tenant is None:
+                  raise SystemExit('Exact DEV Tenant does not exist')
+              if tenant['tenant_code'] != 'test-project' or tenant['tenant_name'] != 'TestProject':
+                  raise SystemExit(
+                      'Exact Tenant UUID does not resolve to test-project / TestProject; refusing mutation'
+                  )
+              if tenant['status'] != 'ACTIVE':
+                  raise SystemExit(f'Exact Tenant is not ACTIVE: {tenant["status"]}')
+
+              admins = conn.execute(
+                  text(
+                      """
+                      SELECT DISTINCT a.user_id
+                      FROM security.platform_user_role_assignments a
+                      JOIN security.users u ON u.user_id=a.user_id AND u.status='ACTIVE'
+                      JOIN security.security_principals p ON p.principal_id=u.user_id AND p.status='ACTIVE'
+                      WHERE a.role_key='platform.super_admin' AND a.status='ACTIVE'
+                      """
+                  )
+              ).all()
+              if len(admins) != 1:
+                  raise SystemExit(
+                      f'Expected exactly one ACTIVE platform.super_admin; found {len(admins)}'
+                  )
+              admin_user_id = str(admins[0][0])
+
+              policy = conn.execute(
+                  text(
+                      """
+                      SELECT max_active_devices_per_user,max_geo_accuracy_meters,max_geo_age_seconds,
+                             geo_revalidation_interval_seconds,access_token_ttl_minutes,
+                             machine_token_ttl_minutes,session_idle_timeout_minutes,
+                             session_max_duration_minutes,vpn_detected_action,vpn_unknown_action,
+                             configuration_version,status
+                      FROM security.tenant_security_policies
+                      WHERE tenant_id=:tenant_id
+                      FOR UPDATE
+                      """
+                  ),
+                  {'tenant_id': tenant_id},
+              ).mappings().first()
+
+              if policy is None:
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.tenant_security_policies
+                          (tenant_id,max_active_devices_per_user,max_geo_accuracy_meters,max_geo_age_seconds,
+                           geo_revalidation_interval_seconds,access_token_ttl_minutes,machine_token_ttl_minutes,
+                           session_idle_timeout_minutes,session_max_duration_minutes,vpn_detected_action,
+                           vpn_unknown_action,configuration_version,status,updated_by_user_id,updated_at_utc)
+                          VALUES
+                          (:tenant_id,:max_active_devices_per_user,:max_geo_accuracy_meters,:max_geo_age_seconds,
+                           :geo_revalidation_interval_seconds,:access_token_ttl_minutes,:machine_token_ttl_minutes,
+                           :session_idle_timeout_minutes,:session_max_duration_minutes,:vpn_detected_action,
+                           :vpn_unknown_action,:configuration_version,'ACTIVE',:updated_by_user_id,:updated_at_utc)
+                          """
+                      ),
+                      {
+                          'tenant_id': tenant_id,
+                          **approved,
+                          'updated_by_user_id': admin_user_id,
+                          'updated_at_utc': now,
+                      },
+                  )
+                  action = 'CREATED'
+              else:
+                  observed = {key: policy[key] for key in approved}
+                  if policy['status'] != 'ACTIVE':
+                      raise SystemExit(
+                          f'Existing Tenant Security policy is {policy["status"]}; refusing automatic activation'
+                      )
+                  if observed != approved:
+                      raise SystemExit(
+                          'Existing ACTIVE Tenant Security policy does not match the approved DEV policy shape; '
+                          'refusing silent overwrite'
+                      )
+                  action = 'PRESERVED'
+
+          with engine.connect() as conn:
+              verified = conn.execute(
+                  text(
+                      """
+                      SELECT status,machine_token_ttl_minutes
+                      FROM security.tenant_security_policies
+                      WHERE tenant_id=:tenant_id
+                      """
+                  ),
+                  {'tenant_id': tenant_id},
+              ).mappings().one()
+          if verified['status'] != 'ACTIVE' or int(verified['machine_token_ttl_minutes']) != 10:
+              raise SystemExit('Persisted Security policy verification failed')
+          print(
+              f'DEV_TENANT_SECURITY_POLICY=PASS action={action} '
+              f'tenant_id={tenant_id} machine_token_ttl_minutes=10'
+          )
+          PY
+
+      - name: Dispatch exact-Tenant Audit Core bind and live OAuth proof
+        id: dispatch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          before="$(gh run list \
+            --workflow audit-core-client-bind.yml \
+            --branch "$SOURCE_BRANCH" \
+            --event workflow_dispatch \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // 0')"
+
+          gh workflow run audit-core-client-bind.yml \
+            --ref "$SOURCE_BRANCH" \
+            -f tenant_id="$TARGET_TENANT_ID"
+
+          run_id=""
+          for attempt in $(seq 1 60); do
+            candidate="$(gh run list \
+              --workflow audit-core-client-bind.yml \
+              --branch "$SOURCE_BRANCH" \
+              --event workflow_dispatch \
+              --limit 5 \
+              --json databaseId,headSha \
+              --jq '[.[] | select(.headSha == env.SOURCE_SHA and .databaseId > (env.BEFORE | tonumber))] | sort_by(.databaseId) | last | .databaseId // empty' \
+              --repo "$GITHUB_REPOSITORY" \
+              -F SOURCE_SHA="$SOURCE_SHA" \
+              -F BEFORE="$before" 2>/dev/null || true)"
+            if [ -n "$candidate" ]; then
+              run_id="$candidate"
+              break
+            fi
+            sleep 3
+          done
+          [ -n "$run_id" ] || {
+            echo "::error::Could not resolve dispatched Audit Core binding workflow run."
+            exit 1
+          }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "AUDIT_CORE_BIND_RUN_ID=$run_id"
+
+      - name: Wait for real Audit Core binding and OAuth proof
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 180); do
+            row="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+            status="$(printf '%s' "$row" | jq -r '.status')"
+            conclusion="$(printf '%s' "$row" | jq -r '.conclusion // ""')"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "AUDIT_CORE_LIVE_OAUTH_PROOF=PASS run_id=${RUN_ID} tenant_id=${TARGET_TENANT_ID}"
+                exit 0
+              fi
+              echo "::error::Audit Core bind/OAuth proof failed: run_id=${RUN_ID} conclusion=${conclusion}"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "::error::Timed out waiting for Audit Core bind/OAuth proof run ${RUN_ID}."
+          exit 1
