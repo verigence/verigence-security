@@ -32,18 +32,25 @@ class AccessTokenClaims:
     roles: tuple[str, ...] = ()
     device_id: str | None = None
     location_id: str | None = None
-
+    delegated_actor_id: str | None = None
+    subject: str | None = None
 
 
 def _validate_actor_claim_shape(claims: AccessTokenClaims) -> None:
     if claims.actor_type == ActorType.USER:
         if not claims.device_id or not claims.location_id or not claims.roles:
             raise ValueError("USER Security token requires roles, device_id and location_id")
+        if claims.subject is not None and claims.subject != claims.principal_id:
+            raise ValueError("USER Security token subject must identify the USER principal")
         return
     if claims.roles or claims.device_id or claims.location_id:
         raise ValueError(
             "Machine Security token cannot carry USER-only roles/device/location claims"
         )
+    if claims.delegated_actor_id is not None:
+        raise ValueError("Machine Security token cannot carry a delegated USER actor claim")
+    if claims.subject is not None and not claims.subject:
+        raise ValueError("Machine Security token subject cannot be empty")
 
 
 class TokenService:
@@ -62,7 +69,7 @@ class TokenService:
         now = datetime.now(UTC)
         payload: dict[str, Any] = {
             "iss": self.settings.security_token_issuer,
-            "sub": claims.principal_id,
+            "sub": claims.subject or claims.principal_id,
             "aud": self.settings.security_token_audience,
             "iat": now,
             "exp": claims.expires_at,
@@ -78,6 +85,8 @@ class TokenService:
             payload["device_id"] = claims.device_id
         if claims.location_id:
             payload["location_id"] = claims.location_id
+        if claims.delegated_actor_id:
+            payload["act"] = {"sub": claims.delegated_actor_id}
         try:
             return jwt.encode(
                 payload,
@@ -124,6 +133,18 @@ class TokenService:
                     raise security_error("AUTH_TOKEN_INVALID")
             elif payload.get("device_id") or payload.get("location_id") or payload.get("roles"):
                 raise security_error("AUTH_TOKEN_INVALID")
+
+            delegated_actor = payload.get("act")
+            if delegated_actor is not None:
+                if actor_type != ActorType.USER:
+                    raise security_error("AUTH_TOKEN_INVALID")
+                if (
+                    not isinstance(delegated_actor, dict)
+                    or not isinstance(delegated_actor.get("sub"), str)
+                    or not delegated_actor["sub"]
+                ):
+                    raise security_error("AUTH_TOKEN_INVALID")
+
             try:
                 validate_permissions([str(value) for value in payload.get("permissions", [])])
             except ValueError as exc:

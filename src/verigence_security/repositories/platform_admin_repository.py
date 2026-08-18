@@ -265,6 +265,20 @@ class PlatformAdminRepository:
         ).first()
         return row is not None
 
+    def activate_tenant(self, *, tenant_id: str, now: datetime) -> bool:
+        row = self.s.execute(
+            text(
+                """
+                UPDATE security.tenants
+                SET status='ACTIVE',updated_at_utc=:now
+                WHERE tenant_id=:tenant_id AND status='CONFIGURING'
+                RETURNING tenant_id
+                """
+            ),
+            {"tenant_id": tenant_id, "now": now},
+        ).first()
+        return row is not None
+
     def upsert_self_onboarding_token(
         self,
         *,

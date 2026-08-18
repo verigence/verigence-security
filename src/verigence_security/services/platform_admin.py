@@ -256,6 +256,47 @@ class PlatformTenantService:
             raise
         return self.repository.tenant_by_id(tenant_id)
 
+    def activate_tenant(
+        self,
+        *,
+        actor_user_id: str,
+        tenant_id: str,
+        correlation_id: str,
+    ) -> dict[str, object] | None:
+        before = self.repository.tenant_by_id(tenant_id)
+        if before is None:
+            return None
+        if before["status"] != "CONFIGURING":
+            raise ValueError("Tenant must be CONFIGURING before activation")
+
+        now = datetime.now(UTC)
+        try:
+            if not self.repository.activate_tenant(tenant_id=tenant_id, now=now):
+                raise RuntimeError("Tenant activation state changed concurrently")
+            self.repository.insert_admin_change(
+                correlation_id=correlation_id,
+                actor_user_id=actor_user_id,
+                operation_key="platform.tenant.activate",
+                resource_type="tenant",
+                resource_id=tenant_id,
+                outcome="SUCCESS",
+                tenant_id=tenant_id,
+                before_state_json=json.dumps(_json_tenant(before)),
+                after_state_json=json.dumps(
+                    {**_json_tenant(before), "status": "ACTIVE"}
+                ),
+                now=now,
+            )
+            self.repository.commit()
+        except Exception:
+            self.repository.rollback()
+            raise
+
+        tenant = self.repository.tenant_by_id(tenant_id)
+        if tenant is None:
+            raise RuntimeError("Activated Tenant could not be reloaded")
+        return tenant
+
     def _seed_standard_tenant_roles(self, *, tenant_id: str, now: datetime) -> None:
         for definition in STANDARD_TENANT_ADMIN_ROLES:
             role_id = str(uuid4())
