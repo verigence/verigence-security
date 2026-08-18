@@ -11,10 +11,37 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      deploy_dev:
-        description: Deploy the selected main revision to Security DEV after CI
+      operation:
+        description: Security operation to run after CI
         required: true
-        default: false
+        default: ci-only
+        type: choice
+        options:
+          - ci-only
+          - deploy-dev
+          - tenant-admin
+          - readiness-check
+          - audit-core-bind
+          - integration-bootstrap
+      tenant_code:
+        description: DEV Tenant code for tenant-admin / integration-bootstrap
+        required: true
+        default: test-project
+        type: string
+      tenant_name:
+        description: DEV Tenant name for tenant-admin / integration-bootstrap
+        required: true
+        default: TestProject
+        type: string
+      tenant_id:
+        description: Exact ACTIVE DEV Tenant UUID for Audit Core / integration bootstrap
+        required: true
+        default: 9de3af49-260f-4b15-8263-07c93dcc04d2
+        type: string
+      activate_after_create:
+        description: Activate Tenant after create/reuse
+        required: true
+        default: true
         type: boolean
 
 permissions:
@@ -25,6 +52,9 @@ env:
   PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
   PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
   SECURITY_SERVICE: security
+  AUDIT_SERVICE: verigence-audit-core
+  AUDIT_CORE_CLIENT_ID: audit-core
+  AUDIT_CORE_EXPECTED_SECRET_SHA256: 06fd76dc52d593d232329fc958f148be1757a88e7ecf710a41d7718a9c60be81
 
 jobs:
   quality:
@@ -83,12 +113,12 @@ jobs:
       needs.quality.result == 'success' &&
       (
         (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-        (github.event_name == 'workflow_dispatch' && inputs.deploy_dev == true && github.ref == 'refs/heads/main')
+        (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy-dev' && github.ref == 'refs/heads/main')
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     concurrency:
-      group: security-dev-deployment
+      group: security-dev-operation
       cancel-in-progress: false
     permissions:
       contents: read
@@ -507,3 +537,1098 @@ jobs:
           echo "liveness=PASS"
           echo "jwks=PASS"
           echo "correlation_id=PASS"
+
+  tenant-admin:
+    name: DEV Tenant Administration
+    needs: quality
+    if: >-
+      needs.quality.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.operation == 'tenant-admin' || inputs.operation == 'integration-bootstrap')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: security-dev-operation
+      cancel-in-progress: false
+    outputs:
+      tenant_id: ${{ steps.tenant.outputs.tenant_id }}
+      tenant_status: ${{ steps.tenant.outputs.tenant_status }}
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      TENANT_CODE: ${{ inputs.tenant_code }}
+      TENANT_NAME: ${{ inputs.tenant_name }}
+      ACTIVATE_AFTER_CREATE: ${{ inputs.activate_after_create }}
+      CORRELATION_ID: dev-tenant-admin-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Check out exact validated revision
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime
+        run: python -m pip install -e .
+
+      - name: Create or reuse Tenant through existing SuperAdmin
+        id: tenant
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_database_url="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          [ -n "$raw_database_url" ] || {
+            echo "::error::MIGRATION_DATABASE_URL or DEV_DATABASE_URL is required."
+            exit 1
+          }
+          echo "::add-mask::$raw_database_url"
+          TENANT_ADMIN_DATABASE_URL="$raw_database_url" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from sqlalchemy import text
+
+          from verigence_security.config import Settings
+          from verigence_security.db.session import build_session_factory
+          from verigence_security.services.platform_admin import PlatformTenantService
+
+          tenant_code = os.environ["TENANT_CODE"].strip()
+          tenant_name = os.environ["TENANT_NAME"].strip()
+          correlation_id = os.environ["CORRELATION_ID"]
+          activate = os.environ.get("ACTIVATE_AFTER_CREATE", "true").lower() == "true"
+
+          if not tenant_code or not tenant_name:
+              raise SystemExit("Tenant code and name must be non-blank")
+
+          settings = Settings(database_url=os.environ["TENANT_ADMIN_DATABASE_URL"])
+          factory = build_session_factory(settings)
+          if factory is None:
+              raise SystemExit("Security DEV database is not configured")
+
+          with factory() as session:
+              super_admin_rows = list(
+                  session.execute(
+                      text(
+                          """
+                          SELECT DISTINCT a.user_id,e.provider_subject
+                          FROM security.platform_user_role_assignments a
+                          JOIN security.security_principals p
+                            ON p.principal_id=a.user_id AND p.status='ACTIVE'
+                          JOIN security.users u
+                            ON u.user_id=a.user_id AND u.status='ACTIVE'
+                          JOIN security.external_identities e
+                            ON e.user_id=a.user_id
+                           AND e.provider='CLERK'
+                           AND e.status='ACTIVE'
+                          WHERE a.role_key='platform.super_admin'
+                            AND a.status='ACTIVE'
+                          ORDER BY a.user_id
+                          """
+                      )
+                  ).mappings()
+              )
+              if len(super_admin_rows) != 1:
+                  raise SystemExit(
+                      "Expected exactly one ACTIVE Clerk-backed platform.super_admin; "
+                      f"found {len(super_admin_rows)}"
+                  )
+
+              actor_user_id = str(super_admin_rows[0]["user_id"])
+              existing = session.execute(
+                  text(
+                      """
+                      SELECT tenant_id,tenant_code,tenant_name,status,
+                             created_at_utc,updated_at_utc
+                      FROM security.tenants
+                      WHERE tenant_code=:tenant_code
+                      FOR UPDATE
+                      """
+                  ),
+                  {"tenant_code": tenant_code},
+              ).mappings().first()
+
+              service = PlatformTenantService(session)
+              if existing is None:
+                  tenant = service.create_tenant(
+                      actor_user_id=actor_user_id,
+                      tenant_code=tenant_code,
+                      tenant_name=tenant_name,
+                      correlation_id=correlation_id,
+                  )
+              else:
+                  if str(existing["tenant_name"]) != tenant_name:
+                      raise SystemExit(
+                          f"Tenant code {tenant_code!r} exists with another name; refusing overwrite"
+                      )
+                  tenant = dict(existing)
+
+              tenant_id = str(tenant["tenant_id"])
+              current_status = str(tenant["status"])
+              if activate:
+                  if current_status == "CONFIGURING":
+                      activated = service.activate_tenant(
+                          actor_user_id=actor_user_id,
+                          tenant_id=tenant_id,
+                          correlation_id=correlation_id,
+                      )
+                      if activated is None:
+                          raise SystemExit("Tenant disappeared before activation")
+                      tenant = activated
+                      current_status = str(tenant["status"])
+                  elif current_status != "ACTIVE":
+                      raise SystemExit(
+                          f"Tenant {tenant_code} is {current_status}; refusing automatic activation"
+                      )
+
+              verified = session.execute(
+                  text(
+                      """
+                      SELECT tenant_id,tenant_code,tenant_name,status
+                      FROM security.tenants
+                      WHERE tenant_id=:tenant_id
+                      """
+                  ),
+                  {"tenant_id": tenant_id},
+              ).mappings().one()
+              if str(verified["tenant_code"]) != tenant_code or str(verified["tenant_name"]) != tenant_name:
+                  raise SystemExit("Persisted Tenant identity does not match requested Tenant")
+              if activate and str(verified["status"]) != "ACTIVE":
+                  raise SystemExit("Tenant activation was requested but persisted status is not ACTIVE")
+
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write(f"tenant_id={tenant_id}\n")
+                  handle.write(f"tenant_status={verified['status']}\n")
+
+              print(
+                  f"DEV_TENANT_ADMIN=PASS code={tenant_code} "
+                  f"tenant_id={tenant_id} status={verified['status']}"
+              )
+          PY
+
+  integration-prerequisites:
+    name: DEV Integration Prerequisites
+    needs:
+      - quality
+      - tenant-admin
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'integration-bootstrap' &&
+      needs.quality.result == 'success' &&
+      needs.tenant-admin.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: security-dev-operation
+      cancel-in-progress: false
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      TARGET_TENANT_ID: ${{ needs.tenant-admin.outputs.tenant_id }}
+      REQUESTED_TENANT_ID: ${{ inputs.tenant_id }}
+
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime
+        run: python -m pip install -e .
+
+      - name: Configure exact ACTIVE Tenant policy and verify DI catalogue
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$TARGET_TENANT_ID" = "$REQUESTED_TENANT_ID" ] || {
+            echo "::error::Created/reused Tenant UUID does not match requested bootstrap tenant_id."
+            exit 1
+          }
+          raw="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          [ -n "$raw" ] || {
+            echo "::error::Security DEV database is not configured."
+            exit 1
+          }
+          case "$raw" in
+            postgresql+psycopg://*) db="$raw" ;;
+            postgresql+asyncpg://*) db="postgresql+psycopg://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*) db="postgresql+psycopg://${raw#postgresql://}" ;;
+            postgres://*) db="postgresql+psycopg://${raw#postgres://}" ;;
+            *) echo "::error::Security DEV database is not PostgreSQL."; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          DATABASE_URL="$db" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from datetime import UTC, datetime
+          from uuid import UUID
+
+          from sqlalchemy import create_engine, text
+
+          tenant_id = str(UUID(os.environ["TARGET_TENANT_ID"]))
+          approved = {
+              "max_active_devices_per_user": 2,
+              "max_geo_accuracy_meters": 100,
+              "max_geo_age_seconds": 300,
+              "geo_revalidation_interval_seconds": 300,
+              "access_token_ttl_minutes": 10,
+              "machine_token_ttl_minutes": 10,
+              "session_idle_timeout_minutes": 30,
+              "session_max_duration_minutes": 60,
+              "vpn_detected_action": "DENY",
+              "vpn_unknown_action": "FLAG",
+              "configuration_version": 1,
+          }
+          now = datetime.now(UTC)
+          engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+
+          with engine.begin() as conn:
+              tenant = conn.execute(
+                  text(
+                      """
+                      SELECT tenant_id,tenant_code,tenant_name,status
+                      FROM security.tenants
+                      WHERE tenant_id=:tenant_id
+                      FOR UPDATE
+                      """
+                  ),
+                  {"tenant_id": tenant_id},
+              ).mappings().first()
+              if tenant is None or tenant["status"] != "ACTIVE":
+                  raise SystemExit("Bootstrap Tenant does not exist as ACTIVE")
+
+              admins = conn.execute(
+                  text(
+                      """
+                      SELECT DISTINCT a.user_id
+                      FROM security.platform_user_role_assignments a
+                      JOIN security.users u ON u.user_id=a.user_id AND u.status='ACTIVE'
+                      JOIN security.security_principals p
+                        ON p.principal_id=u.user_id AND p.status='ACTIVE'
+                      WHERE a.role_key='platform.super_admin' AND a.status='ACTIVE'
+                      """
+                  )
+              ).all()
+              if len(admins) != 1:
+                  raise SystemExit(
+                      f"Expected exactly one ACTIVE platform.super_admin; found {len(admins)}"
+                  )
+              admin_user_id = str(admins[0][0])
+
+              policy = conn.execute(
+                  text(
+                      """
+                      SELECT max_active_devices_per_user,max_geo_accuracy_meters,max_geo_age_seconds,
+                             geo_revalidation_interval_seconds,access_token_ttl_minutes,
+                             machine_token_ttl_minutes,session_idle_timeout_minutes,
+                             session_max_duration_minutes,vpn_detected_action,vpn_unknown_action,
+                             configuration_version,status
+                      FROM security.tenant_security_policies
+                      WHERE tenant_id=:tenant_id
+                      FOR UPDATE
+                      """
+                  ),
+                  {"tenant_id": tenant_id},
+              ).mappings().first()
+
+              if policy is None:
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.tenant_security_policies
+                          (tenant_id,max_active_devices_per_user,max_geo_accuracy_meters,max_geo_age_seconds,
+                           geo_revalidation_interval_seconds,access_token_ttl_minutes,machine_token_ttl_minutes,
+                           session_idle_timeout_minutes,session_max_duration_minutes,vpn_detected_action,
+                           vpn_unknown_action,configuration_version,status,updated_by_user_id,updated_at_utc)
+                          VALUES
+                          (:tenant_id,:max_active_devices_per_user,:max_geo_accuracy_meters,:max_geo_age_seconds,
+                           :geo_revalidation_interval_seconds,:access_token_ttl_minutes,:machine_token_ttl_minutes,
+                           :session_idle_timeout_minutes,:session_max_duration_minutes,:vpn_detected_action,
+                           :vpn_unknown_action,:configuration_version,'ACTIVE',:updated_by_user_id,:updated_at_utc)
+                          """
+                      ),
+                      {
+                          "tenant_id": tenant_id,
+                          **approved,
+                          "updated_by_user_id": admin_user_id,
+                          "updated_at_utc": now,
+                      },
+                  )
+              else:
+                  observed = {key: policy[key] for key in approved}
+                  if policy["status"] != "ACTIVE":
+                      raise SystemExit(
+                          f"Existing Tenant Security policy is {policy['status']}; refusing auto-activation"
+                      )
+                  if observed != approved:
+                      raise SystemExit(
+                          "Existing ACTIVE Tenant Security policy differs from approved DEV policy; "
+                          "refusing overwrite"
+                      )
+
+              rows = conn.execute(
+                  text(
+                      """
+                      SELECT permission_key,status,module_key,resource_key,action_key
+                      FROM security.permissions
+                      WHERE permission_key IN ('di.document.read','di.document.upload')
+                      ORDER BY permission_key
+                      """
+                  )
+              ).mappings().all()
+
+          expected = {
+              "di.document.read": ("ACTIVE", "di", "document", "read"),
+              "di.document.upload": ("ACTIVE", "di", "document", "upload"),
+          }
+          observed = {
+              str(row["permission_key"]): (
+                  str(row["status"]),
+                  str(row["module_key"]),
+                  str(row["resource_key"]),
+                  str(row["action_key"]),
+              )
+              for row in rows
+          }
+          if observed != expected:
+              raise SystemExit(
+                  "DI permission catalogue is not ready; deploy current main migrations before bootstrap"
+              )
+          print(f"DEV_INTEGRATION_PREREQUISITES=PASS tenant_id={tenant_id}")
+          PY
+
+  readiness-check:
+    name: DEV Security Readiness Check
+    needs:
+      - quality
+      - integration-prerequisites
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.quality.result == 'success' &&
+      (
+        inputs.operation == 'readiness-check' ||
+        (inputs.operation == 'integration-bootstrap' && needs.integration-prerequisites.result == 'success')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: security-dev-operation
+      cancel-in-progress: false
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime and Railway CLI
+        run: |
+          python -m pip install -e .
+          npm install --global @railway/cli
+
+      - name: Link approved shared DEV project
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
+            echo "::error::RAILWAY_API_TOKEN is not configured."
+            exit 1
+          }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway status --json >/tmp/railway-status.json
+          [ "$(jq -r '.id // empty' /tmp/railway-status.json)" = "$PLATFORM_PROJECT_ID" ] || {
+            echo "::error::Linked Railway project is not approved DEV."
+            exit 1
+          }
+
+      - name: Verify runtime variables, DB, and signing key pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/security-vars.json
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+          from sqlalchemy import create_engine, text
+
+          values = json.loads(Path('/tmp/security-vars.json').read_text())
+          required = {
+              'DATABASE_URL',
+              'CLERK_SECRET_KEY',
+              'SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY',
+              'SECURITY_KEY_ID',
+              'SECURITY_PRIVATE_KEY_PEM',
+              'SECURITY_PUBLIC_KEY_PEM',
+          }
+          missing = sorted(key for key in required if not values.get(key))
+          if missing:
+              raise SystemExit('Required Security runtime variables are missing: ' + ', '.join(missing))
+
+          database_url = str(values['DATABASE_URL'])
+          engine = create_engine(database_url, pool_pre_ping=True)
+          with engine.connect() as connection:
+              connection.execute(text('SELECT 1'))
+
+          private_pem = str(values['SECURITY_PRIVATE_KEY_PEM']).replace('\\n', '\n')
+          public_pem = str(values['SECURITY_PUBLIC_KEY_PEM']).replace('\\n', '\n')
+          private_key = serialization.load_pem_private_key(private_pem.encode(), password=None)
+          public_key = serialization.load_pem_public_key(public_pem.encode())
+          if not isinstance(private_key, RSAPrivateKey) or not isinstance(public_key, RSAPublicKey):
+              raise SystemExit('Configured Security signing keys are not RSA')
+          if private_key.public_key().public_numbers() != public_key.public_numbers():
+              raise SystemExit('Configured Security signing key pair does not match')
+
+          print('SECURITY_RUNTIME_DATABASE=PASS')
+          print('SECURITY_SIGNING_KEY_PAIR=PASS')
+          PY
+
+      - name: Resolve Security public domain and verify live endpoints
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || {
+            echo "::error::RAILWAY_TOKEN is not configured."
+            exit 1
+          }
+          token_response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"query":"query { projectToken { projectId environmentId } }"}')"
+          [ "$(printf '%s' "$token_response" | jq -r '.data.projectToken.projectId // empty')" = "$PLATFORM_PROJECT_ID" ] || {
+            echo "::error::Railway Project Token is not scoped to approved DEV project."
+            exit 1
+          }
+          services_json="$(env -u RAILWAY_TOKEN railway service list --json)"
+          service_id="$(printf '%s' "$services_json" | jq -r --arg service "$SECURITY_SERVICE" \
+            '[.[] | select(.name == $service)] | first | .id // empty')"
+          [ -n "$service_id" ] || {
+            echo "::error::Security service is missing."
+            exit 1
+          }
+
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { id domain } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$service_id" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' --data "$body")"
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || {
+            echo "::error::Security DEV public domain is missing."
+            exit 1
+          }
+          base="https://$domain"
+          curl --fail --silent --show-error "$base/health/ready" >/tmp/ready.json
+          curl --fail --silent --show-error "$base/health/live" >/tmp/live.json
+          curl --fail --silent --show-error "$base/.well-known/jwks.json" >/tmp/jwks.json
+          jq -e '.keys | type == "array" and length > 0' /tmp/jwks.json >/dev/null
+          echo "SECURITY_READINESS=PASS"
+          echo "SECURITY_LIVENESS=PASS"
+          echo "SECURITY_JWKS=PASS"
+
+  audit-core-bind:
+    name: DEV Audit Core Bind and OAuth Verify
+    needs:
+      - quality
+      - tenant-admin
+      - integration-prerequisites
+      - readiness-check
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.quality.result == 'success' &&
+      (
+        inputs.operation == 'audit-core-bind' ||
+        (
+          inputs.operation == 'integration-bootstrap' &&
+          needs.tenant-admin.result == 'success' &&
+          needs.integration-prerequisites.result == 'success' &&
+          needs.readiness-check.result == 'success'
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: security-dev-operation
+      cancel-in-progress: false
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      INPUT_TENANT_ID: ${{ inputs.tenant_id }}
+
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime and Railway CLI
+        run: |
+          python -m pip install -e .
+          npm install --global @railway/cli
+
+      - name: Link and verify shared DEV services
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
+            echo "::error::RAILWAY_API_TOKEN is not configured."
+            exit 1
+          }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway status --json >/tmp/railway-status.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/railway-services.json
+          [ "$(jq -r '.id // empty' /tmp/railway-status.json)" = "$PLATFORM_PROJECT_ID" ] || {
+            echo "::error::Linked Railway project is not approved DEV."
+            exit 1
+          }
+          names="$(jq -r '.[].name' /tmp/railway-services.json)"
+          grep -Fxq "$SECURITY_SERVICE" <<<"$names"
+          grep -Fxq "$AUDIT_SERVICE" <<<"$names"
+          echo "SHARED_DEV_TARGET=PASS"
+
+      - name: Read real Audit Core credential and verify approved digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "$AUDIT_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/audit-vars.json
+          client_id="$(jq -r '.SECURITY_CLIENT_ID // "audit-core"' /tmp/audit-vars.json)"
+          [ "$client_id" = "$AUDIT_CORE_CLIENT_ID" ] || {
+            echo "::error::Audit Core SECURITY_CLIENT_ID is not audit-core."
+            exit 1
+          }
+          client_secret="$(jq -r '.SECURITY_CLIENT_SECRET // empty' /tmp/audit-vars.json)"
+          [ -n "$client_secret" ] || {
+            echo "::error::Audit Core SECURITY_CLIENT_SECRET is missing."
+            exit 1
+          }
+          echo "::add-mask::$client_secret"
+          digest="$(CLIENT_SECRET="$client_secret" python -c \
+            'import hashlib,os; print(hashlib.sha256(os.environ["CLIENT_SECRET"].encode()).hexdigest())')"
+          [ "$digest" = "$AUDIT_CORE_EXPECTED_SECRET_SHA256" ] || {
+            echo "::error::Live Audit Core credential does not match approved PR #60 verifier."
+            exit 1
+          }
+          echo "AUDIT_CORE_CLIENT_SECRET=$client_secret" >> "$GITHUB_ENV"
+          echo "AUDIT_CORE_CLIENT_SECRET_SHA256=$digest" >> "$GITHUB_ENV"
+          echo "AUDIT_CORE_CREDENTIAL_SOURCE=PASS"
+
+      - name: Resolve Security DEV database and target Tenant
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          [ -n "$raw" ] || {
+            echo "::error::Security DEV database is not configured."
+            exit 1
+          }
+          case "$raw" in
+            postgresql+psycopg://*) db="$raw" ;;
+            postgresql+asyncpg://*) db="postgresql+psycopg://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*) db="postgresql+psycopg://${raw#postgresql://}" ;;
+            postgres://*) db="postgresql+psycopg://${raw#postgres://}" ;;
+            *) echo "::error::Security DEV database is not PostgreSQL."; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          echo "DATABASE_URL=$db" >> "$GITHUB_ENV"
+          if [ "${{ inputs.operation }}" = "integration-bootstrap" ]; then
+            expected="${{ needs.tenant-admin.outputs.tenant_id }}"
+            [ "$INPUT_TENANT_ID" = "$expected" ] || {
+              echo "::error::Bootstrap Tenant UUID changed between steps."
+              exit 1
+            }
+          fi
+
+      - name: Bind exact Audit Core principal, credential, Tenant scope, and DI grants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from datetime import UTC, datetime
+          from uuid import UUID, uuid4
+
+          from sqlalchemy import create_engine, text
+
+          tenant_id = str(UUID(os.environ["INPUT_TENANT_ID"]))
+          required_permissions = {"di.document.read", "di.document.upload"}
+          expected_hash = os.environ["AUDIT_CORE_CLIENT_SECRET_SHA256"]
+          now = datetime.now(UTC)
+          engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+
+          with engine.begin() as conn:
+              tenant = conn.execute(
+                  text(
+                      """
+                      SELECT t.tenant_id,t.tenant_code,t.tenant_name,t.status,p.status AS policy_status
+                      FROM security.tenants t
+                      JOIN security.tenant_security_policies p ON p.tenant_id=t.tenant_id
+                      WHERE t.tenant_id=:tenant_id
+                      FOR UPDATE
+                      """
+                  ),
+                  {"tenant_id": tenant_id},
+              ).mappings().first()
+              if tenant is None or tenant["status"] != "ACTIVE" or tenant["policy_status"] != "ACTIVE":
+                  raise SystemExit("Exact Audit Core Tenant must be ACTIVE with ACTIVE policy")
+
+              admins = conn.execute(
+                  text(
+                      """
+                      SELECT DISTINCT a.user_id
+                      FROM security.platform_user_role_assignments a
+                      JOIN security.users u ON u.user_id=a.user_id AND u.status='ACTIVE'
+                      JOIN security.security_principals p
+                        ON p.principal_id=u.user_id AND p.status='ACTIVE'
+                      WHERE a.role_key='platform.super_admin' AND a.status='ACTIVE'
+                      """
+                  )
+              ).all()
+              if len(admins) != 1:
+                  raise SystemExit(
+                      f"Expected exactly one ACTIVE platform.super_admin; found {len(admins)}"
+                  )
+              admin_user_id = str(admins[0][0])
+
+              permissions = {
+                  str(row[0])
+                  for row in conn.execute(
+                      text(
+                          """
+                          SELECT permission_key FROM security.permissions
+                          WHERE status='ACTIVE'
+                            AND permission_key IN ('di.document.read','di.document.upload')
+                          """
+                      )
+                  ).all()
+              }
+              if permissions != required_permissions:
+                  raise SystemExit("Required ACTIVE Audit Core DI permissions are not present")
+
+              existing = conn.execute(
+                  text(
+                      """
+                      SELECT si.principal_id,p.actor_type,p.status
+                      FROM security.service_integrations si
+                      JOIN security.security_principals p ON p.principal_id=si.principal_id
+                      WHERE si.integration_key='audit-core'
+                      """
+                  )
+              ).mappings().first()
+
+              if existing is None:
+                  principal_id = str(uuid4())
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.security_principals
+                          (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+                          VALUES (:principal_id,'SERVICE_INTEGRATION','Audit Core','ACTIVE',:now,:now)
+                          """
+                      ),
+                      {"principal_id": principal_id, "now": now},
+                  )
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.service_integrations
+                          (principal_id,integration_key,description,created_at_utc)
+                          VALUES (:principal_id,'audit-core','Audit Core confidential OAuth client',:now)
+                          """
+                      ),
+                      {"principal_id": principal_id, "now": now},
+                  )
+              else:
+                  if existing["actor_type"] != "SERVICE_INTEGRATION" or existing["status"] != "ACTIVE":
+                      raise SystemExit("Existing audit-core principal is not ACTIVE SERVICE_INTEGRATION")
+                  principal_id = str(existing["principal_id"])
+
+              credential = conn.execute(
+                  text(
+                      """
+                      SELECT credential_id,principal_id,secret_hash,status
+                      FROM security.principal_credentials
+                      WHERE client_id='audit-core'
+                      FOR UPDATE
+                      """
+                  )
+              ).mappings().first()
+
+              if credential is None:
+                  credential_id = str(uuid4())
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.principal_credentials
+                          (credential_id,principal_id,client_id,secret_hash,status,valid_from_utc,valid_to_utc,
+                           created_by_user_id,created_at_utc,last_used_at_utc)
+                          VALUES
+                          (:credential_id,:principal_id,'audit-core',:secret_hash,'ACTIVE',:now,NULL,
+                           :admin_user_id,:now,NULL)
+                          """
+                      ),
+                      {
+                          "credential_id": credential_id,
+                          "principal_id": principal_id,
+                          "secret_hash": expected_hash,
+                          "admin_user_id": admin_user_id,
+                          "now": now,
+                      },
+                  )
+              else:
+                  if str(credential["principal_id"]) != principal_id:
+                      raise SystemExit("Existing audit-core client_id belongs to another principal")
+                  if credential["status"] == "REVOKED":
+                      raise SystemExit("Existing audit-core credential is REVOKED")
+                  credential_id = str(credential["credential_id"])
+                  if credential["secret_hash"] != expected_hash or credential["status"] != "ACTIVE":
+                      conn.execute(
+                          text(
+                              """
+                              UPDATE security.principal_credentials
+                              SET secret_hash=:secret_hash,status='ACTIVE',valid_from_utc=:now,
+                                  valid_to_utc=NULL,last_used_at_utc=NULL
+                              WHERE credential_id=:credential_id
+                              """
+                          ),
+                          {
+                              "secret_hash": expected_hash,
+                              "now": now,
+                              "credential_id": credential_id,
+                          },
+                      )
+
+              scopes = conn.execute(
+                  text(
+                      """
+                      SELECT tenant_id FROM security.principal_tenant_scopes
+                      WHERE principal_id=:principal_id AND status='ACTIVE'
+                        AND (valid_to_utc IS NULL OR valid_to_utc>:now)
+                      """
+                  ),
+                  {"principal_id": principal_id, "now": now},
+              ).all()
+              unexpected_scopes = {
+                  str(row[0]) for row in scopes if str(row[0]) != tenant_id
+              }
+              if unexpected_scopes:
+                  raise SystemExit(
+                      "audit-core has unexpected ACTIVE Tenant scopes: "
+                      + ",".join(sorted(unexpected_scopes))
+                  )
+              if not any(str(row[0]) == tenant_id for row in scopes):
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.principal_tenant_scopes
+                          (scope_id,principal_id,tenant_id,status,valid_from_utc,valid_to_utc,created_at_utc)
+                          VALUES (:scope_id,:principal_id,:tenant_id,'ACTIVE',:now,NULL,:now)
+                          """
+                      ),
+                      {
+                          "scope_id": str(uuid4()),
+                          "principal_id": principal_id,
+                          "tenant_id": tenant_id,
+                          "now": now,
+                      },
+                  )
+
+              grants = conn.execute(
+                  text(
+                      """
+                      SELECT tenant_id,permission_key
+                      FROM security.principal_permission_grants
+                      WHERE principal_id=:principal_id AND status='ACTIVE'
+                      """
+                  ),
+                  {"principal_id": principal_id},
+              ).mappings().all()
+              unexpected_grants = {
+                  f"{row['tenant_id']}:{row['permission_key']}"
+                  for row in grants
+                  if str(row["tenant_id"]) != tenant_id
+                  or str(row["permission_key"]) not in required_permissions
+              }
+              if unexpected_grants:
+                  raise SystemExit(
+                      "audit-core has unexpected ACTIVE grants: "
+                      + ",".join(sorted(unexpected_grants))
+                  )
+              observed = {
+                  str(row["permission_key"])
+                  for row in grants
+                  if str(row["tenant_id"]) == tenant_id
+              }
+              for permission in sorted(required_permissions - observed):
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.principal_permission_grants
+                          (grant_id,principal_id,tenant_id,permission_key,status,granted_by_user_id,granted_at_utc)
+                          VALUES (:grant_id,:principal_id,:tenant_id,:permission,'ACTIVE',:admin_user_id,:now)
+                          """
+                      ),
+                      {
+                          "grant_id": str(uuid4()),
+                          "principal_id": principal_id,
+                          "tenant_id": tenant_id,
+                          "permission": permission,
+                          "admin_user_id": admin_user_id,
+                          "now": now,
+                      },
+                  )
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"TARGET_TENANT_ID={tenant_id}\n")
+              handle.write(f"AUDIT_CORE_PRINCIPAL_ID={principal_id}\n")
+              handle.write(f"AUDIT_CORE_CREDENTIAL_ID={credential_id}\n")
+          print(
+              f"AUDIT_CORE_SECURITY_BINDING=PASS tenant_id={tenant_id} principal_id={principal_id}"
+          )
+          PY
+
+      - name: Resolve deployed Security public domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || {
+            echo "::error::RAILWAY_TOKEN is not configured."
+            exit 1
+          }
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" \
+            '[.[] | select(.name == $service)] | first | .id // empty' /tmp/railway-services.json)"
+          [ -n "$service_id" ] || exit 1
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { id domain } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$service_id" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' --data "$body")"
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || {
+            echo "::error::Security DEV public domain is missing."
+            exit 1
+          }
+          echo "SECURITY_BASE_URL=https://$domain" >> "$GITHUB_ENV"
+          curl --fail --silent --show-error "https://$domain/health/ready" >/tmp/ready.json
+          echo "SECURITY_BIND_READINESS=PASS"
+
+      - name: Prove real Audit Core client_credentials token and least privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import secrets
+
+          import httpx
+          import jwt
+
+          base = os.environ["SECURITY_BASE_URL"].rstrip("/")
+          client_id = os.environ["AUDIT_CORE_CLIENT_ID"]
+          secret = os.environ["AUDIT_CORE_CLIENT_SECRET"]
+          tenant_id = os.environ["TARGET_TENANT_ID"]
+          required = {"di.document.read", "di.document.upload"}
+
+          with httpx.Client(timeout=20.0) as client:
+              response = client.post(
+                  base + "/oauth/token",
+                  auth=(client_id, secret),
+                  data={
+                      "grant_type": "client_credentials",
+                      "tenant_id": tenant_id,
+                      "scope": "di.document.read di.document.upload",
+                  },
+              )
+              if response.status_code != 200:
+                  raise SystemExit(
+                      f"Live Audit Core token issuance failed HTTP {response.status_code}"
+                  )
+              body = response.json()
+              token = body.get("access_token")
+              if not isinstance(token, str) or not token:
+                  raise SystemExit("Live token response has no access_token")
+              if body.get("token_type") != "Bearer":
+                  raise SystemExit("Live token response has invalid token_type")
+              if set(str(body.get("scope", "")).split()) != required:
+                  raise SystemExit("Live token response scope is not exact approved DI grant set")
+
+              jwks = jwt.PyJWKClient(base + "/.well-known/jwks.json")
+              signing_key = jwks.get_signing_key_from_jwt(token)
+              claims = jwt.decode(
+                  token,
+                  signing_key.key,
+                  algorithms=["RS256"],
+                  issuer="verigence-security",
+                  audience="verigence-platform",
+              )
+              if claims.get("sub") != client_id:
+                  raise SystemExit("Live SERVICE token subject is not audit-core")
+              if claims.get("actor_type") != "SERVICE_INTEGRATION":
+                  raise SystemExit("Live machine token actor_type is not SERVICE_INTEGRATION")
+              if claims.get("tenant_id") != tenant_id:
+                  raise SystemExit("Live machine token Tenant does not match bound Tenant")
+              if set(claims.get("permissions", [])) != required:
+                  raise SystemExit("Live machine token permissions are not exact approved DI grant set")
+              if claims.get("roles") or claims.get("device_id") or claims.get("location_id"):
+                  raise SystemExit("Live machine token contains USER-only claims")
+
+              wrong = client.post(
+                  base + "/oauth/token",
+                  auth=(client_id, "wrong-" + secrets.token_urlsafe(18)),
+                  data={
+                      "grant_type": "client_credentials",
+                      "tenant_id": tenant_id,
+                      "scope": "di.document.read",
+                  },
+              )
+              if wrong.status_code != 401 or wrong.json().get("error") != "invalid_client":
+                  raise SystemExit("Wrong Audit Core credential did not fail as invalid_client")
+
+              overgrant = client.post(
+                  base + "/oauth/token",
+                  auth=(client_id, secret),
+                  data={
+                      "grant_type": "client_credentials",
+                      "tenant_id": tenant_id,
+                      "scope": "di.verification.write",
+                  },
+              )
+              if overgrant.status_code != 400 or overgrant.json().get("error") != "invalid_scope":
+                  raise SystemExit("Unapproved Audit Core scope did not fail as invalid_scope")
+
+          print("AUDIT_CORE_LIVE_SERVICE_TOKEN=PASS")
+          print("AUDIT_CORE_LIVE_WRONG_SECRET_DENIAL=PASS")
+          print("AUDIT_CORE_LIVE_OVERGRANT_DENIAL=PASS")
+          PY
+
+      - name: Verify persisted Security evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+          with engine.connect() as conn:
+              credential = conn.execute(
+                  text(
+                      """
+                      SELECT last_used_at_utc,status
+                      FROM security.principal_credentials
+                      WHERE credential_id=:credential_id
+                      """
+                  ),
+                  {"credential_id": os.environ["AUDIT_CORE_CREDENTIAL_ID"]},
+              ).mappings().one()
+              session = conn.execute(
+                  text(
+                      """
+                      SELECT access_session_id,actor_type,tenant_id,principal_id,credential_id,status
+                      FROM security.access_sessions
+                      WHERE principal_id=:principal_id AND actor_type='SERVICE_INTEGRATION'
+                      ORDER BY started_at_utc DESC
+                      LIMIT 1
+                      """
+                  ),
+                  {"principal_id": os.environ["AUDIT_CORE_PRINCIPAL_ID"]},
+              ).mappings().one()
+              evaluation = conn.execute(
+                  text(
+                      """
+                      SELECT decision,decision_reason_code,actor_type,tenant_id,principal_id
+                      FROM security.access_context_evaluations
+                      WHERE access_session_id=:session_id
+                      ORDER BY evaluated_at_utc DESC
+                      LIMIT 1
+                      """
+                  ),
+                  {"session_id": session["access_session_id"]},
+              ).mappings().one()
+
+          assert credential["status"] == "ACTIVE"
+          assert credential["last_used_at_utc"] is not None
+          assert session["actor_type"] == "SERVICE_INTEGRATION"
+          assert str(session["tenant_id"]) == os.environ["TARGET_TENANT_ID"]
+          assert str(session["principal_id"]) == os.environ["AUDIT_CORE_PRINCIPAL_ID"]
+          assert str(session["credential_id"]) == os.environ["AUDIT_CORE_CREDENTIAL_ID"]
+          assert session["status"] == "ACTIVE"
+          assert evaluation["decision"] == "ALLOW"
+          assert evaluation["decision_reason_code"] == "MACHINE_ACCESS_GRANTED"
+          assert evaluation["actor_type"] == "SERVICE_INTEGRATION"
+          assert str(evaluation["tenant_id"]) == os.environ["TARGET_TENANT_ID"]
+          assert str(evaluation["principal_id"]) == os.environ["AUDIT_CORE_PRINCIPAL_ID"]
+          print("AUDIT_CORE_LIVE_SECURITY_EVIDENCE=PASS")
+          PY
+
+  integration-bootstrap:
+    name: DEV Integration Bootstrap
+    needs:
+      - quality
+      - tenant-admin
+      - integration-prerequisites
+      - readiness-check
+      - audit-core-bind
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'integration-bootstrap'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require complete bootstrap chain
+        shell: bash
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          TENANT_ADMIN: ${{ needs.tenant-admin.result }}
+          PREREQUISITES: ${{ needs.integration-prerequisites.result }}
+          READINESS: ${{ needs.readiness-check.result }}
+          AUDIT_CORE: ${{ needs.audit-core-bind.result }}
+        run: |
+          set -euo pipefail
+          [ "$QUALITY" = "success" ]
+          [ "$TENANT_ADMIN" = "success" ]
+          [ "$PREREQUISITES" = "success" ]
+          [ "$READINESS" = "success" ]
+          [ "$AUDIT_CORE" = "success" ]
+          echo "DEV_INTEGRATION_BOOTSTRAP=PASS"
+          echo "tenant_id=${{ needs.tenant-admin.outputs.tenant_id }}"
+          echo "tenant_status=${{ needs.tenant-admin.outputs.tenant_status }}"
