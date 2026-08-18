@@ -19,6 +19,7 @@ env:
   PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
   PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
   SECURITY_SERVICE: security
+  TARGET_TENANT_ID: 9de3af49-260f-4b15-8263-07c93dcc04d2
 
 jobs:
   diagnose:
@@ -29,6 +30,7 @@ jobs:
     timeout-minutes: 15
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
 
     steps:
       - name: Check out exact revision
@@ -66,6 +68,93 @@ jobs:
           if project.get('id') != os.environ['PLATFORM_PROJECT_ID']:
               raise SystemExit('Linked Railway project is not the approved shared DEV project')
           print('SHARED_DEV_TARGET=PASS')
+          PY
+
+      - name: Prove exact Security database source candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "Postgres" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/postgres-vars.json
+
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          from sqlalchemy import create_engine, text
+
+          tenant_id = os.environ['TARGET_TENANT_ID']
+          migration_url = (os.environ.get('MIGRATION_DATABASE_URL') or '').strip()
+          postgres_values = json.loads(Path('/tmp/postgres-vars.json').read_text())
+          railway_postgres_url = str(postgres_values.get('DATABASE_URL') or '')
+
+          def normalize(value: str) -> str:
+              if value.startswith('postgresql+psycopg://'):
+                  return value
+              if value.startswith('postgresql+asyncpg://'):
+                  return 'postgresql+psycopg://' + value.removeprefix('postgresql+asyncpg://')
+              if value.startswith('postgresql://'):
+                  return 'postgresql+psycopg://' + value.removeprefix('postgresql://')
+              if value.startswith('postgres://'):
+                  return 'postgresql+psycopg://' + value.removeprefix('postgres://')
+              return value
+
+          def is_security_target(label: str, value: str) -> bool:
+              if not value:
+                  print(f'{label}=FAIL reason=MISSING')
+                  return False
+              try:
+                  engine = create_engine(normalize(value), pool_pre_ping=True)
+                  with engine.connect() as connection:
+                      tenant = connection.execute(
+                          text(
+                              """
+                              SELECT EXISTS(
+                                SELECT 1 FROM security.tenants
+                                WHERE tenant_id=:tenant_id
+                                  AND tenant_code='test-project'
+                                  AND tenant_name='TestProject'
+                                  AND status='ACTIVE'
+                              )
+                              """
+                          ),
+                          {'tenant_id': tenant_id},
+                      ).scalar_one()
+                      binding = connection.execute(
+                          text(
+                              """
+                              SELECT EXISTS(
+                                SELECT 1
+                                FROM security.service_integrations si
+                                JOIN security.principal_tenant_scopes s
+                                  ON s.principal_id=si.principal_id
+                                WHERE si.integration_key='audit-core'
+                                  AND s.tenant_id=:tenant_id
+                                  AND s.status='ACTIVE'
+                              )
+                              """
+                          ),
+                          {'tenant_id': tenant_id},
+                      ).scalar_one()
+              except Exception as exc:
+                  print(f'{label}=FAIL error_class={type(exc).__name__}')
+                  return False
+              if bool(tenant) and bool(binding):
+                  print(f'{label}=PASS')
+                  return True
+              print(f'{label}=FAIL reason=SECURITY_TARGET_NOT_FOUND')
+              return False
+
+          migration_ok = is_security_target('MIGRATION_DATABASE_SECURITY_TARGET', migration_url)
+          railway_ok = is_security_target('RAILWAY_POSTGRES_SECURITY_TARGET', railway_postgres_url)
+          if not migration_ok:
+              raise SystemExit('MIGRATION_DATABASE_URL does not resolve to the proven Security DEV database')
+          print('DATABASE_SOURCE_PROOF=PASS migration_database=true railway_postgres=' + str(railway_ok).lower())
           PY
 
       - name: Diagnose live Security readiness inputs without exposing values
