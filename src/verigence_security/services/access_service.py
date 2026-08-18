@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -7,7 +9,7 @@ from verigence_security.adapters.identity import AuthenticatedIdentity
 from verigence_security.adapters.network_risk import NetworkRiskAdapter
 from verigence_security.core.errors import security_error
 from verigence_security.core.types import ActorType, PolicyAction, VpnStatus
-from verigence_security.repositories.security_repository import SecurityRepository
+from verigence_security.repositories.security_repository import MachineCredential, SecurityRepository
 from verigence_security.services.geo import GeoSample, match_location, validate_geo
 from verigence_security.services.permissions import validate_permissions
 from verigence_security.services.schedule import evaluate_schedule
@@ -208,3 +210,215 @@ class UserAccessService:
             "roles": roles,
             "permissions": permissions,
         }
+
+
+class MachineAccessService:
+    def __init__(self, repo: SecurityRepository, tokens: TokenService) -> None:
+        self.repo = repo
+        self.tokens = tokens
+
+    def issue_machine_token(
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        tenant_id: str,
+        requested_permissions: list[str],
+        source_ip: str,
+        correlation_id: str,
+    ) -> dict[str, object]:
+        now = datetime.now(UTC)
+        try:
+            credential = self._authenticate_credential(client_id, client_secret, now)
+            self._require_active_tenant(tenant_id)
+            policy = self.repo.get_tenant_policy(tenant_id)
+            permissions = self._authorized_permissions(
+                credential=credential,
+                tenant_id=tenant_id,
+                requested_permissions=requested_permissions,
+                now=now,
+            )
+            expiry = now + timedelta(minutes=policy.machine_token_ttl_minutes)
+            session_id = self.repo.create_machine_session(
+                principal_id=credential.principal_id,
+                actor_type=credential.actor_type,
+                tenant_id=tenant_id,
+                credential_id=credential.credential_id,
+                source_ip=source_ip,
+                expires_at=expiry,
+                now=now,
+            )
+            self.repo.record_evaluation(
+                {
+                    "evaluation_id": str(uuid4()),
+                    "access_session_id": session_id,
+                    "tenant_id": tenant_id,
+                    "principal_id": credential.principal_id,
+                    "actor_type": credential.actor_type.value,
+                    "supplied_latitude": None,
+                    "supplied_longitude": None,
+                    "supplied_accuracy_meters": None,
+                    "geo_captured_at_utc": None,
+                    "geo_source": None,
+                    "geo_integrity_status": None,
+                    "geo_integrity_reason": None,
+                    "matched_location_id": None,
+                    "matched_distance_meters": None,
+                    "evaluated_local_time": None,
+                    "evaluated_timezone": None,
+                    "schedule_id": None,
+                    "source_ip": source_ip,
+                    "vpn_status": None,
+                    "decision": "ALLOW",
+                    "decision_reason_code": "MACHINE_ACCESS_GRANTED",
+                    "correlation_id": correlation_id,
+                    "evaluated_at_utc": now,
+                }
+            )
+            token = self.tokens.issue(
+                AccessTokenClaims(
+                    principal_id=credential.principal_id,
+                    actor_type=credential.actor_type,
+                    tenant_id=tenant_id,
+                    access_session_id=session_id,
+                    permissions=tuple(permissions),
+                    expires_at=expiry,
+                )
+            )
+            self.repo.mark_machine_credential_used(credential.credential_id, now)
+            self.repo.commit()
+        except Exception:
+            self.repo.rollback()
+            raise
+
+        return {
+            "accessToken": token,
+            "expiresAtUtc": expiry,
+            "permissions": permissions,
+        }
+
+    def exchange_user_token(
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        subject_token: str,
+        requested_permissions: list[str],
+    ) -> dict[str, object]:
+        now = datetime.now(UTC)
+        try:
+            credential = self._authenticate_credential(client_id, client_secret, now)
+            claims = self.tokens.verify(subject_token)
+            if claims.get("actor_type") != ActorType.USER.value:
+                raise security_error("AUTH_TOKEN_INVALID")
+
+            subject = claims.get("sub")
+            tenant_id = claims.get("tenant_id")
+            access_session_id = claims.get("access_session_id")
+            roles = claims.get("roles")
+            device_id = claims.get("device_id")
+            location_id = claims.get("location_id")
+            user_permissions = claims.get("permissions")
+            expires_at_raw = claims.get("exp")
+            if (
+                not isinstance(subject, str)
+                or not subject
+                or not isinstance(tenant_id, str)
+                or not tenant_id
+                or not isinstance(access_session_id, str)
+                or not access_session_id
+                or not isinstance(roles, list)
+                or not all(isinstance(role, str) for role in roles)
+                or not isinstance(device_id, str)
+                or not device_id
+                or not isinstance(location_id, str)
+                or not location_id
+                or not isinstance(user_permissions, list)
+                or not all(isinstance(permission, str) for permission in user_permissions)
+                or not isinstance(expires_at_raw, (int, float))
+            ):
+                raise security_error("AUTH_TOKEN_INVALID")
+
+            self._require_active_tenant(tenant_id)
+            machine_permissions = set(
+                self.repo.machine_permissions(credential.principal_id, tenant_id, now)
+            )
+            validated_user_permissions = set(validate_permissions(user_permissions))
+            requested = self._requested_permissions(requested_permissions)
+            allowed = machine_permissions.intersection(validated_user_permissions)
+            if not set(requested).issubset(allowed):
+                raise security_error("PERMISSION_DENIED")
+
+            expiry = datetime.fromtimestamp(float(expires_at_raw), UTC)
+            token = self.tokens.issue(
+                AccessTokenClaims(
+                    principal_id=subject,
+                    actor_type=ActorType.USER,
+                    tenant_id=tenant_id,
+                    access_session_id=access_session_id,
+                    permissions=tuple(requested),
+                    roles=tuple(roles),
+                    device_id=device_id,
+                    location_id=location_id,
+                    expires_at=expiry,
+                    delegated_actor_id=credential.client_id,
+                )
+            )
+            self.repo.mark_machine_credential_used(credential.credential_id, now)
+            self.repo.commit()
+        except Exception:
+            self.repo.rollback()
+            raise
+
+        return {
+            "accessToken": token,
+            "expiresAtUtc": expiry,
+            "permissions": requested,
+        }
+
+    def _authenticate_credential(
+        self,
+        client_id: str,
+        client_secret: str,
+        now: datetime,
+    ) -> MachineCredential:
+        credential = self.repo.machine_credential(client_id, now)
+        verifier = credential.secret_hash.strip().lower()
+        if len(verifier) != 64 or any(character not in "0123456789abcdef" for character in verifier):
+            raise security_error("MACHINE_CREDENTIAL_INVALID")
+        supplied = hashlib.sha256(client_secret.encode()).hexdigest()
+        if not hmac.compare_digest(verifier, supplied):
+            raise security_error("MACHINE_CREDENTIAL_INVALID")
+        return credential
+
+    def _require_active_tenant(self, tenant_id: str) -> None:
+        tenant_status = self.repo.tenant_status(tenant_id)
+        if tenant_status in {"OFFBOARDING", "OFFBOARDED"}:
+            raise security_error("TENANT_OFFBOARDING")
+        if tenant_status != "ACTIVE":
+            raise security_error("TENANT_NOT_ACTIVE")
+
+    def _authorized_permissions(
+        self,
+        *,
+        credential: MachineCredential,
+        tenant_id: str,
+        requested_permissions: list[str],
+        now: datetime,
+    ) -> list[str]:
+        requested = self._requested_permissions(requested_permissions)
+        allowed = set(
+            validate_permissions(
+                self.repo.machine_permissions(credential.principal_id, tenant_id, now)
+            )
+        )
+        if not set(requested).issubset(allowed):
+            raise security_error("PERMISSION_DENIED")
+        return requested
+
+    @staticmethod
+    def _requested_permissions(requested_permissions: list[str]) -> list[str]:
+        requested = [permission for permission in requested_permissions if permission]
+        if not requested:
+            raise security_error("PERMISSION_DENIED")
+        return validate_permissions(requested)
