@@ -283,6 +283,7 @@ class MachineAccessService:
                     access_session_id=session_id,
                     permissions=tuple(permissions),
                     expires_at=expiry,
+                    subject=credential.client_id,
                 )
             )
             self.repo.mark_machine_credential_used(credential.credential_id, now)
