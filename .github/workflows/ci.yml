@@ -112,8 +112,8 @@ jobs:
     if: >-
       needs.quality.result == 'success' &&
       (
-        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-        (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy-dev' && github.ref == 'refs/heads/main')
+        (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
+        (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy-dev' && github.ref == 'refs/heads/dev')
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 35
