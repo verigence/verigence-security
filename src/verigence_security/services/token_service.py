@@ -32,7 +32,7 @@ class AccessTokenClaims:
     roles: tuple[str, ...] = ()
     device_id: str | None = None
     location_id: str | None = None
-
+    delegated_actor_id: str | None = None
 
 
 def _validate_actor_claim_shape(claims: AccessTokenClaims) -> None:
@@ -44,6 +44,8 @@ def _validate_actor_claim_shape(claims: AccessTokenClaims) -> None:
         raise ValueError(
             "Machine Security token cannot carry USER-only roles/device/location claims"
         )
+    if claims.delegated_actor_id is not None:
+        raise ValueError("Machine Security token cannot carry a delegated USER actor claim")
 
 
 class TokenService:
@@ -78,6 +80,8 @@ class TokenService:
             payload["device_id"] = claims.device_id
         if claims.location_id:
             payload["location_id"] = claims.location_id
+        if claims.delegated_actor_id:
+            payload["act"] = {"sub": claims.delegated_actor_id}
         try:
             return jwt.encode(
                 payload,
@@ -124,6 +128,18 @@ class TokenService:
                     raise security_error("AUTH_TOKEN_INVALID")
             elif payload.get("device_id") or payload.get("location_id") or payload.get("roles"):
                 raise security_error("AUTH_TOKEN_INVALID")
+
+            delegated_actor = payload.get("act")
+            if delegated_actor is not None:
+                if actor_type != ActorType.USER:
+                    raise security_error("AUTH_TOKEN_INVALID")
+                if (
+                    not isinstance(delegated_actor, dict)
+                    or not isinstance(delegated_actor.get("sub"), str)
+                    or not delegated_actor["sub"]
+                ):
+                    raise security_error("AUTH_TOKEN_INVALID")
+
             try:
                 validate_permissions([str(value) for value in payload.get("permissions", [])])
             except ValueError as exc:
