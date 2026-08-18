@@ -45,6 +45,7 @@ jobs:
     timeout-minutes: 20
     env:
       DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       TENANT_CODE: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_code || 'test-project' }}
       TENANT_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_name || 'TestProject' }}
@@ -107,11 +108,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${DEV_DATABASE_URL:-}" || { echo "DEV_DATABASE_URL is required" >&2; exit 1; }
+          raw_database_url="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          test -n "$raw_database_url" || { echo "MIGRATION_DATABASE_URL or DEV_DATABASE_URL is required" >&2; exit 1; }
+          echo "::add-mask::$raw_database_url"
+          echo "TENANT_ADMIN_DATABASE_URL=$raw_database_url" >> "$GITHUB_ENV"
           test -n "${TENANT_CODE:-}" || { echo "tenant_code cannot be blank" >&2; exit 1; }
           test -n "${TENANT_NAME:-}" || { echo "tenant_name cannot be blank" >&2; exit 1; }
 
-          python - <<'PY'
+          TENANT_ADMIN_DATABASE_URL="$raw_database_url" python - <<'PY'
           from __future__ import annotations
 
           import os
@@ -129,7 +133,7 @@ jobs:
           if not tenant_code or not tenant_name:
               raise SystemExit("Tenant code and name must be non-blank")
 
-          settings = Settings(database_url=os.environ["DEV_DATABASE_URL"])
+          settings = Settings(database_url=os.environ["TENANT_ADMIN_DATABASE_URL"])
           factory = build_session_factory(settings)
           if factory is None:
               raise SystemExit("Security DEV database is not configured")
