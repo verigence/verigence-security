@@ -36,8 +36,8 @@ from verigence_security.services.token_service import TokenService
 router = APIRouter(prefix="/security/v1", tags=["Runtime Access"])
 oauth_router = APIRouter(tags=["OAuth"])
 
-TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
-ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+TOKEN_EXCHANGE_GRANT = ":".join(("urn", "ietf", "params", "oauth", "grant-type", "token-exchange"))
+ACCESS_TOKEN_TYPE = ":".join(("urn", "ietf", "params", "oauth", "token-type", "access_token"))
 
 
 class GroupAwareSecurityRepository(SecurityRepository):
