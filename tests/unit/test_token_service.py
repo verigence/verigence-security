@@ -5,8 +5,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from verigence_security.config import Settings
+from verigence_security.core.errors import SecurityError
 from verigence_security.core.types import ActorType
-from verigence_security.services.token_service import AccessTokenClaims, TokenService
+from verigence_security.services.token_service import (
+    AccessTokenClaims,
+    ServiceTokenClaims,
+    TokenService,
+)
 
 
 def _pem_pair():
@@ -64,6 +69,46 @@ def test_token_issue_and_verify_preserves_security_asserted_actor_and_permission
     assert claims["permissions"] == ["di.document.read", "di.document.upload"]
     assert claims["device_id"] == "44444444-4444-4444-4444-444444444444"
     assert claims["location_id"] == "55555555-5555-5555-5555-555555555555"
+
+
+def test_human_verifier_trusts_security_user_identity_not_embedded_authorization():
+    private_pem, public_pem = _pem_pair()
+    service = TokenService(_settings(private_pem, public_pem))
+    user_id = "11111111-1111-1111-1111-111111111111"
+
+    token = service.issue(
+        AccessTokenClaims(
+            principal_id=user_id,
+            actor_type=ActorType.USER,
+            tenant_id="22222222-2222-2222-2222-222222222222",
+            access_session_id="33333333-3333-3333-3333-333333333333",
+            permissions=("di.document.read",),
+            roles=("PC",),
+            device_id="44444444-4444-4444-4444-444444444444",
+            location_id="55555555-5555-5555-5555-555555555555",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+    )
+
+    claims = service.verify_human_token(token)
+    assert claims["sub"] == user_id
+    assert claims["actor_type"] == "USER"
+
+
+def test_human_verifier_rejects_service_integration_token():
+    private_pem, public_pem = _pem_pair()
+    service = TokenService(_settings(private_pem, public_pem))
+    token = service.issue_service_token(
+        ServiceTokenClaims(
+            subject="audit-core",
+            audience=service.settings.security_token_audience,
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
+        )
+    )
+
+    with pytest.raises(SecurityError) as exc:
+        service.verify_human_token(token)
+    assert exc.value.code == "ACTOR_TYPE_NOT_ALLOWED"
 
 
 def test_legacy_permission_is_never_emitted_in_security_token():
