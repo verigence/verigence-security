@@ -4,7 +4,10 @@ from collections.abc import Generator
 
 from fastapi import Depends
 
-from verigence_security.adapters.identity import ClerkJwtIdentityProvider
+from verigence_security.adapters.identity import (
+    AuthenticatedIdentity,
+    ClerkJwtIdentityProvider,
+)
 from verigence_security.api.dependencies import bearer_token
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
@@ -18,7 +21,7 @@ from verigence_security.services.v2_human_actor import (
 def clerk_human_identity_token(
     token: str = Depends(bearer_token),
     settings: Settings = Depends(get_settings),
-):
+) -> AuthenticatedIdentity:
     """Validate a first-party Clerk session JWT for a human Security caller.
 
     This dependency intentionally bypasses the generic DEV-mock/legacy token chooser.
@@ -29,7 +32,7 @@ def clerk_human_identity_token(
 
 
 def clerk_human_actor(
-    identity=Depends(clerk_human_identity_token),
+    identity: AuthenticatedIdentity = Depends(clerk_human_identity_token),
     settings: Settings = Depends(get_settings),
 ) -> Generator[HumanActorContext, None, None]:
     factory = build_session_factory(settings)
