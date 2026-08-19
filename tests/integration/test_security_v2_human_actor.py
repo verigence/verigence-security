@@ -8,7 +8,6 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.identity import AuthenticatedIdentity
 from verigence_security.core.errors import SecurityError
 from verigence_security.services.v2_human_actor import HumanActorAuthenticationService
 
@@ -89,15 +88,11 @@ def _create_human(
     )
 
 
-def _clerk_identity(subject: str) -> AuthenticatedIdentity:
-    return AuthenticatedIdentity("CLERK", subject, "sess_test")
-
-
 def _assert_security_error(exc: pytest.ExceptionInfo[SecurityError], code: str) -> None:
     assert exc.value.code == code
 
 
-def test_v2_human_actor_resolves_current_admin_scopes() -> None:
+def test_v2_human_actor_resolves_current_admin_scopes_from_global_user() -> None:
     assert TEST_DATABASE_URL is not None
     engine = create_engine(_sqlalchemy_url(TEST_DATABASE_URL), pool_pre_ping=True)
     user_id = str(uuid4())
@@ -141,7 +136,7 @@ def test_v2_human_actor_resolves_current_admin_scopes() -> None:
 
         with Session(engine) as session:
             service = HumanActorAuthenticationService(session)
-            actor = service.authenticate(_clerk_identity(subject))
+            actor = service.authenticate_user_id(user_id)
 
             assert actor.user_id == user_id
             assert actor.clerk_subject == subject
@@ -190,10 +185,9 @@ def test_v2_human_actor_allows_active_human_without_admin_classification() -> No
             _create_human(conn, user_id=user_id, subject=subject)
 
         with Session(engine) as session:
-            actor = HumanActorAuthenticationService(session).authenticate(
-                _clerk_identity(subject)
-            )
+            actor = HumanActorAuthenticationService(session).authenticate_user_id(user_id)
             assert actor.user_id == user_id
+            assert actor.clerk_subject == subject
             assert actor.has_admin_classification is False
     finally:
         with engine.begin() as conn:
@@ -243,9 +237,7 @@ def test_v2_human_actor_fails_closed_for_non_active_identity_or_user(
 
         with Session(engine) as session:
             with pytest.raises(SecurityError) as exc:
-                HumanActorAuthenticationService(session).authenticate(
-                    _clerk_identity(subject)
-                )
+                HumanActorAuthenticationService(session).authenticate_user_id(user_id)
             _assert_security_error(exc, expected_code)
     finally:
         with engine.begin() as conn:
@@ -264,29 +256,13 @@ def test_v2_human_actor_fails_closed_for_non_active_identity_or_user(
         engine.dispose()
 
 
-def test_v2_human_actor_rejects_unmapped_clerk_subject() -> None:
+def test_v2_human_actor_rejects_unmapped_security_user_id() -> None:
     assert TEST_DATABASE_URL is not None
     engine = create_engine(_sqlalchemy_url(TEST_DATABASE_URL), pool_pre_ping=True)
     try:
         with Session(engine) as session:
             with pytest.raises(SecurityError) as exc:
-                HumanActorAuthenticationService(session).authenticate(
-                    _clerk_identity(f"user_missing_{uuid4().hex}")
-                )
+                HumanActorAuthenticationService(session).authenticate_user_id(str(uuid4()))
             _assert_security_error(exc, "USER_NOT_ONBOARDED")
-    finally:
-        engine.dispose()
-
-
-def test_v2_human_actor_rejects_non_clerk_identity_before_database_lookup() -> None:
-    assert TEST_DATABASE_URL is not None
-    engine = create_engine(_sqlalchemy_url(TEST_DATABASE_URL), pool_pre_ping=True)
-    try:
-        with Session(engine) as session:
-            with pytest.raises(SecurityError) as exc:
-                HumanActorAuthenticationService(session).authenticate(
-                    AuthenticatedIdentity("DEV_MOCK", "devmock:user", "sess_test")
-                )
-            _assert_security_error(exc, "ACTOR_TYPE_NOT_ALLOWED")
     finally:
         engine.dispose()
