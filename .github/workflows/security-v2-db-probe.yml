@@ -1,0 +1,55 @@
+name: Security v2 DEV DB Probe
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/security-v2-db-probe.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Publish sanitized DEV database state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          context='security-v2-db-probe'
+          post() {
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state="$1" -f context="$context" -f description="$2" >/dev/null
+          }
+          trap 'post failure "Security DEV database probe failed"' ERR
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ]
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          roles="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "SELECT CASE WHEN to_regclass('security.role_definitions') IS NULL THEN -1 ELSE (SELECT count(*) FROM security.role_definitions WHERE status='ACTIVE' AND role_key IN ('PC','TL','PM','CRM','Executive','TenantAdmin','ModuleAdmin','SuperAdmin','TestUser')) END;")"
+          defaults="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "SELECT CASE WHEN to_regclass('security.platform_role_permission_defaults') IS NULL THEN -1 ELSE (SELECT count(*) FROM security.platform_role_permission_defaults d JOIN security.permissions p ON p.permission_key=d.permission_key WHERE d.status='ACTIVE' AND p.status='ACTIVE' AND d.role_key IN ('PC','TL','PM','CRM','Executive')) END;")"
+          lifecycle="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "SELECT (to_regclass('security.user_deletion_requests') IS NOT NULL AND to_regclass('security.deleted_user_tombstones') IS NOT NULL)::int;")"
+          di4="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM security.permissions WHERE status='ACTIVE' AND permission_key IN ('di.document.delete','di.unassigned_document.assign','di.subject_matching.write','di.platform.whatsapp.admin');" 2>/dev/null || echo -1)"
+          superadmin="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "SELECT CASE WHEN to_regclass('security.user_admin_role_assignments') IS NULL THEN -1 ELSE (SELECT count(*) FROM security.user_admin_role_assignments WHERE role_key='SuperAdmin' AND scope_type='PLATFORM' AND scope_id IS NULL AND status='ACTIVE') END;")"
+          post success "roles=$roles defaults=$defaults lifecycle=$lifecycle di4=$di4 superadmin=$superadmin"
+          trap - ERR
