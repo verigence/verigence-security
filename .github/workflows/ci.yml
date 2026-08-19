@@ -207,7 +207,8 @@ jobs:
             migrations/0009_backend_email_otp_facade_v1.4.8.sql \
             migrations/0010_audit_core_di_permissions.sql \
             migrations/0011_security_v2_role_foundation.sql \
-            migrations/0012_v2_super_admin_reconciliation.sql
+            migrations/0012_v2_super_admin_reconciliation.sql \
+            migrations/0013_v2_operating_role_defaults.sql
           do
             echo "Applying $(basename "$migration")"
             psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
@@ -243,6 +244,29 @@ jobs:
           ")"
           [ "$v2_role_count" = "9" ] || {
             echo "::error::Security v2 role-definition seed verification failed."
+            exit 1
+          }
+
+          v2_default_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.platform_role_permission_defaults d
+            JOIN security.permissions p ON p.permission_key=d.permission_key
+            WHERE d.status='ACTIVE' AND p.status='ACTIVE'
+              AND d.role_key IN ('PC','TL','PM','CRM','Executive');
+          ")"
+          [ "$v2_default_count" = "156" ] || {
+            echo "::error::Security v2 operating-role default seed verification failed."
+            exit 1
+          }
+
+          executive_write_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.platform_role_permission_defaults
+            WHERE role_key='Executive' AND status='ACTIVE'
+              AND permission_key IN ('audit.master.write','audit.customer.write');
+          ")"
+          [ "$executive_write_count" = "2" ] || {
+            echo "::error::Executive approved Audit Core write defaults are missing."
             exit 1
           }
 
