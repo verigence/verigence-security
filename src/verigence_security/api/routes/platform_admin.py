@@ -1,55 +1,21 @@
 from __future__ import annotations
 
-from typing import Any
-from uuid import uuid4
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.identity import AuthenticatedIdentity
-from verigence_security.api.platform_dependencies import platform_claims, platform_session
+from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.platform_schemas import (
-    PlatformLoginRequest,
-    PlatformMeResponse,
     PlatformTenantCreateRequest,
     PlatformTenantResponse,
     PlatformTenantUpdateRequest,
-    PlatformTokenResponse,
 )
 from verigence_security.api.v2_human_dependencies import clerk_human_actor
-from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
-from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.platform_admin import PlatformTenantService
-from verigence_security.services.platform_identity import PlatformIdentityResult, PlatformIdentityService
 from verigence_security.services.v2_human_actor import HumanActorContext
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
-
-
-def _credential_identity(body: PlatformLoginRequest, settings: Settings) -> AuthenticatedIdentity:
-    authenticated = ClerkCredentialService(settings).authenticate(
-        identifier=body.loginName,
-        password=body.password.get_secret_value(),
-        totp_code=body.totpCode.get_secret_value() if body.totpCode is not None else None,
-    )
-    return AuthenticatedIdentity(
-        provider="CLERK",
-        provider_subject=authenticated.clerk_user.user_id,
-        session_id=f"clerk-backend-{uuid4()}",
-    )
-
-
-def _token_response(result: PlatformIdentityResult) -> dict[str, object]:
-    return {
-        "accessToken": result.access_token,
-        "expiresAtUtc": result.expires_at_utc,
-        "userId": result.user_id,
-        "roles": list(result.roles),
-        "permissions": list(result.permissions),
-        "mustChangePassword": False,
-    }
 
 
 def _require_super_admin(actor: HumanActorContext) -> None:
@@ -81,48 +47,6 @@ def _require_tenant_update_access(actor: HumanActorContext, tenant_id: str) -> N
     if actor.is_super_admin or actor.is_tenant_admin(tenant_id):
         return
     raise security_error("PERMISSION_DENIED")
-
-
-@router.post("/bootstrap/claim", response_model=PlatformTokenResponse, deprecated=True)
-def claim_platform_super_admin(
-    body: PlatformLoginRequest,
-    request: Request,
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> dict[str, object]:
-    """Legacy bootstrap claim retained until the explicit human-token retirement step."""
-
-    identity = _credential_identity(body, settings)
-    result = PlatformIdentityService(session, settings).bootstrap_claim(
-        identity=identity,
-        correlation_id=request.state.correlation_id,
-    )
-    return _token_response(result)
-
-
-@router.post("/auth/login", response_model=PlatformTokenResponse, deprecated=True)
-def platform_login(
-    body: PlatformLoginRequest,
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> dict[str, object]:
-    """Legacy PlatformAdmin JWT path retained temporarily for migration compatibility."""
-
-    identity = _credential_identity(body, settings)
-    result = PlatformIdentityService(session, settings).login(identity=identity)
-    return _token_response(result)
-
-
-@router.get("/me", response_model=PlatformMeResponse, deprecated=True)
-def platform_me(
-    claims: dict[str, Any] = Depends(platform_claims),
-) -> dict[str, object]:
-    return {
-        "userId": str(claims["sub"]),
-        "roles": [str(value) for value in claims.get("roles", [])],
-        "permissions": [str(value) for value in claims.get("permissions", [])],
-        "mustChangePassword": bool(claims.get("must_change_password")),
-    }
 
 
 @router.post(
