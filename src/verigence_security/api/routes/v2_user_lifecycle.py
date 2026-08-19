@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
 from verigence_security.api.platform_dependencies import platform_session
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.api.v2_user_lifecycle_schemas import (
     UserHardDeleteResponse,
     UserStatusTransitionRequest,
@@ -37,7 +37,7 @@ def change_user_status(
     userId: str,
     body: UserStatusTransitionRequest,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> UserStatusTransitionResponse:
@@ -79,7 +79,7 @@ def change_user_status(
 def hard_delete_user(
     userId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> UserHardDeleteResponse:
