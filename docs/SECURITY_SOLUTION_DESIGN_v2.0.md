@@ -27,7 +27,7 @@ It covers:
 - module permission catalogues;
 - Tenant-specific role-to-permission mapping;
 - synchronous runtime authorization;
-- BFF/API-layer responsibilities;
+- BFF/API-layer responsibilities within the Web module;
 - Security integration with Audit Core and DI;
 - Security audit requirements;
 - target APIs and conceptual data model;
@@ -93,7 +93,7 @@ Phase 1 therefore has:
 - no distributed Security authorization projection in Audit Core/DI;
 - no authorization event replication for normal runtime authorization;
 - no opaque-token introspection design;
-- no permission-epoch/revocation design for a Verigence-issued human token.
+- no permission-epoch/revocation design for a Verigence-issued USER token.
 
 Authorization fails closed when Security cannot make the required decision.
 
@@ -209,18 +209,18 @@ Hard deletion uses maker/checker:
 - the maker action disables the USER;
 - only SuperAdmin may execute the final hard delete.
 
-### 2.9 BFF/API layer — CONFIRMED
+### 2.9 Web BFF/API layer — CONFIRMED
 
-A BFF/API layer sits between Web/Mobile clients and backend modules.
+The BFF/API capability is implemented as part of the **Web module**. It is not a separate Verigence module or separately owned business service.
 
-The BFF may:
+The Web BFF may:
 
 - provide UI-oriented APIs;
 - route requests;
 - orchestrate UI operations spanning Security and Audit Core;
-- shield clients from backend service topology.
+- shield the Web client from backend service topology.
 
-The BFF must not own:
+The Web BFF must not own:
 
 - USERs;
 - USER lifecycle;
@@ -230,45 +230,40 @@ The BFF must not own:
 - Dealer assignments;
 - authorization decisions as source of truth.
 
+The exact Mobile access path is not changed by this observation and must not be inferred from the Web BFF decision.
+
 ---
 
 ## 3. Target platform architecture
 
 ```text
                          HUMAN USER
-                             |
-                    Web / Mobile Client
-                             |
-                  Clerk authentication flow
-                             |
-                    Clerk session JWT
-                             |
-                             v
-                     +----------------+
-                     | BFF / API EDGE |
-                     +---+--------+---+
-                         |        |
-          Security/admin|        |Audit business APIs
-                         |        |
-                         v        v
-                 +-----------+  +-------------+
-                 | SECURITY  |  | AUDIT CORE  |
-                 |           |  |             |
-                 | USER SoT  |  | Dealer/     |
-                 | AuthZ SoT |  | business    |
-                 | roles     |  | scope       |
-                 | perms     |  | journeys    |
-                 +-----+-----+  +------+------+
-                       ^               |
-                       |               | internal only
-             runtime   |               v
-          authorization|          +-----------+
-             decision  |          |    DI     |
-                       |          | generic   |
-                       +----------| document  |
-                                  | intel.    |
-                                  +-----------+
+                        /          \
+                       /            \
+              Web application      Mobile client
+              + Web BFF/API             |
+                    |                    |
+             Clerk authentication / session JWT
+                    |                    |
+                    +---------+----------+
+                              |
+             +----------------+----------------+
+             |                |                |
+             v                v                v
+        +-----------+    +-------------+   +-----------+
+        | SECURITY  |    | AUDIT CORE  |   |    DI     |
+        |           |    |             |   |           |
+        | USER SoT  |    | Dealer/     |   | generic   |
+        | AuthZ SoT |    | business    |   | document  |
+        | roles     |    | scope       |   | intel.    |
+        | perms     |    | journeys    |   |           |
+        +-----------+    +------+------+   +-----------+
+                               |
+                               | internal DI use also allowed
+                               +---------------------------->
 ```
+
+Human access to DI is allowed when DI exposes a human-facing protected capability. DI remains outside human onboarding.
 
 ### 3.1 Core ownership rule
 
@@ -276,8 +271,8 @@ The BFF must not own:
 Clerk       = authenticate the human
 Security    = identify the Verigence USER and decide functional authorization
 Audit Core  = decide Dealer/business scope and execute Audit business logic
-DI          = generic document-intelligence service, never a human onboarding authority
-BFF         = client-facing composition/orchestration only
+DI          = generic document-intelligence service; may serve authorized humans directly but owns no human onboarding
+Web BFF     = client-facing composition/orchestration inside the Web module only
 ```
 
 ---
@@ -327,21 +322,31 @@ ALLOW = Security functional authorization
 
 ### 4.4 DI boundary — CONFIRMED
 
-Human users do not call DI directly.
+Human users **may call DI directly** for approved DI capabilities.
 
 DI has no role in human onboarding or human role assignment.
 
-Audit Core invokes DI internally after the applicable authentication, Security authorization and Audit Core business-scope checks.
+For a protected direct human DI request, DI follows the same Phase-1 human security model:
+
+```text
+Human -> DI with Clerk session JWT
+DI validates Clerk JWT locally
+DI -> Security authorization service for the required DI permission
+Security -> ALLOW / DENY
+DI executes only if allowed
+```
+
+Audit Core may also invoke DI internally for Audit workflows after its own applicable authentication, Security authorization and Audit Core business-scope checks.
 
 ---
 
-## 5. BFF boundary
+## 5. Web BFF boundary
 
 ### 5.1 Responsibilities — CONFIRMED
 
-The BFF provides a stable frontend-facing surface for Web/Mobile.
+The BFF capability is part of the Web module and provides a stable frontend-facing surface for the Web application.
 
-Typical BFF functions include:
+Typical Web BFF functions include:
 
 - user-management screens;
 - pending/active user views;
@@ -353,15 +358,17 @@ Typical BFF functions include:
 
 ### 5.2 Non-responsibilities — CONFIRMED
 
-The BFF does not persist authoritative copies of USER, role, permission or Dealer assignment records.
+The Web BFF does not persist authoritative copies of USER, role, permission or Dealer assignment records.
 
-The BFF must not grant access merely because a UI control is shown or hidden.
+The Web BFF must not grant access merely because a UI control is shown or hidden.
 
 Every backend module remains responsible for enforcing its own protected operation.
 
-### 5.3 BFF deployment location — OPEN DECISION
+### 5.3 Deployment ownership — CONFIRMED
 
-The logical BFF boundary is confirmed. Its physical repository, deployment topology and whether Web and Mobile share one BFF implementation are not defined here.
+The BFF is **merged into the Web module**. No separate BFF Verigence module is introduced.
+
+This design does not create an additional repository/service ownership boundary merely for the BFF capability.
 
 ---
 
@@ -476,7 +483,7 @@ Possession of the onboarding key grants no application role, Tenant authorizatio
 ### 9.3 Target onboarding sequence
 
 ```text
-1. Employee enters the global onboarding journey through Web/Mobile/BFF.
+1. Employee enters the global onboarding journey through Web/Mobile.
 
 2. Security validates the permitted platform-global onboarding gate
    and duplicate global identity constraints.
@@ -613,7 +620,7 @@ It transitions the USER to `DISABLED`, terminates application access and records
 
 Only `SuperAdmin` may execute final hard deletion.
 
-This is the only SuperAdmin privilege explicitly required by this Phase-1 design. Broader SuperAdmin authority is deferred.
+This is one of the explicitly confirmed SuperAdmin responsibilities in this design. SuperAdmin's broader authority remains deferred except for the permission-mapping responsibility confirmed in Section 21.
 
 ### 13.3 Two-operation API model — TARGET REQUIREMENT
 
@@ -789,16 +796,19 @@ The role names imply module/Tenant/platform scopes and existing implementation c
 
 Do not infer broad powers beyond permissions explicitly approved in the eventual role bundle.
 
-### 16.4 SuperAdmin — DEFERRED EXCEPT HARD DELETE
+### 16.4 SuperAdmin — PARTIALLY CONFIRMED / OTHERWISE DEFERRED
 
-Detailed SuperAdmin privilege boundaries, bootstrap/initial-user design and subsequent SuperAdmin assignment process are deferred.
+Detailed SuperAdmin privilege boundaries, bootstrap/initial-user design and subsequent SuperAdmin assignment process remain deferred.
 
-Confirmed here only:
+Confirmed here:
 
 - SuperAdmin is an administrative persona;
 - it may coexist with other administrative roles;
 - it cannot coexist with operating roles;
-- only SuperAdmin executes final global USER hard deletion.
+- only SuperAdmin executes final global USER hard deletion;
+- SuperAdmin can review module permission catalogues and map approved module permissions into the applicable role permission bundle before that role is assigned to users.
+
+No additional SuperAdmin privilege semantics are introduced by this revision.
 
 Existing implementation granting `platform.super_admin` every active permission must not be treated as automatically approved target behaviour.
 
@@ -858,7 +868,7 @@ Tenant T1
 
 A request to assign `U200` as PM while `U100` remains active PM returns a conflict rather than creating a second PM.
 
-The administrative UI/BFF may guide the user through replacing the PM, but Security owns and enforces the invariant.
+The administrative UI/Web BFF may guide the user through replacing the PM, but Security owns and enforces the invariant.
 
 ---
 
@@ -872,11 +882,35 @@ Security is the registry and authorization authority for those permission keys.
 
 Examples of conceptual capabilities include document upload/delete, audit review and journey operations, but canonical strings must come from approved module catalogues rather than being invented by this design.
 
-### 20.2 Existing module catalogue — EXISTING AND RETAIN
+### 20.2 Permission discovery APIs — CONFIRMED
+
+Security must provide APIs that allow an authorized administrator, including SuperAdmin, to discover the permissions currently available from each registered module.
+
+The required logical flow is:
+
+```text
+Module publishes/registers its permission catalogue
+        |
+        v
+Security stores the active module permission catalogue
+        |
+        v
+SuperAdmin lists modules and available permissions
+        |
+        v
+SuperAdmin maps selected approved permissions to a role bundle
+        |
+        v
+The configured role is assigned to a USER in the applicable scope
+```
+
+A role-permission mapping must reference permission keys that exist and are ACTIVE in the registered module catalogue. Security must not allow an arbitrary unregistered permission string to be mapped to a role bundle.
+
+### 20.3 Existing module catalogue — EXISTING AND RETAIN
 
 Current Security already provides a Platform Module Catalogue surface and persists module permissions/templates. This is aligned with the target and should be retained, subject to role-model changes described below.
 
-### 20.3 Permission retirement — EXISTING AND RETAIN
+### 20.4 Permission retirement — EXISTING AND RETAIN
 
 Existing catalogue logic detects conflicts when a permission is still referenced by role configuration. That safety behaviour remains valuable.
 
@@ -925,6 +959,28 @@ Existing module role templates can remain reusable seeds/reference bundles for p
 
 Applying a template may materialize permissions into a Tenant's bundle for one of the approved global role classifications.
 
+### 21.5 Permission mapping before user-role assignment — CONFIRMED
+
+The administration sequence must expose module capabilities before role assignment:
+
+```text
+1. Read registered modules.
+2. Read the permissions available in the selected module(s).
+3. SuperAdmin selects approved permissions and maps them to the applicable role bundle.
+4. Security validates that every selected permission exists and is ACTIVE.
+5. The role can then be assigned to a USER in its applicable Tenant/admin context.
+```
+
+This separates three different concepts:
+
+```text
+Module -> defines available permissions
+Security/SuperAdmin -> configures role-to-permission mapping
+Security -> assigns configured role to USER
+```
+
+The role-to-permission mapping and USER-to-role assignment remain separate APIs and separate audited operations.
+
 ---
 
 ## 22. Runtime authorization
@@ -933,23 +989,20 @@ Applying a template may materialize permissions into a Tenant's bundle for one o
 
 For Phase 1, Security is synchronously called for every protected backend request requiring Verigence functional authorization.
 
-Normal Audit Core flow:
+Normal protected-resource flow:
 
 ```text
 Client
   |
   | Clerk JWT
   v
-BFF/API Edge
-  |
-  v
-Audit Core
+Resource Server (Security / Audit Core / DI as applicable)
   |
   +-- validate Clerk JWT locally
   |
   +-- determine required canonical permission for endpoint/action
   |
-  +-- call Security authorization service
+  +-- call/use Security authorization service
   |      Clerk JWT + tenantId + required permission
   |
   |      Security:
@@ -962,7 +1015,7 @@ Audit Core
   |        evaluate required permission
   |        return ALLOW/DENY + stable decision context
   |
-  +-- if ALLOW, Audit Core evaluates Dealer/business scope
+  +-- if Audit Core, additionally evaluate Dealer/business scope where applicable
   |
   +-- execute operation
 ```
@@ -1008,7 +1061,7 @@ It resolves the USER from verified Clerk authentication evidence.
 
 ### 22.4 Internal caller protection — TARGET
 
-The authorization endpoint is an internal Security service boundary. It should be callable only by registered platform components/BFF paths according to the final service-authentication/network policy.
+The authorization endpoint is an internal Security service boundary. It should be callable only by registered platform components/Web BFF paths according to the final service-authentication/network policy.
 
 Exact machine credential mechanics for Security callers should reuse the approved platform service-identity mechanism rather than creating a second human token model.
 
@@ -1055,11 +1108,11 @@ Executive is Tenant-wide and does not require Dealer assignment.
 
 The redesign requirement confirms Dealer association but does not define a Phase-1 USER-to-Outlet restriction model. Security must not invent one.
 
-### 23.5 BFF orchestration
+### 23.5 Web BFF orchestration
 
 A UI may present one assignment operation containing role and Dealer selection.
 
-BFF orchestration may perform:
+Web BFF orchestration may perform:
 
 ```text
 1. Security: set USER/Tenant operating role
@@ -1179,19 +1232,29 @@ Exact URI/body for admin-role scope should be finalized together with the detail
 
 ### 25.5 SuperAdmin assignment — DEFERRED
 
-Initial/subsequent SuperAdmin creation and assignment is outside this document except for the confirmed hard-delete checker role.
+Initial/subsequent SuperAdmin creation and assignment is outside this document except for the confirmed responsibilities explicitly stated in this design.
 
 ---
 
 ## 26. Permission-configuration APIs
 
-### 26.1 Module catalogue — EXISTING AND RETAIN
+### 26.1 Module and permission discovery — CONFIRMED / EXISTING CAPABILITY TO RETAIN
 
-Keep the module catalogue capability conceptually equivalent to:
+Security must expose the registered module catalogue and the permissions available within each module.
+
+Target logical APIs:
 
 ```text
 GET /security/v1/platform/modules
 GET /security/v1/platform/modules/{moduleKey}
+GET /security/v1/platform/modules/{moduleKey}/permissions
+```
+
+The current module catalogue response may already contain permission details. The explicit `/permissions` resource is included in the target contract because the administration flow requires a clear API that answers, "Which permissions are currently available in this module?"
+
+Module catalogue registration/update remains conceptually equivalent to:
+
+```text
 PUT /security/v1/platform/modules/{moduleKey}/catalog
 ```
 
@@ -1210,15 +1273,67 @@ The PUT replaces the approved permission set for that role/Tenant atomically aft
 
 The API does not create a new role identity.
 
+The confirmed administration flow is:
+
+```text
+GET module permissions
+      |
+      v
+SuperAdmin chooses approved permission keys
+      |
+      v
+PUT Tenant role bundle
+      |
+      v
+Security validates permission catalogue references
+      |
+      v
+Role can be assigned to USER
+```
+
 ### 26.3 Template seeding — OPTIONAL EXISTING CAPABILITY
 
 Existing module role templates may be offered as seed/input when configuring a Tenant role bundle, but final permissions are owned by the Tenant role-bundle configuration in Security.
 
+### 26.4 Groups — PHASE-2 RECOMMENDATION
+
+The current Security implementation already contains:
+
+- Tenant Group CRUD;
+- Group membership;
+- Group-to-role assignment;
+- effective-permission resolution that unions group-derived roles with direct roles.
+
+Therefore a basic Group entity is **not greenfield**.
+
+However, the current authorization behaviour is not directly compatible with the redesigned role model. Group-derived role assignment can add roles to a USER and union permissions, while the target requires:
+
+- exactly one active operating role per USER/Tenant;
+- admin/operating persona exclusivity;
+- exactly one PM per Tenant.
+
+To make Groups authorization-effective in the target model, the design would first need confirmed rules for:
+
+- what a Group represents;
+- whether Groups may assign operating roles, permissions, or neither;
+- how Group effects interact with the one-operating-role rule;
+- conflict handling when direct and Group assignments disagree;
+- PM uniqueness through Groups;
+- whether administrative roles may ever be Group-derived.
+
+Those rules are not yet confirmed.
+
+**Recommendation:** keep authorization-effective Groups in **Phase 2** rather than carrying the current additive Group RBAC semantics into Phase 1.
+
+If Groups are later required only as a non-authorizing way to organize/list users, with no role or permission inheritance, that is a much smaller change and can be reconsidered separately for Phase 1.
+
+No Group implementation is changed by this design-document update.
+
 ---
 
-## 27. BFF orchestration APIs
+## 27. Web BFF orchestration APIs
 
-These are logical frontend contracts, not Security-owned persistence APIs.
+These are logical frontend contracts implemented within the Web module, not Security-owned persistence APIs and not a separate BFF module.
 
 Examples:
 
@@ -1228,7 +1343,7 @@ Examples:
 GET /bff/admin/users?status=PENDING
 ```
 
-BFF obtains Security data and returns a UI-appropriate representation.
+Web BFF obtains Security data and returns a UI-appropriate representation.
 
 ### 27.2 User role + Dealer assignment
 
@@ -1247,13 +1362,13 @@ Possible UI request:
 }
 ```
 
-BFF orchestrates Security + Audit Core but stores neither record.
+Web BFF orchestrates Security + Audit Core but stores neither record.
 
 The actual Dealer cardinality is not constrained in Phase 1.
 
 ### 27.3 Partial-failure behaviour
 
-The BFF must report partial failure accurately and must not fabricate a combined success.
+The Web BFF must report partial failure accurately and must not fabricate a combined success.
 
 Backends remain fail-safe because Security functional role alone does not satisfy Audit Core Dealer/business-scope checks.
 
@@ -1338,7 +1453,7 @@ Audit Core must migrate away from trusting Security-issued human JWTs.
 Target human request contract:
 
 ```text
-Client/BFF -> Audit Core: Clerk session JWT
+Client/Web BFF -> Audit Core: Clerk session JWT
 Audit Core: validate Clerk JWT locally
 Audit Core -> Security: synchronous authorization decision
 Audit Core: evaluate Dealer/business scope locally
@@ -1364,19 +1479,31 @@ No Audit Core file is changed by this Security design work.
 
 ## 31. DI and service-to-service boundary
 
-### 31.1 Human access — CONFIRMED
+### 31.1 Direct human DI access — CONFIRMED
 
-Human users never call DI directly.
+Human users may call DI directly for approved DI capabilities.
 
-Human Clerk JWTs are not forwarded to DI as DI authorization credentials.
+DI does **not** perform human onboarding, role assignment or USER lifecycle management.
 
-### 31.2 Phase-1 Audit Core -> DI — TARGET
+For direct protected human access:
 
-Use a dedicated machine/service identity for Audit Core calling DI.
+```text
+Human -> DI with Clerk session JWT
+DI validates Clerk JWT locally
+DI -> Security authorization/check
+Security evaluates ACTIVE USER + Tenant/role/permission
+DI executes only after ALLOW
+```
+
+The human Clerk JWT is authentication evidence; DI does not derive Verigence permission merely from the existence of a valid Clerk session.
+
+### 31.2 Audit Core -> DI — TARGET
+
+Audit Core may also call DI internally using a dedicated machine/service identity.
 
 The existing Security/DI architecture already contains Security-issued machine identities/tokens and DI validation of Security JWT/JWKS for `SYSTEM` / `SERVICE_INTEGRATION` actors. That capability is distinct from the human-token design and can be retained for Phase-1 service-to-service authentication, subject to audience/permission review.
 
-Minimum target flow:
+Minimum internal target flow:
 
 ```text
 Human -> Audit Core (Clerk JWT + Security authorization)
@@ -1397,9 +1524,9 @@ No sophisticated user-on-behalf-of token exchange is required in Phase 1.
 
 ### 31.5 Existing DI design conflict
 
-Current DI Security-alignment design accepts Security-issued USER JWTs as a canonical human contract. The USER portion of that contract must be revised after approval of this design.
+Current DI Security-alignment design expects Security-issued USER JWTs for human authorization.
 
-The machine/service portion may remain useful.
+The target human DI contract is instead Clerk session JWT authentication plus synchronous Security authorization. The machine/service portion of the existing DI contract may remain useful.
 
 No DI file is changed by this Security design work.
 
@@ -1600,9 +1727,11 @@ Retain/extend the existing immutable administrative/security event/change-record
 ### 33.11 Objects not used as Phase-1 authorization gates
 
 - `tenant_memberships`
-- group-derived operating roles
+- group-derived role/permission grants
 - Security-issued human access sessions/tokens
 - per-user human token authorization versions for token invalidation
+
+Group data structures may remain for compatibility while authorization-effective Groups are deferred for the target model.
 
 Historical tables need not be destructively dropped merely because they leave the active runtime model.
 
@@ -1651,9 +1780,18 @@ PUT /security/v1/tenants/{tenantId}/role-bundles/{roleKey}
 POST /security/v1/authorization/check
 ```
 
-### Module catalogue
+### Module / permission catalogue
 
-Existing module-catalogue semantics retained.
+```text
+GET /security/v1/platform/modules
+GET /security/v1/platform/modules/{moduleKey}
+GET /security/v1/platform/modules/{moduleKey}/permissions
+PUT /security/v1/platform/modules/{moduleKey}/catalog
+```
+
+### Groups
+
+Authorization-effective Group APIs are deferred from the target Phase-1 authorization contract pending the rules in Section 26.4.
 
 ### Tenant administration
 
@@ -1679,22 +1817,22 @@ Existing Tenant entity/lifecycle APIs remain valuable. Detailed authority mappin
 | Operating-role cardinality | Current assignment API is additive by role ID. | Exactly one active operating role per USER/Tenant. | **EXISTING BUT MODIFY** |
 | One PM per Tenant | Not enforced by generic current RBAC. | Required invariant. | **NEW** |
 | Direct role union | Current effective permission resolver unions multiple direct Tenant roles. | One operating role per USER/Tenant. | **RETIRE FOR OPERATING USERS** |
-| Group-derived roles | Current effective permission resolver unions group-derived roles. | Must not participate in Phase-1 operating/admin persona resolution; advanced group/RBAC is deferred. | **RETIRE FROM PHASE-1 AUTHZ / DEFER** |
+| Groups | Current implementation has Group CRUD, membership and Group-to-role assignment; effective permissions union Group-derived roles. | Group concept is reusable, but authorization-effective Group semantics need redesign against the one-role/admin-exclusivity invariants. Recommend Phase 2. | **EXISTING BUT REDESIGN / PHASE 2** |
 | Platform/admin roles | Current platform roles exist. | Admin personas retained conceptually but exact bundles/scopes redesigned. | **EXISTING BUT MODIFY** |
-| SuperAdmin | Existing migration grants `platform.super_admin` every active permission and bootstrap code exists. | Only confirmed hard-delete checker semantics are frozen; broader authority/bootstrap deferred. | **EXISTING BUT MODIFY / DEFER** |
-| Module permission catalogue | Existing module catalogue, permissions and role templates. | Modules publish permissions; Security remains registry/authority. | **EXISTING AND RETAIN** |
+| SuperAdmin | Existing migration grants `platform.super_admin` every active permission and bootstrap code exists. | Confirmed responsibilities include hard-delete checker and permission-to-role mapping; broader authority/bootstrap deferred. | **EXISTING BUT MODIFY / DEFER** |
+| Module permission catalogue | Existing module catalogue, permissions and role templates. | Modules publish permissions; Security exposes module permission discovery; Security remains registry/authority. | **EXISTING AND RETAIN / EXTEND CONTRACT** |
 | Role templates | Current templates seed Tenant role objects. | Templates may seed Tenant permission bundles for global role classifications. | **EXISTING BUT MODIFY** |
 | Tenant role permissions | Current permissions bind to Tenant role IDs. | Bind Tenant + global role_key + permission_key. | **EXISTING BUT MODIFY** |
 | Human runtime token | Current `/auth/login` and access session flows issue Verigence access tokens. | Clerk session JWT only for human authentication. | **RETIRE HUMAN TOKEN ISSUANCE** |
 | Security JWKS for human USER token | Current downstream modules trust Security JWT/JWKS. | Not used for human Phase-1 access. | **RETIRE FOR HUMAN FLOW** |
 | Security JWKS/service token | Existing machine/SYSTEM/SERVICE_INTEGRATION token model. | May remain for approved S2S use. | **EXISTING AND RETAIN/MODIFY** |
 | Authorization version | Current `user_tenant_authorization_state` supports token invalidation. | Not required for Phase-1 human-token authorization because Security is called live. Can remain for compatibility/future use. | **DEFER FROM ACTIVE HUMAN DESIGN** |
-| Runtime authorization | Current modules receive permissions embedded in Security JWT. | Backend calls Security synchronously for required permission. | **REDESIGN** |
+| Runtime authorization | Current modules receive permissions embedded in Security JWT. | Protected resource server validates Clerk JWT and calls Security synchronously for required permission. | **REDESIGN** |
 | Security authorization API | Internal gate logic exists, but not the target Clerk-JWT PDP contract. | Add explicit synchronous authorization-check contract. | **NEW/MODIFY** |
 | Dealer/Outlet in Security | Audit Core design already separates business scope. | Security stores no Dealer assignment. | **RETAIN BOUNDARY** |
-| BFF | No consolidated BFF boundary in current Security runtime. | BFF/API edge introduced for clients/admin UX. | **NEW DESIGN BOUNDARY** |
+| Web BFF | No consolidated Web BFF boundary in current Security runtime. | BFF capability is part of Web module; no separate BFF module. | **NEW DESIGN BOUNDARY** |
 | Audit Core human trust | Current design expects Security-issued JWT + permissions. | Clerk JWT + Security synchronous AuthZ + Audit Core business scope. | **DEPENDENT DESIGN CHANGE** |
-| DI human trust | Current DI expects Security-issued USER JWT. | Human does not call DI; remove USER-token dependency after Security approval. | **DEPENDENT DESIGN CHANGE** |
+| DI human trust | Current DI expects Security-issued USER JWT. | Human may call DI directly using Clerk JWT authentication + synchronous Security authorization; DI performs no onboarding. | **DEPENDENT DESIGN CHANGE** |
 | DI service trust | DI already supports Security service/system identities. | Reuse for Audit Core -> DI where appropriate. | **EXISTING AND RETAIN/MODIFY** |
 | Security audit records | Existing admin/security change/audit structures exist. | Extend to redesigned lifecycle, hard delete and role model. | **EXISTING AND RETAIN/MODIFY** |
 
@@ -1715,7 +1853,7 @@ Recommended sequence:
 5. move first-party human authentication to Clerk session JWT validation;
 6. migrate active operating-role assignments into one-role-per-USER/Tenant representation after conflict analysis;
 7. create Tenant-specific permission bundles for the approved global role classifications;
-8. remove group-derived/additive role resolution from Phase-1 runtime authorization;
+8. remove current group-derived/additive role resolution from Phase-1 runtime authorization while preserving Group data for later redesign;
 9. retire human Security token issuance routes after all clients/modules are migrated;
 10. keep historical tables/routes disabled or compatibility-only until explicit retention cleanup is approved;
 11. align Audit Core and DI designs/contracts after Security behaviour is proven.
@@ -1743,14 +1881,18 @@ These require explicit remediation rather than automatic guessing.
 5. **Implement status change + DISABLED deletion-request flow + SuperAdmin hard-delete checker API.**
 6. **Implement global role definitions and one operating-role-per-USER/Tenant assignment model.**
 7. **Enforce one PM per Tenant and admin/operating exclusivity.**
-8. **Adapt module catalogue/templates to Tenant-specific role-permission bundles.**
-9. **Implement synchronous Security authorization-check API and use common in-process logic for Security admin endpoints.**
-10. **Introduce BFF user-administration flows without moving authority into BFF.**
-11. **Implement/align Audit Core Dealer assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
-12. **Migrate Audit Core human auth contract to Clerk JWT + synchronous Security AuthZ.**
-13. **Keep DI human-inaccessible and retain only the required machine/service auth path for Audit Core -> DI.**
-14. **Retire Security-issued human access-token flows and downstream USER-JWT assumptions.**
-15. **Run migration reconciliation and end-to-end authorization/lifecycle tests before production use.**
+8. **Expose module permission discovery and adapt module catalogue/templates to Tenant-specific role-permission bundles.**
+9. **Implement SuperAdmin permission-to-role-bundle mapping flow before USER role assignment.**
+10. **Implement synchronous Security authorization-check API and use common in-process logic for Security admin endpoints.**
+11. **Implement Web BFF user-administration flows inside the Web module without moving authority into Web.**
+12. **Implement/align Audit Core Dealer assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
+13. **Migrate Audit Core human auth contract to Clerk JWT + synchronous Security AuthZ.**
+14. **Align DI direct-human protected access to Clerk JWT + synchronous Security AuthZ; DI remains outside onboarding.**
+15. **Retain the required machine/service auth path for Audit Core -> DI.**
+16. **Retire Security-issued human access-token flows and downstream USER-JWT assumptions.**
+17. **Run migration reconciliation and end-to-end authorization/lifecycle tests before production use.**
+
+Authorization-effective Groups are not part of this Phase-1 implementation sequence; see Section 26.4.
 
 ---
 
@@ -1768,8 +1910,8 @@ The following are deliberately not implemented or overdesigned in Phase 1:
 - custom human OAuth authorization-server implementation;
 - authorization permission-epoch/revocation cache design for a Verigence human token;
 - delegated user-on-behalf-of token exchange;
-- advanced group-derived RBAC;
-- detailed SuperAdmin powers/bootstrap beyond confirmed hard-delete checker responsibility;
+- authorization-effective Groups / Group-derived RBAC pending confirmed target semantics;
+- detailed SuperAdmin powers/bootstrap beyond the responsibilities explicitly confirmed in this document;
 - performance caching of Security allow decisions until measurement proves it necessary.
 
 ---
@@ -1778,7 +1920,7 @@ The following are deliberately not implemented or overdesigned in Phase 1:
 
 The following must be resolved before the relevant implementation area is finalized:
 
-1. **SuperAdmin design:** bootstrap/initial SuperAdmin creation, broader powers, subsequent SuperAdmin assignment and Tenant-administration authority.
+1. **SuperAdmin design:** bootstrap/initial SuperAdmin creation, broader powers, subsequent SuperAdmin assignment and Tenant-administration authority beyond the currently confirmed responsibilities.
 2. **Global deletion request scope:** whether/how Executive or TenantAdmin may request deletion of a global USER who is authorized in other Tenants.
 3. **Maker/checker actor separation:** whether checker must always be a different human from maker in every edge case.
 4. **Reactivation:** allowed transitions from SUSPENDED, REJECTED and DISABLED.
@@ -1786,8 +1928,8 @@ The following must be resolved before the relevant implementation area is finali
 6. **Administrative scope:** exact ModuleAdmin and TenantAdmin scope model and permission bundles.
 7. **Outlet assignment:** whether Phase 1 needs any USER-to-Outlet business restriction in Audit Core beyond Dealer association.
 8. **Hard-delete retention:** exact non-PII actor tombstone/snapshot and retention period across Security/Audit records.
-9. **BFF deployment:** repository/runtime topology and Web-versus-Mobile composition model.
-10. **Internal caller authentication to Security AuthZ:** exact machine credential profile to use for BFF/backend-to-Security calls, reusing approved service identity capability rather than inventing a human-token scheme.
+9. **Internal caller authentication to Security AuthZ:** exact machine credential profile to use for Web BFF/backend-to-Security calls, reusing approved service identity capability rather than inventing a human-token scheme.
+10. **Groups:** final purpose and authorization semantics before any Phase-2 Group-derived role/permission behaviour is enabled.
 
 ---
 
@@ -1800,7 +1942,7 @@ Where existing Security documents/code conflict with this target, the conflict m
 Known dependent conflicts requiring later alignment include:
 
 - Audit Core's current assumption that human authorization arrives in a Security-issued JWT containing `permissions[]`;
-- DI's current assumption that Security-issued USER JWTs are a canonical human authorization contract;
+- DI's current assumption that Security-issued USER JWTs are the canonical human authorization contract;
 - Security's current human login/token issuance flow;
 - Tenant-owned role objects and additive/group-derived effective-role resolution.
 
@@ -1818,7 +1960,8 @@ HUMAN IDENTITY
   Clerk session JWT
        |
        v
-RESOURCE SERVER / SECURITY ADMIN API
+PROTECTED RESOURCE SERVER
+  Security / Audit Core / DI as applicable
   validate Clerk JWT locally
        |
        v
@@ -1833,9 +1976,9 @@ SECURITY AUTHORIZATION
        v
 ALLOW / DENY
        |
-       +--> Audit Core additionally checks Dealer/business scope
+       +--> Audit Core additionally checks Dealer/business scope where applicable
 ```
 
 The governing separation is:
 
-> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Audit Core decides where that allowed Audit function may be exercised in the Dealer/business hierarchy.**
+> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Audit Core decides Dealer/business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding. The Web BFF is part of the Web module and owns no Security authority.**
