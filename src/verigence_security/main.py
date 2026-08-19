@@ -14,6 +14,7 @@ from verigence_security.api.routes import (
     tenant_groups,
     tenant_privileged_access,
     tenant_roles,
+    v2_rbac,
 )
 from verigence_security.config import get_settings
 from verigence_security.core.correlation import CorrelationIdMiddleware
@@ -44,5 +45,6 @@ app.include_router(tenant_privileged_access.router)
 app.include_router(platform_admin.router)
 app.include_router(platform_modules.router)
 app.include_router(global_users.router)
+app.include_router(v2_rbac.router)
 if settings.dev_mock_auth_enabled:
     app.include_router(dev_mock.router)
