@@ -7,15 +7,16 @@ from verigence_security.api.routes import (
     access,
     authorization,
     dev_mock,
-    global_users,
     health,
     jwks,
+    legacy_onboarding_compat,
     platform_admin,
     platform_modules,
     service_tokens,
     v2_admin_roles,
     v2_groups,
     v2_rbac,
+    v2_user_admin,
     v2_user_lifecycle,
 )
 from verigence_security.config import get_settings
@@ -45,10 +46,11 @@ app.include_router(service_tokens.router)
 app.include_router(authorization.router)
 app.include_router(platform_admin.router)
 app.include_router(platform_modules.router)
-app.include_router(global_users.router)
+app.include_router(v2_user_admin.router)
 app.include_router(v2_rbac.router)
 app.include_router(v2_groups.router)
 app.include_router(v2_admin_roles.router)
 app.include_router(v2_user_lifecycle.router)
+app.include_router(legacy_onboarding_compat.router)
 if settings.dev_mock_auth_enabled:
     app.include_router(dev_mock.router)
