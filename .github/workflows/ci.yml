@@ -208,7 +208,9 @@ jobs:
             migrations/0010_audit_core_di_permissions.sql \
             migrations/0011_security_v2_role_foundation.sql \
             migrations/0012_v2_super_admin_reconciliation.sql \
-            migrations/0013_v2_operating_role_defaults.sql
+            migrations/0013_v2_operating_role_defaults.sql \
+            migrations/0014_phase1_test_identity.sql \
+            migrations/0015_v2_user_lifecycle_and_deletion.sql
           do
             echo "Applying $(basename "$migration")"
             psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
@@ -230,10 +232,30 @@ jobs:
               AND to_regclass('security.platform_role_permission_defaults') IS NOT NULL
               AND to_regclass('security.tenant_role_permissions') IS NOT NULL
               AND to_regclass('security.user_tenant_operating_roles') IS NOT NULL
-              AND to_regclass('security.user_admin_role_assignments') IS NOT NULL;
+              AND to_regclass('security.user_admin_role_assignments') IS NOT NULL
+              AND to_regclass('security.phase1_test_identity') IS NOT NULL
+              AND to_regclass('security.user_deletion_requests') IS NOT NULL
+              AND to_regclass('security.deleted_user_tombstones') IS NOT NULL;
           ")"
           [ "$v2_tables_ready" = "t" ] || {
-            echo "::error::Security v2 RBAC foundation migration verification failed."
+            echo "::error::Security v2 foundation/lifecycle migration verification failed."
+            exit 1
+          }
+
+          rejected_status_ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT EXISTS (
+              SELECT 1
+              FROM pg_constraint c
+              JOIN pg_class t ON t.oid=c.conrelid
+              JOIN pg_namespace n ON n.oid=t.relnamespace
+              WHERE n.nspname='security'
+                AND t.relname='users'
+                AND c.contype='c'
+                AND pg_get_constraintdef(c.oid) LIKE '%REJECTED%'
+            );
+          ")"
+          [ "$rejected_status_ready" = "t" ] || {
+            echo "::error::Security v2 USER status constraint does not include REJECTED."
             exit 1
           }
 
@@ -400,7 +422,7 @@ jobs:
           }
           missing = sorted(key for key in required if not values.get(key))
           if missing:
-              raise SystemExit('Required persisted Security configuration is missing: ' + ', '.join(missing))
+            raise SystemExit('Required persisted Security configuration is missing: ' + ', '.join(missing))
           print('SECURITY_PERSISTED_CONFIG=PASS')
           PY
 
