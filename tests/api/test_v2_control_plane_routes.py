@@ -13,7 +13,7 @@ from verigence_security.api.routes import (
     v2_groups,
     v2_user_lifecycle,
 )
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.main import app
 from verigence_security.services.v2_human_actor import AdminScope, HumanActorContext
 
@@ -44,7 +44,7 @@ def _actor(*scopes: AdminScope) -> HumanActorContext:
 
 
 def _use_actor(actor: HumanActorContext) -> None:
-    app.dependency_overrides[clerk_human_actor] = lambda: actor
+    app.dependency_overrides[security_human_actor] = lambda: actor
 
 
 def test_role_aligned_groups_are_read_only_and_legacy_mutation_routes_are_inactive(
@@ -179,7 +179,7 @@ def test_module_permission_discovery_requires_human_admin(
     assert allowed.json()[0]["key"] == "di.document.read"
 
 
-def test_lifecycle_route_uses_clerk_human_actor_and_v2_service(
+def test_lifecycle_route_uses_security_human_actor_and_v2_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _use_actor(_actor(AdminScope("SuperAdmin", "PLATFORM", None)))
