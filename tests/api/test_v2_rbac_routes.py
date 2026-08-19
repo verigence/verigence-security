@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.routes import v2_rbac
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.main import app
 from verigence_security.services.v2_human_actor import AdminScope, HumanActorContext
 
@@ -43,10 +43,10 @@ def _actor(*scopes: AdminScope) -> HumanActorContext:
 
 
 def _use_actor(actor: HumanActorContext) -> None:
-    app.dependency_overrides[clerk_human_actor] = lambda: actor
+    app.dependency_overrides[security_human_actor] = lambda: actor
 
 
-def test_role_catalogue_accepts_active_clerk_human(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_role_catalogue_accepts_active_security_human(monkeypatch: pytest.MonkeyPatch) -> None:
     _use_actor(_actor())
 
     class _Roles:
