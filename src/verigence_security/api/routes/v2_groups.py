@@ -10,7 +10,7 @@ from verigence_security.api.v2_group_schemas import (
     RoleAlignedGroupResponse,
     RoleAlignedGroupUserResponse,
 )
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.api.v2_rbac_schemas import OperatingRoleKey
 from verigence_security.core.errors import security_error
 from verigence_security.services.v2_human_actor import HumanActorContext
@@ -37,7 +37,7 @@ def _group_response(tenant_id: str, row: dict[str, object]) -> RoleAlignedGroupR
 @router.get("", response_model=list[RoleAlignedGroupResponse])
 def list_role_groups(
     tenantId: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[RoleAlignedGroupResponse]:
     _require_group_read(actor, tenantId)
@@ -51,7 +51,7 @@ def list_role_groups(
 def get_role_group(
     tenantId: str,
     roleKey: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> RoleAlignedGroupResponse:
     _require_group_read(actor, tenantId)
@@ -68,7 +68,7 @@ def get_role_group(
 def list_role_group_users(
     tenantId: str,
     roleKey: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[RoleAlignedGroupUserResponse]:
     _require_group_read(actor, tenantId)
