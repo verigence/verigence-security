@@ -64,8 +64,7 @@ Human onboarding is independent of:
 - Project;
 - operating role;
 - administrative role;
-- Dealer;
-- Outlet.
+- Dealer/Outlet business assignment.
 
 One person has one global Verigence USER identity. The same USER may later receive authorization in zero, one or multiple Tenants without creating another Verigence USER or Clerk account.
 
@@ -218,29 +217,31 @@ Rules:
 - the TestUser permission mapping therefore follows the `TestTenant` PC permission bundle rather than maintaining an independent divergent permission list;
 - `TestUser` remains a distinct test classification and is not an employee operating-role assignment for production Tenants.
 
-### 2.8 Dealer assignment — CONFIRMED
+### 2.8 Dealer/Outlet assignment — CONFIRMED
 
-Dealer assignment is not Security RBAC.
+Dealer/Outlet assignment is not Security RBAC.
 
-Dealer assignment belongs to Audit Core and remains independent of:
+For Phase 1, **Dealer and Outlet are the same business-scope concept for implementation purposes**. There is no separate Outlet assignment layer in Phase 1.
+
+Dealer/Outlet assignment belongs to Audit Core and remains independent of:
 
 - global USER identity;
 - role definition;
 - role-to-permission mapping.
 
-The business model expects Dealers to have relevant `PC`, `TL`, `PM` and `CRM` users associated with them.
+The business model expects Dealer/Outlet entities to have relevant `PC`, `TL`, `PM` and `CRM` users associated with them.
 
 Phase 1 must **not** enforce staffing/cardinality rules such as:
 
-- how many Dealers one PC covers;
-- how many Dealers one TL covers;
-- how many Dealers one PM covers;
-- how many Dealers one CRM covers;
-- how many users of each role a Dealer requires.
+- how many Dealer/Outlets one PC covers;
+- how many Dealer/Outlets one TL covers;
+- how many Dealer/Outlets one PM covers;
+- how many Dealer/Outlets one CRM covers;
+- how many users of each role a Dealer/Outlet requires.
 
 Those rules are deferred.
 
-`Executive` is Tenant-wide and does not require Dealer assignment.
+`Executive` is Tenant-wide and does not require Dealer/Outlet assignment.
 
 ### 2.9 USER lifecycle — CONFIRMED
 
@@ -267,7 +268,8 @@ Hard deletion uses maker/checker:
 - deletion may be initiated by the USER themselves, Executive, TenantAdmin or ModuleAdmin;
 - the maker action disables the USER;
 - only SuperAdmin may execute the final hard delete;
-- Phase 1 permits the same human to be maker and checker when that human is the SuperAdmin.
+- Phase 1 permits the same human to be maker and checker when that human is the SuperAdmin;
+- USER deletion is global and independent of Tenant context in Phase 1.
 
 Reactivation from a non-active employee state back to `ACTIVE` is a SuperAdmin-only action in Phase 1.
 
@@ -289,7 +291,7 @@ The Web BFF must not own:
 - roles;
 - permissions;
 - Tenant authorization;
-- Dealer assignments;
+- Dealer/Outlet assignments;
 - authorization decisions as source of truth.
 
 The exact Mobile access path is not changed by this observation and must not be inferred from the Web BFF decision.
@@ -330,7 +332,7 @@ Phase 1 includes a machine-only `ServiceIntegration` classification for module-t
         | SECURITY  |    | AUDIT CORE  |   |    DI     |
         |           |    |             |   |           |
         | USER SoT  |    | Dealer/     |   | generic   |
-        | AuthZ SoT |    | business    |   | document  |
+        | AuthZ SoT |    | Outlet      |   | document  |
         | roles     |    | scope       |   | intel.    |
         | perms     |    | journeys    |   |           |
         +-----+-----+    +------+------+   +-----------+
@@ -351,7 +353,7 @@ Human access to DI is allowed when DI exposes a human-facing protected capabilit
 Clerk              = authenticate the human
 Security           = identify the Verigence USER and decide functional authorization
 Security           = register machine identities and issue ServiceIntegration machine JWTs
-Audit Core         = decide Dealer/business scope and execute Audit business logic
+Audit Core         = decide Dealer/Outlet business scope and execute Audit business logic
 DI                 = generic document-intelligence service; may serve authorized humans directly but owns no human onboarding
 Web BFF            = client-facing composition/orchestration inside the Web module only
 ServiceIntegration = machine-only module-to-module identity/authorization classification
@@ -395,16 +397,18 @@ Security owns:
 
 ### 4.3 Audit Core boundary — CONFIRMED
 
-Audit Core owns Dealer/Outlet/business hierarchy and business assignment.
+Audit Core owns the Phase-1 Dealer/Outlet business scope and business assignment.
 
-Security must not store Dealer IDs merely to make authorization convenient.
+In Phase 1, Dealer and Outlet are the same business entity for assignment purposes; there is no separate Outlet-level user restriction model.
 
-For a Dealer-scoped Audit operation:
+Security must not store Dealer/Outlet IDs merely to make authorization convenient.
+
+For a Dealer/Outlet-scoped Audit operation:
 
 ```text
 ALLOW = Security functional authorization
         AND
-        Audit Core Dealer/business-scope authorization
+        Audit Core Dealer/Outlet business-scope authorization
 ```
 
 SuperAdmin's all-permission rule concerns functional permissions. Audit Core business-scope rules remain a separate boundary unless Audit Core explicitly defines an administrative business-scope bypass later.
@@ -458,13 +462,13 @@ Typical Web BFF functions include:
 - pending/active user views;
 - approval/rejection actions;
 - role-assignment screens;
-- Tenant/Dealer assignment orchestration;
+- Tenant/Dealer-Outlet assignment orchestration;
 - forwarding Clerk authentication context to backend APIs;
 - response composition where one UI view needs Security and Audit Core data.
 
 ### 5.2 Non-responsibilities — CONFIRMED
 
-The Web BFF does not persist authoritative copies of USER, role, permission or Dealer assignment records.
+The Web BFF does not persist authoritative copies of USER, role, permission or Dealer/Outlet assignment records.
 
 The Web BFF must not grant access merely because a UI control is shown or hidden.
 
@@ -522,7 +526,7 @@ The Clerk JWT proves authenticated identity. It does not by itself prove that:
 - the Verigence USER is ACTIVE;
 - the USER has authorization in a Tenant;
 - the USER has a required Verigence permission;
-- the USER has Dealer/business scope.
+- the USER has Dealer/Outlet business scope.
 
 ### 7.2 Local JWT validation — CONFIRMED
 
@@ -587,8 +591,7 @@ It does not assign:
 - Tenant;
 - operating role;
 - administrative role;
-- Dealer;
-- Outlet.
+- Dealer/Outlet business assignment.
 
 `TestUser` and the single SuperAdmin are pre-identified Phase-1 identities and are handled by their explicit bootstrap/configuration requirements rather than ordinary employee role assignment.
 
@@ -607,7 +610,7 @@ Possession of the onboarding key grants no application role, Tenant authorizatio
    and duplicate global identity constraints.
 
 3. A global Verigence onboarding request / USER candidate is created
-   without Tenant, role, Dealer or Outlet assignment.
+   without Tenant, role or Dealer/Outlet assignment.
 
 4. Clerk owns the credential/sign-up/email-authentication interaction.
    Verigence does not store or validate the employee password.
@@ -623,7 +626,7 @@ Possession of the onboarding key grants no application role, Tenant authorizatio
 8. Administrator changes the USER to ACTIVE or REJECTED according to
    the approved lifecycle permission model.
 
-9. Tenant/role/Dealer configuration is performed separately after
+9. Tenant/role/Dealer-Outlet configuration is performed separately after
    identity onboarding.
 ```
 
@@ -804,8 +807,8 @@ Maker
 Security
   |
   +-- record deletion request + actor/time/reason
-  +-- status -> DISABLED
-  +-- revoke/terminate Verigence access
+  +-- status -> DISABLED globally
+  +-- revoke/terminate Verigence access across Tenants
   +-- terminate/disable Clerk authentication sessions/account access
   |
   v
@@ -821,22 +824,26 @@ Security deletion coordinator
   +-- remove live Security role/Tenant authorization assignments
   +-- remove live global USER identity/PII according to approved retention
   +-- release email for permitted reuse
-  +-- preserve non-PII historical audit references/evidence
+  +-- preserve required historical audit reference/snapshot for the retention period
 ```
 
-### 13.5 Multi-Tenant deletion request scope — OPEN DECISION
+### 13.5 Global deletion request scope — CONFIRMED
 
-A USER is global and may be authorized in several Tenants.
+USER deletion is **global and independent of Tenant context in Phase 1**.
 
-Final hard deletion is always SuperAdmin-only. However, the exact scope under which an `Executive` or `TenantAdmin` may initiate a deletion request for a global USER who is active in other Tenants is not yet confirmed.
+A deletion request targets the global USER, not an individual Tenant assignment. If an allowed maker initiates the deletion request, the USER transitions to `DISABLED` globally and loses Verigence access across all Tenants.
 
-The target API must not invent this cross-Tenant request-scope rule.
+The USER having authorization in other Tenants does not create a separate Tenant-specific deletion workflow or prevent the global deletion request.
 
-### 13.6 Historical audit evidence — TARGET REQUIREMENT
+Final hard deletion remains SuperAdmin-only.
 
-Hard deletion of the live USER must not cascade-delete historical Security/Audit business evidence.
+### 13.6 Historical deletion/audit retention — CONFIRMED
 
-Historical events should retain an immutable actor reference/snapshot that does not require the live USER row to continue existing. Exact retention duration and PII-minimization rules remain subject to the final retention policy.
+Hard deletion of the live USER must not cascade-delete the retained Security/Audit evidence required for the deletion trail.
+
+The default Phase-1 retention period for the retained deleted-user actor tombstone/snapshot and deletion audit reference is **21 days** after hard deletion.
+
+The retained record must not depend on the live USER row continuing to exist and must not retain credentials, tokens or secrets.
 
 ---
 
@@ -1024,7 +1031,7 @@ Phase-1 TenantAdmin responsibilities include the administration tasks already ag
 
 TenantAdmin **does not modify the Tenant's role-to-permission bundle in Phase 1**. Tenant role-bundle changes are SuperAdmin responsibility.
 
-TenantAdmin is Tenant-scoped and does not gain platform-wide authority merely because a permission name also exists at platform level.
+TenantAdmin is Tenant-scoped for normal administration. USER deletion is the explicit Phase-1 exception: deletion requests target the global USER and are not Tenant-scoped.
 
 ### 16.4 ModuleAdmin — CONFIRMED
 
@@ -1582,7 +1589,7 @@ Resource Server (Audit Core / DI)
   |        evaluate required permission
   |        return ALLOW/DENY + stable decision context
   |
-  +-- if Audit Core, additionally evaluate Dealer/business scope where applicable
+  +-- if Audit Core, additionally evaluate Dealer/Outlet business scope where applicable
   |
   +-- execute operation
 ```
@@ -1660,17 +1667,19 @@ Do not introduce projections, local replicated permission stores, human-token pe
 
 ---
 
-## 23. Dealer assignment boundary
+## 23. Dealer/Outlet assignment boundary
 
-### 23.1 Security does not own Dealer assignment — CONFIRMED
+### 23.1 Security does not own Dealer/Outlet assignment — CONFIRMED
 
 Security authorization ends at the functional permission decision.
 
-Dealer association is an Audit Core business assignment.
+Dealer/Outlet association is an Audit Core business assignment.
 
-### 23.2 Phase-1 Dealer associations — CONFIRMED
+### 23.2 Phase-1 Dealer/Outlet associations — CONFIRMED
 
-Audit Core must be able to associate relevant operating users with Dealers:
+For Phase 1, **Dealer is the Outlet** for implementation and user business-scope assignment. The system does not maintain a separate Dealer assignment and a second Outlet restriction for the same user.
+
+Audit Core must be able to associate relevant operating users with Dealer/Outlet entities:
 
 - PC
 - TL
@@ -1681,26 +1690,26 @@ No Phase-1 cardinality ratio is enforced.
 
 ### 23.3 Executive — CONFIRMED
 
-Executive is Tenant-wide and does not require Dealer assignment.
+Executive is Tenant-wide and does not require Dealer/Outlet assignment.
 
-### 23.4 Outlet assignment — OPEN/DEFERRED
+### 23.4 No separate Outlet model in Phase 1 — CONFIRMED
 
-The redesign requirement confirms Dealer association but does not define a Phase-1 USER-to-Outlet restriction model. Security must not invent one.
+There is no additional USER-to-Outlet restriction layer beyond the Dealer/Outlet assignment described above.
 
 ### 23.5 Web BFF orchestration
 
-A UI may present one assignment operation containing role and Dealer selection.
+A UI may present one assignment operation containing role and Dealer/Outlet selection.
 
 Web BFF orchestration may perform:
 
 ```text
 1. Security: set USER/Tenant operating role
-2. Audit Core: set/create Dealer association
+2. Audit Core: set/create Dealer/Outlet association
 ```
 
 Each system remains authoritative for its own write.
 
-If Security succeeds and Dealer association fails, no Dealer-scoped business access is granted merely because the role exists; Audit Core fails its local business-scope check.
+If Security succeeds and Dealer/Outlet association fails, no Dealer/Outlet-scoped business access is granted merely because the role exists; Audit Core fails its local business-scope check.
 
 ---
 
@@ -1735,7 +1744,7 @@ Required UI use cases include:
 GET /security/v1/platform/users/{userId}
 ```
 
-Returns Security-owned USER lifecycle/identity metadata only. Dealer assignments are not embedded as Security-owned fields.
+Returns Security-owned USER lifecycle/identity metadata only. Dealer/Outlet assignments are not embedded as Security-owned fields.
 
 ### 24.3 Status change — TARGET
 
@@ -1748,7 +1757,7 @@ The authorization policy distinguishes:
 - ordinary approval/rejection administration;
 - suspension;
 - self-delete request;
-- Executive/TenantAdmin/ModuleAdmin/SuperAdmin delete request;
+- Executive/TenantAdmin/ModuleAdmin/SuperAdmin global delete request;
 - SuperAdmin-only reactivation from REJECTED/SUSPENDED/DISABLED to ACTIVE.
 
 ### 24.4 Hard delete — TARGET
@@ -1977,7 +1986,7 @@ GET /bff/admin/users?status=PENDING
 
 Web BFF obtains Security data and returns a UI-appropriate representation.
 
-### 27.2 User role + Dealer assignment
+### 27.2 User role + Dealer/Outlet assignment
 
 Conceptually:
 
@@ -1994,9 +2003,11 @@ Possible UI request:
 }
 ```
 
+`dealerIds` represents the Phase-1 Dealer/Outlet business entity; a second Outlet assignment is not required.
+
 Web BFF orchestrates Security + Audit Core but stores neither record.
 
-The actual Dealer cardinality is not constrained in Phase 1.
+The actual Dealer/Outlet cardinality is not constrained in Phase 1.
 
 The corresponding Security role-aligned Group membership is updated automatically by the role assignment; the Web BFF does not need a second Group-membership write.
 
@@ -2004,7 +2015,7 @@ The corresponding Security role-aligned Group membership is updated automaticall
 
 The Web BFF must report partial failure accurately and must not fabricate a combined success.
 
-Backends remain fail-safe because Security functional role alone does not satisfy Audit Core Dealer/business-scope checks.
+Backends remain fail-safe because Security functional role alone does not satisfy Audit Core Dealer/Outlet business-scope checks.
 
 ---
 
@@ -2050,7 +2061,7 @@ At minimum where applicable:
 
 Never store credentials, Clerk session JWTs, service client secrets, service JWTs, passwords, OTP values or other secrets in audit records.
 
-### 28.3 Hard-delete audit
+### 28.3 Hard-delete audit — CONFIRMED
 
 Hard deletion must leave enough non-credential audit evidence to prove:
 
@@ -2060,7 +2071,9 @@ Hard deletion must leave enough non-credential audit evidence to prove:
 - when final deletion occurred;
 - outcome/correlation identifiers.
 
-The audit record must not depend on the deleted live USER row continuing to exist.
+The retained deleted-user actor tombstone/snapshot and deletion audit reference have a default Phase-1 retention period of **21 days after hard deletion**.
+
+The retained audit reference must not depend on the deleted live USER row continuing to exist.
 
 ---
 
@@ -2102,7 +2115,7 @@ Audit Core: validate Clerk JWT locally
 Audit Core: extract validated Clerk subject
 Audit Core -> Security: ServiceIntegration JWT + Clerk subject + Tenant + required permission
 Security: synchronous human authorization decision
-Audit Core: evaluate Dealer/business scope locally
+Audit Core: evaluate Dealer/Outlet business scope locally
 ```
 
 ### 30.2 Functional authorization authority — RETAIN
@@ -2111,7 +2124,7 @@ Security remains the sole functional authorization authority.
 
 ### 30.3 Business scope authority — RETAIN
 
-Audit Core remains the Dealer/Outlet/business-scope authority.
+Audit Core remains the Dealer/Outlet business-scope authority. Dealer and Outlet are the same Phase-1 assignment concept.
 
 ### 30.4 Default operational permission bundles — EXISTING AND RETAIN AS SECURITY DEFAULT SOURCE
 
@@ -2376,9 +2389,9 @@ Protected human business requests requiring Security authorization fail closed. 
 
 A service unable to obtain/renew a required ServiceIntegration token also fails closed for that integration operation.
 
-### 32.7 Audit Core Dealer association absent
+### 32.7 Audit Core Dealer/Outlet association absent
 
-Audit Core denies Dealer-scoped business action even if Security functional permission is allowed.
+Audit Core denies Dealer/Outlet-scoped business action even if Security functional permission is allowed.
 
 ### 32.8 Role assignment conflicts
 
@@ -2407,7 +2420,7 @@ Target modules fail closed when a machine token has any of the following conditi
 
 If final deletion cannot complete safely across required live identity stores, Security must record failure and avoid reporting hard-delete success.
 
-Exact compensation/retry ordering with Clerk is finalized in implementation design after retention/deletion policy approval.
+Exact compensation/retry ordering with Clerk is finalized in implementation design while preserving the confirmed 21-day deleted-user audit/tombstone retention rule.
 
 ---
 
@@ -2640,9 +2653,13 @@ security.user_deletion_requests
 
 This preserves maker/checker evidence separately from the live USER status. Phase 1 permits `requested_by_user_id = checked_by_user_id` when the actor is SuperAdmin.
 
+Deletion requests are global USER operations and are not keyed/scoped by Tenant in Phase 1.
+
 ### 33.13 Security audit
 
 Retain/extend the existing immutable administrative/security event/change-record concept so it can survive live USER hard deletion without cascade loss.
+
+The deleted-user actor tombstone/snapshot and deletion audit reference are retained by default for **21 days after hard deletion**.
 
 ### 33.14 Objects not used as Phase-1 human authorization gates
 
@@ -2680,6 +2697,8 @@ GET    /security/v1/platform/users/{userId}
 PATCH  /security/v1/users/{userId}/status
 DELETE /security/v1/platform/users/{userId}
 ```
+
+USER deletion/status-disable operations are global and do not require a Tenant identifier in Phase 1.
 
 ### Operating-role administration
 
@@ -2747,7 +2766,7 @@ PUT /security/v1/platform/modules/{moduleKey}/catalog
 
 ### Tenant administration
 
-Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-wide authority in Phase 1. TenantAdmin administration is scoped to its assigned Tenant.
+Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-wide authority in Phase 1. TenantAdmin administration is scoped to its assigned Tenant except for the confirmed global USER deletion-request capability.
 
 ---
 
@@ -2757,12 +2776,13 @@ Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-w
 |---|---|---|---|
 | Global USER | v1.4.2 global USER/onboarding exists. | One global USER, no per-Tenant re-onboarding. | **EXISTING AND RETAIN** |
 | Clerk external identity mapping | Exists. | Clerk subject maps to one global USER. | **EXISTING AND RETAIN** |
-| Global onboarding gate | Platform-global onboarding key exists. | Global gate remains; no Tenant/role/Dealer during onboarding. | **EXISTING AND RETAIN** |
+| Global onboarding gate | Platform-global onboarding key exists. | Global gate remains; no Tenant/role/Dealer-Outlet during onboarding. | **EXISTING AND RETAIN** |
 | Credential handling in Security | Current onboarding/login APIs accept password/TOTP/OTP and broker Clerk Backend APIs. | First-party Clerk authentication/session flow; Security does not own human credential flow. | **EXISTING BUT MODIFY** |
 | MFA | Current code/design includes TOTP/MFA concepts. | No Phase-1 MFA requirement. | **DEFERRED** |
 | USER statuses | Current status surface includes ACTIVE/SUSPENDED/DISABLED/EXITED; PENDING exists in onboarding. | PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED; hard DELETE separate. | **EXISTING BUT MODIFY** |
 | REJECTED lifecycle | Not part of current global status request. | Required; SuperAdmin-only reactivation after rejection. | **NEW/MODIFY** |
-| Hard USER deletion | No confirmed target maker/checker global hard-delete API in current global USER surface. | DISABLED maker state + SuperAdmin-only final DELETE; same-person maker/checker allowed for SuperAdmin in Phase 1. | **NEW/MODIFY** |
+| Hard USER deletion | No confirmed target maker/checker global hard-delete API in current global USER surface. | Global Tenant-independent DISABLED maker state + SuperAdmin-only final DELETE; same-person maker/checker allowed for SuperAdmin in Phase 1. | **NEW/MODIFY** |
+| Hard-delete retention | Exact retained actor/deletion reference period was not fixed. | Default retained deleted-user tombstone/snapshot and deletion audit reference = 21 days after hard deletion. | **NEW TARGET RULE** |
 | Reactivation | Current lifecycle does not implement the new confirmed authority rule. | REJECTED/SUSPENDED/DISABLED -> ACTIVE only by SuperAdmin. | **NEW/MODIFY** |
 | Tenant membership | Historical/current tables remain, some legacy code still references them. v1.4.2 says no runtime membership prerequisite. | No membership authorization gate. | **RETIRE FROM RUNTIME** |
 | Role definition | Current `security.roles` are Tenant-owned rows. | Global fixed role classifications. | **EXISTING BUT MODIFY** |
@@ -2776,7 +2796,7 @@ Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-w
 | TestUser | Previously exact permission/scope was open. | Existing Clerk TestUser mapped to TestTenant; effective functional bundle equals TestTenant PC bundle. | **CLOSED / ADD TO TARGET** |
 | TestTenant | Not previously fixed as a cross-module canonical test tenant. | One canonical Security Tenant ID represented consistently in Security, Audit Core and DI. | **NEW TARGET** |
 | Platform/admin roles | Current platform roles exist. | Admin personas retained with fixed Phase-1 scope semantics. | **EXISTING BUT MODIFY** |
-| TenantAdmin | Current model does not match the final scope definition. | One Tenant across modules; no Tenant role-bundle modification. | **REDESIGN** |
+| TenantAdmin | Current model does not match the final scope definition. | One Tenant across modules for normal administration; deletion request is global USER operation. | **REDESIGN** |
 | ModuleAdmin | Current model does not match the final scope definition. | One module across Tenants, with module-admin/configuration permissions. | **REDESIGN** |
 | SuperAdmin | Existing migration grants `platform.super_admin` every active Security permission. | Exactly one Phase-1 SuperAdmin; all ACTIVE permissions across all registered modules automatically. | **EXISTING AND EXTEND** |
 | Module permission catalogue | Existing module catalogue, permissions and role templates. | Modules publish permissions; Security exposes module permission discovery; Security remains registry/authority. | **EXISTING AND RETAIN / EXTEND CONTRACT** |
@@ -2789,12 +2809,12 @@ Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-w
 | Authorization version | Current `user_tenant_authorization_state` supports human token invalidation. | Not required for Phase-1 human-token authorization because Security is called live. Can remain for compatibility/future use. | **DEFER FROM ACTIVE HUMAN DESIGN** |
 | Runtime human authorization | Current modules receive permissions embedded in Security human JWT. | Resource server validates Clerk JWT; authenticated ServiceIntegration backend calls Security with validated Clerk subject + Tenant + permission. | **REDESIGN** |
 | Security authorization API | Internal gate logic exists, but not the final ServiceIntegration-authenticated PDP contract. | Add explicit synchronous authorization-check contract. | **NEW/MODIFY** |
-| Dealer/Outlet in Security | Audit Core design already separates business scope. | Security stores no Dealer assignment. | **RETAIN BOUNDARY** |
+| Dealer/Outlet business scope | Audit Core design separates business scope but previously treated Dealer/Outlet terminology separately. | Phase 1 uses one Dealer/Outlet business assignment concept; Security stores none of it. | **RETAIN BOUNDARY / CLARIFY TARGET** |
 | Web BFF | No consolidated Web BFF boundary in current Security runtime. | BFF capability is part of Web module; no separate BFF module. | **NEW DESIGN BOUNDARY** |
 | Audit Core human trust | Current design expects Security-issued JWT + permissions. | Clerk JWT + ServiceIntegration-authenticated Security AuthZ call + Audit Core business scope. | **DEPENDENT DESIGN CHANGE** |
 | DI human trust | Current DI expects Security-issued USER JWT. | Human may call DI directly using Clerk JWT authentication + ServiceIntegration-authenticated synchronous Security authorization; DI performs no onboarding. | **DEPENDENT DESIGN CHANGE** |
 | DI service trust | DI already supports Security service/system identities. | Reuse/refine as ServiceIntegration for Audit Core -> DI. | **EXISTING AND RETAIN/MODIFY** |
-| Security audit records | Existing admin/security change/audit structures exist. | Extend to redesigned lifecycle, hard delete, role defaults, role-aligned Groups and ServiceIntegration. | **EXISTING AND RETAIN/MODIFY** |
+| Security audit records | Existing admin/security change/audit structures exist. | Extend to redesigned lifecycle, hard delete, 21-day deletion reference retention, role defaults, role-aligned Groups and ServiceIntegration. | **EXISTING AND RETAIN/MODIFY** |
 
 ---
 
@@ -2808,7 +2828,7 @@ Recommended sequence:
 
 1. freeze this design and the target API/data contracts;
 2. introduce new target role-definition and assignment structures;
-3. add REJECTED/deletion-request/reactivation lifecycle structures and rules;
+3. add REJECTED/deletion-request/reactivation lifecycle structures and rules, including global Tenant-independent deletion semantics and 21-day retained deletion-reference policy;
 4. bind/configure the single existing Clerk SuperAdmin identity as the one Phase-1 SuperAdmin and extend all-ACTIVE-permission synchronization across registered modules;
 5. create/configure canonical TestTenant and bind the existing Clerk TestUser identity to TestTenant with the TestTenant PC bundle;
 6. implement TenantAdmin and ModuleAdmin scope semantics/default module-admin bundles;
@@ -2842,14 +2862,14 @@ These require explicit remediation rather than automatic guessing.
 
 ## 37. Phase-1 implementation sequence after design approval
 
-1. **Approve target Security design and remaining open decisions required for coding.**
+1. **Approve target Security design.**
 2. **Produce target Security API/OpenAPI and physical DB design.**
 3. **Implement/configure the single SuperAdmin mapping and all-ACTIVE-permission invariant across registered modules.**
 4. **Implement/create canonical TestTenant representation in Security and define the cross-module TestTenant ID contract.**
 5. **Bind/configure TestUser to TestTenant and TestTenant PC permissions.**
 6. **Implement Clerk session JWT verification for human requests.**
 7. **Implement/align global USER onboarding and PENDING/REJECTED/ACTIVE lifecycle.**
-8. **Implement status change + DISABLED deletion-request flow + SuperAdmin-only hard-delete + SuperAdmin-only reactivation.**
+8. **Implement status change + global DISABLED deletion-request flow + SuperAdmin-only hard-delete + SuperAdmin-only reactivation + 21-day retained deletion-reference policy.**
 9. **Implement global role definitions and one operating-role-per-USER/Tenant assignment model.**
 10. **Implement Phase-1 role-aligned Groups as the PC/TL/PM/CRM/Executive user collections tied 1:1 to operating roles.**
 11. **Enforce one PM per Tenant and admin/operating exclusivity.**
@@ -2860,7 +2880,7 @@ These require explicit remediation rather than automatic guessing.
 16. **Implement/refine registered ServiceIntegration service identities, short-lived Security machine-token issuance, audience checks and service-specific permissions.**
 17. **Implement synchronous Security authorization-check API authenticated by ServiceIntegration callers.**
 18. **Implement Web BFF user-administration flows inside the Web module without moving authority into Web.**
-19. **Implement/align Audit Core Dealer assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
+19. **Implement/align Audit Core Dealer/Outlet assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
 20. **Migrate Audit Core human auth contract to Clerk JWT + ServiceIntegration-authenticated synchronous Security AuthZ.**
 21. **Align DI direct-human protected access to Clerk JWT + ServiceIntegration-authenticated synchronous Security AuthZ; DI remains outside onboarding.**
 22. **Use ServiceIntegration machine JWTs for Audit Core -> DI.**
@@ -2874,10 +2894,10 @@ These require explicit remediation rather than automatic guessing.
 The following are deliberately not implemented or overdesigned in Phase 1:
 
 - MFA;
-- Dealer staffing/cardinality rules;
-- number of Dealers supported by each PC/TL/PM/CRM;
-- exact Dealer coverage ratios;
-- user-to-Outlet restrictions unless separately approved;
+- Dealer/Outlet staffing/cardinality rules;
+- number of Dealer/Outlets supported by each PC/TL/PM/CRM;
+- exact Dealer/Outlet coverage ratios;
+- a separate Dealer-versus-Outlet hierarchy/restriction model;
 - distributed human authorization projections;
 - Verigence-issued human JWT;
 - custom human OAuth authorization-server implementation;
@@ -2892,11 +2912,7 @@ The following are deliberately not implemented or overdesigned in Phase 1:
 
 ## 39. Open decisions
 
-The following remain genuinely open after the confirmed Phase-1 decisions in this revision:
-
-1. **Global deletion-request scope:** whether/how Executive or TenantAdmin may initiate deletion of a global USER who is authorized in other Tenants. Final hard deletion remains SuperAdmin-only regardless of this decision.
-2. **Outlet assignment:** whether Phase 1 needs any USER-to-Outlet business restriction in Audit Core beyond Dealer association.
-3. **Hard-delete retention:** exact non-PII actor tombstone/snapshot and retention period across Security/Audit records.
+There are **no remaining Phase-1 design decisions open from the items tracked in this document**.
 
 ### Implementation inputs required, not design decisions
 
@@ -2961,7 +2977,7 @@ PROTECTED RESOURCE SERVER
               v
            ALLOW / DENY
               |
-              +--> Audit Core additionally checks Dealer/business scope where applicable
+              +--> Audit Core additionally checks Dealer/Outlet business scope where applicable
 ```
 
 ### 41.2 Machine path
@@ -2992,4 +3008,4 @@ ALLOW / DENY
 
 The governing separation is:
 
-> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Security also authenticates registered machine identities and issues short-lived ServiceIntegration JWTs for module-to-module calls. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. The single Phase-1 SuperAdmin has every ACTIVE registered permission. TenantAdmin administers one Tenant across modules; ModuleAdmin administers one module across Tenants. TestUser is isolated to TestTenant and follows the TestTenant PC functional bundle. Audit Core decides Dealer/business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding. The Web BFF is part of the Web module and owns no Security authority.**
+> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Security also authenticates registered machine identities and issues short-lived ServiceIntegration JWTs for module-to-module calls. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. The single Phase-1 SuperAdmin has every ACTIVE registered permission. TenantAdmin administers one Tenant across modules for normal administration; global USER deletion is Tenant-independent. ModuleAdmin administers one module across Tenants. TestUser is isolated to TestTenant and follows the TestTenant PC functional bundle. Audit Core decides the single Phase-1 Dealer/Outlet business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding. The Web BFF is part of the Web module and owns no Security authority.**
