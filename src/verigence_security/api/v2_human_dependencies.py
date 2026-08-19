@@ -15,7 +15,6 @@ from verigence_security.services.v2_human_actor import (
     HumanActorContext,
 )
 
-
 security_human_bearer = HTTPBearer(
     auto_error=False,
     scheme_name="SecurityHumanAccessToken",

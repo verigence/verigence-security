@@ -225,12 +225,12 @@ class Phase1TestIdentityProvisioningService:
             status = str(row["status"])
 
         if status == "CONFIGURING":
-            tenant = service.activate_tenant(
+            activated_tenant = service.activate_tenant(
                 actor_user_id=actor_user_id,
                 tenant_id=tenant_id,
                 correlation_id=f"phase1-test-tenant-activate-{uuid4()}",
             )
-            if tenant is None or str(tenant["status"]) != "ACTIVE":
+            if activated_tenant is None or str(activated_tenant["status"]) != "ACTIVE":
                 raise RuntimeError("TestTenant could not be activated")
         elif status != "ACTIVE":
             raise RuntimeError(f"TestTenant must be CONFIGURING or ACTIVE, found {status}")

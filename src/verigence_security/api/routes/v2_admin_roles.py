@@ -11,6 +11,7 @@ from verigence_security.services.v2_admin_role_mutations import (
     AuditedAdminRoleAssignmentService,
 )
 from verigence_security.services.v2_human_actor import HumanActorContext
+from verigence_security.services.v2_rbac import RoleMutationResult
 
 router = APIRouter(prefix="/security/v1", tags=["Security v2 Admin Roles"])
 
@@ -26,17 +27,17 @@ def _response(
     role_key: str,
     scope_type: str,
     scope_id: str,
-    result: object,
+    result: RoleMutationResult,
 ) -> AdminRoleMutationResponse:
     return AdminRoleMutationResponse(
         userId=user_id,
         roleKey=role_key,  # type: ignore[arg-type]
         scopeType=scope_type,  # type: ignore[arg-type]
         scopeId=scope_id,
-        changed=bool(getattr(result, "changed")),
+        changed=result.changed,
         assignmentId=(
-            str(getattr(result, "assignment_id"))
-            if getattr(result, "assignment_id") is not None
+            str(result.assignment_id)
+            if result.assignment_id is not None
             else None
         ),
     )

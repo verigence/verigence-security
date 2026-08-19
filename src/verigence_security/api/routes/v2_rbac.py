@@ -24,6 +24,7 @@ from verigence_security.services.v2_human_actor import HumanActorContext
 from verigence_security.services.v2_rbac import (
     OperatingRoleAssignmentService,
     RoleDefinitionService,
+    RoleMutationResult,
     TenantRoleBundleService,
 )
 
@@ -62,17 +63,14 @@ def _operating_result_response(
     *,
     tenant_id: str,
     user_id: str,
-    result: object,
+    result: RoleMutationResult,
 ) -> OperatingRoleMutationResponse:
-    changed = bool(getattr(result, "changed"))
-    assignment_id = getattr(result, "assignment_id")
-    role_key = getattr(result, "role_key")
     return OperatingRoleMutationResponse(
         tenantId=tenant_id,
         userId=user_id,
-        changed=changed,
-        assignmentId=str(assignment_id) if assignment_id is not None else None,
-        roleKey=cast(OperatingRoleKey | None, role_key),
+        changed=result.changed,
+        assignmentId=str(result.assignment_id) if result.assignment_id is not None else None,
+        roleKey=cast(OperatingRoleKey | None, result.role_key),
     )
 
 

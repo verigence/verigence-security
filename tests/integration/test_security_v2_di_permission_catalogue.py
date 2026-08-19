@@ -83,7 +83,7 @@ def test_security_registers_complete_canonical_di_catalogue_without_expanding_ro
                     )
                 ).all()
             }
-            assert DI_PERMISSION_KEYS <= registered
+            assert registered >= DI_PERMISSION_KEYS
 
             default_uses = {
                 str(row[0])

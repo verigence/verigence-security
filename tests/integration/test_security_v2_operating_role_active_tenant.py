@@ -70,17 +70,16 @@ def test_inactive_tenant_cannot_receive_new_operating_role() -> None:
                 {"tenant_id": tenant_id, "code": f"inactive-{tenant_id}", "now": now},
             )
 
-        with Session(engine) as session:
-            with pytest.raises(
-                ValueError,
-                match="Tenant must be ACTIVE for an operating-role assignment",
-            ):
-                OperatingRoleAssignmentService(session).set_role(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    role_key="PC",
-                    actor_user_id=actor_id,
-                )
+        with Session(engine) as session, pytest.raises(
+            ValueError,
+            match="Tenant must be ACTIVE for an operating-role assignment",
+        ):
+            OperatingRoleAssignmentService(session).set_role(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role_key="PC",
+                actor_user_id=actor_id,
+            )
     finally:
         with engine.begin() as conn:
             conn.execute(

@@ -30,7 +30,7 @@ def _group_response(tenant_id: str, row: dict[str, object]) -> RoleAlignedGroupR
         tenantId=tenant_id,
         roleKey=cast(OperatingRoleKey, str(row["role_key"])),
         displayName=str(row["display_name"]),
-        memberCount=int(row["member_count"]),
+        memberCount=int(str(row["member_count"])),
     )
 
 

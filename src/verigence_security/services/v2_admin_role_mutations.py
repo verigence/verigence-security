@@ -41,9 +41,8 @@ class AuditedAdminRoleAssignmentService:
             if role_key == "TenantAdmin":
                 if not self.repository.lock_tenant(scope_id):
                     raise ValueError("Tenant scope not found")
-            elif role_key == "ModuleAdmin":
-                if not self.repository.module_exists(scope_id):
-                    raise ValueError("Module scope is not ACTIVE")
+            elif role_key == "ModuleAdmin" and not self.repository.module_exists(scope_id):
+                raise ValueError("Module scope is not ACTIVE")
 
             existing = self.repository.active_admin_assignment(
                 user_id=user_id,
