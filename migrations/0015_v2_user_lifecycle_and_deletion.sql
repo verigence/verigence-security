@@ -51,4 +51,75 @@ ON security.deleted_user_tombstones(deletion_request_id);
 CREATE INDEX IF NOT EXISTS ix_deleted_user_tombstone_retention
 ON security.deleted_user_tombstones(retain_until_utc);
 
+-- Hard deletion must not erase or rewrite the historical identity of the USER who
+-- previously performed an administrative/configuration action. For single-column FKs
+-- to security.users, subject/object references become ON DELETE CASCADE, while actor
+-- references (*_by_user_id / actor_user_id) deliberately retain the UUID without a live
+-- USER FK. Application write services continue to validate the acting USER before writes.
+DO $$
+DECLARE
+  fk record;
+BEGIN
+  FOR fk IN
+    SELECT ns.nspname AS schema_name,
+           tbl.relname AS table_name,
+           con.conname AS constraint_name,
+           att.attname AS column_name
+    FROM pg_constraint con
+    JOIN pg_class tbl ON tbl.oid=con.conrelid
+    JOIN pg_namespace ns ON ns.oid=tbl.relnamespace
+    JOIN pg_attribute att
+      ON att.attrelid=con.conrelid
+     AND att.attnum=con.conkey[1]
+    WHERE con.contype='f'
+      AND con.confrelid='security.users'::regclass
+      AND array_length(con.conkey,1)=1
+      AND array_length(con.confkey,1)=1
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+      fk.schema_name,fk.table_name,fk.constraint_name
+    );
+
+    IF fk.column_name NOT LIKE '%\_by\_user\_id' ESCAPE '\'
+       AND fk.column_name <> 'actor_user_id' THEN
+      EXECUTE format(
+        'ALTER TABLE %I.%I ADD CONSTRAINT %I FOREIGN KEY (%I) '
+        'REFERENCES security.users(user_id) ON DELETE CASCADE',
+        fk.schema_name,fk.table_name,fk.constraint_name,fk.column_name
+      );
+    END IF;
+  END LOOP;
+END $$;
+
+-- Security events are retained historical evidence. Keep their principal UUID after a
+-- live USER/principal is hard-deleted rather than requiring that principal row forever.
+DO $$
+DECLARE
+  fk record;
+BEGIN
+  FOR fk IN
+    SELECT ns.nspname AS schema_name,
+           tbl.relname AS table_name,
+           con.conname AS constraint_name
+    FROM pg_constraint con
+    JOIN pg_class tbl ON tbl.oid=con.conrelid
+    JOIN pg_namespace ns ON ns.oid=tbl.relnamespace
+    JOIN pg_attribute att
+      ON att.attrelid=con.conrelid
+     AND att.attnum=con.conkey[1]
+    WHERE con.contype='f'
+      AND con.confrelid='security.security_principals'::regclass
+      AND ns.nspname='security'
+      AND tbl.relname='security_events'
+      AND att.attname='principal_id'
+      AND array_length(con.conkey,1)=1
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+      fk.schema_name,fk.table_name,fk.constraint_name
+    );
+  END LOOP;
+END $$;
+
 COMMIT;
