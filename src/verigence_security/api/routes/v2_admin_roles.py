@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_admin_role_schemas import AdminRoleMutationResponse
 from verigence_security.api.v2_human_dependencies import clerk_human_actor
 from verigence_security.core.errors import security_error
+from verigence_security.services.v2_admin_role_mutations import (
+    AuditedAdminRoleAssignmentService,
+)
 from verigence_security.services.v2_human_actor import HumanActorContext
-from verigence_security.services.v2_rbac import AdminRoleAssignmentService
 
 router = APIRouter(prefix="/security/v1", tags=["Security v2 Admin Roles"])
 
@@ -47,16 +49,18 @@ def _response(
 def assign_tenant_admin(
     tenantId: str,
     userId: str,
+    request: Request,
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
     try:
-        result = AdminRoleAssignmentService(session).assign(
+        result = AuditedAdminRoleAssignmentService(session).assign(
             user_id=userId,
             role_key="TenantAdmin",
             scope_id=tenantId,
             actor_user_id=actor.user_id,
+            correlation_id=request.state.correlation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -76,15 +80,18 @@ def assign_tenant_admin(
 def remove_tenant_admin(
     tenantId: str,
     userId: str,
+    request: Request,
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
     try:
-        result = AdminRoleAssignmentService(session).remove(
+        result = AuditedAdminRoleAssignmentService(session).remove(
             user_id=userId,
             role_key="TenantAdmin",
             scope_id=tenantId,
+            actor_user_id=actor.user_id,
+            correlation_id=request.state.correlation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -104,16 +111,18 @@ def remove_tenant_admin(
 def assign_module_admin(
     moduleKey: str,
     userId: str,
+    request: Request,
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
     try:
-        result = AdminRoleAssignmentService(session).assign(
+        result = AuditedAdminRoleAssignmentService(session).assign(
             user_id=userId,
             role_key="ModuleAdmin",
             scope_id=moduleKey.lower(),
             actor_user_id=actor.user_id,
+            correlation_id=request.state.correlation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -133,15 +142,18 @@ def assign_module_admin(
 def remove_module_admin(
     moduleKey: str,
     userId: str,
+    request: Request,
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
     try:
-        result = AdminRoleAssignmentService(session).remove(
+        result = AuditedAdminRoleAssignmentService(session).remove(
             user_id=userId,
             role_key="ModuleAdmin",
             scope_id=moduleKey.lower(),
+            actor_user_id=actor.user_id,
+            correlation_id=request.state.correlation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
