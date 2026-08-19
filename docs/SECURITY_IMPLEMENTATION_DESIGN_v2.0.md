@@ -7,7 +7,7 @@
 **Target branch:** `dev`  
 **Authoritative architecture:** `docs/SECURITY_SOLUTION_DESIGN_v2.0.md`
 
-> This document is an implementation blueprint only. It does not authorize application-code or migration changes. It translates the approved Security v2.0 solution design into a concrete reuse, data, API, migration and test plan. Where current `dev` implementation conflicts with the approved solution design, the solution design wins. No Audit Core or DI file is changed by this document.
+> This document is an implementation blueprint only. It does not authorize application-code or migration changes. It translates the approved Security v2.0 solution design into a concrete reuse, data, API, migration and test plan. Where current `dev` implementation conflicts with the approved solution design or with implementation decisions explicitly confirmed after that design review, the confirmed target decisions win. No Audit Core or DI file is changed by this document.
 
 ---
 
@@ -24,20 +24,42 @@ Implementation rules:
 3. Retire conflicting runtime paths without rewriting historical migrations.
 4. Keep historical/deferred tables and code where removal is not required for Phase 1.
 5. Do not invent business rules or permission keys.
-6. New permission keys, where genuinely required and not already present, must be explicitly approved before coding/migration.
-7. Human authentication remains Clerk first-party session JWT only.
-8. Security issues JWTs only for machine/service identities in the target Phase-1 model.
-9. Human authorization is synchronous and fail-closed.
-10. Device/Geo/Schedule/VPN capabilities are retained but deferred from the active Phase-1 human authorization path.
+6. Human authentication remains Clerk first-party session JWT only.
+7. Security issues JWTs only for machine/service identities in the target Phase-1 model.
+8. Human authorization is synchronous and fail-closed.
+9. Device/Geo/Schedule/VPN capabilities are retained but deferred from the active Phase-1 human authorization path.
+10. Administrative endpoints are human-admin-only and explicitly reject `SERVICE_INTEGRATION` callers.
+11. Permission classification into `FUNCTIONAL` versus `ADMIN` is deferred to Phase 2; Phase 1 keeps the current permission catalogue structure unchanged.
 
-### 1.1 Additional implementation decisions confirmed after solution-design review
+### 1.1 Confirmed implementation decisions
 
-The following implementation decisions are confirmed and are treated as binding for this blueprint:
+The following decisions are binding for Phase 1:
 
 - Device / Geo / Schedule / VPN controls remain in the repository/database but are not active Phase-1 human authorization gates.
 - `PENDING -> ACTIVE` and `PENDING -> REJECTED` are SuperAdmin-only actions.
-- `ACTIVE -> SUSPENDED` may be initiated by `Executive` and `TenantAdmin` within their existing Tenant scope. The resulting USER status is global, therefore access is denied across all Tenants. SuperAdmin also retains the capability through its all-permissions authority.
+- `ACTIVE -> SUSPENDED` may be initiated by `Executive` and `TenantAdmin` within their applicable Tenant scope. The USER status is global, therefore suspension denies access across all Tenants. SuperAdmin also retains the capability through its all-permissions authority.
 - `ServiceIntegration` principals are platform-global, not Tenant-scoped.
+- ServiceIntegration tokens have a **4-hour TTL**.
+- The canonical machine-token endpoint is `POST /security/v1/service/token`.
+- Existing `/oauth/token` machine-token behavior is deprecated and removed from the target active contract after migration.
+- Registered ServiceIntegration identities are intended for broad module-to-module access. Phase 1 does not maintain per-service functional permission grants.
+- Administrative/control-plane endpoints require a human Clerk-authenticated admin and reject `SERVICE_INTEGRATION` regardless of the module.
+- Audience restriction remains mandatory in machine JWTs to prevent a token issued for one module being replayed against another module.
+- Permission classification/segregation is deferred to Phase 2.
+
+### 1.2 Exact Clerk identities — CONFIRMED
+
+These exact Clerk subjects are authoritative for Phase 1:
+
+```text
+SuperAdmin
+user_3I7HFuZZiFC9K2muiweXFRoeoud
+
+TestUser
+user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+```
+
+They must be treated as immutable identity inputs. Do not substitute the previously abbreviated values and do not reverse these identities.
 
 ---
 
@@ -63,22 +85,22 @@ The following implementation decisions are confirmed and are treated as binding 
 | `platform_user_onboarding_settings` | Platform-global onboarding key | Retain | **REUSE** |
 | `platform_user_onboarding_requests` | Global onboarding workflow | Retain; align status transitions and first-party Clerk flow | **REUSE WITH MODIFICATION** |
 | `GlobalUserOnboardingService` | Global USER lifecycle/onboarding | Strong base; modify credential flow, REJECTED, deletion, transition authority | **REUSE WITH MODIFICATION** |
-| `Phase1SelfOnboardingService` / password+OTP route facade | Security-mediated Clerk signup | Replace with Clerk-owned signup + authenticated bind | **RETIRE/REPLACE ACTIVE FLOW** |
+| Current password/OTP self-onboarding facade | Security-mediated Clerk signup | Replace with Clerk-owned signup + authenticated bind | **RETIRE/REPLACE ACTIVE FLOW** |
 | `GET /platform/users` | Global USER listing | Retain and extend filtering/search/pagination/detail | **REUSE WITH MODIFICATION** |
-| `PATCH /platform/users/{id}/status` current lifecycle | ACTIVE/SUSPENDED/DISABLED/EXITED | Replace with approved PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED transition policy | **REUSE WITH MODIFICATION** |
-| Current `EXITED` status | Terminal lifecycle state | Not in target Phase-1 canonical status set | **RETAIN HISTORICALLY; RETIRE FROM NEW FLOW** |
+| Current USER status route | ACTIVE/SUSPENDED/DISABLED/EXITED style lifecycle | Replace with approved PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED transition policy | **REUSE WITH MODIFICATION** |
+| Current `EXITED` state | Legacy terminal state | Not part of target Phase-1 canonical statuses | **RETAIN HISTORICALLY; RETIRE FROM NEW FLOW** |
 
 ### 2.3 Tenant and permission catalogue
 
 | Current component | Current purpose | Target disposition | Classification |
 |---|---|---|---|
 | `security.tenants` | Tenant source of truth | Retain | **REUSE** |
-| `PlatformTenantService` and Tenant CRUD routes | Platform Tenant lifecycle | Retain; switch human auth dependency to Clerk + in-process Security AuthZ | **REUSE WITH MODIFICATION** |
+| `PlatformTenantService` and Tenant CRUD | Platform Tenant lifecycle | Retain; switch human auth dependency to Clerk + in-process Security AuthZ | **REUSE WITH MODIFICATION** |
 | `security.modules` | Registered module catalogue | Retain | **REUSE** |
-| `security.permissions` | Canonical permission registry | Retain | **REUSE** |
+| `security.permissions` | Canonical permission registry | Retain unchanged in Phase 1 | **REUSE** |
 | `ModuleCatalogService` | Register/update module permissions/templates | Retain | **REUSE WITH MODIFICATION** |
-| `GET /platform/modules` and `GET /platform/modules/{module}` | Module discovery | Retain | **REUSE** |
-| Missing explicit `GET .../{module}/permissions` | Permission discovery | Add thin explicit resource using current module catalogue data | **NEW API OVER EXISTING DATA** |
+| Existing module discovery APIs | Module discovery | Retain | **REUSE** |
+| Missing explicit module-permissions read API | Permission discovery | Add thin API over existing catalogue | **NEW API OVER EXISTING DATA** |
 | `module_role_templates` | Module role-template source material | Keep as source/default material; no Tenant role identity creation | **REUSE WITH MODIFICATION** |
 
 ### 2.4 Roles and Groups
@@ -88,23 +110,23 @@ The following implementation decisions are confirmed and are treated as binding 
 | `security.roles` | Tenant-created role objects | No longer authoritative role identity | **RETIRE FROM TARGET ACTIVE MODEL** |
 | `security.role_permissions` | Tenant role-ID permission mapping | Replace with `(tenant_id, role_key, permission_key)` | **REPLACE ACTIVE MODEL** |
 | `security.user_role_assignments` | Additive user-to-Tenant-role assignments | Replace with exactly one operating role per USER/Tenant | **REPLACE ACTIVE MODEL** |
-| `TenantRbacAdminService.create_role` | Arbitrary Tenant role creation | Not allowed for fixed Phase-1 operating roles | **RETIRE ACTIVE API** |
-| `effective_user_permissions()` | Union direct roles + Group-derived roles + platform roles | Replace with classification-aware single-role/admin/test resolver | **REWRITE CORE QUERY/LOGIC** |
-| `security.groups` | Arbitrary Tenant Groups | Can retain metadata only if constrained to system role-aligned Groups | **REUSE WITH MAJOR SIMPLIFICATION** |
-| `group_memberships` | Independent Group membership | Operating-role assignment becomes authority; persisted membership optional | **REUSE ONLY IF DERIVED/SYNCHRONIZED** |
+| Arbitrary Tenant role creation | Custom Tenant role identities | Not allowed for fixed Phase-1 operating roles | **RETIRE ACTIVE API** |
+| `effective_user_permissions()` | Union direct roles + Group-derived roles + platform roles | Replace with classification-aware resolver | **REWRITE CORE QUERY/LOGIC** |
+| `security.groups` | Arbitrary Tenant Groups | Retain only where useful for role-aligned presentation | **REUSE WITH MAJOR SIMPLIFICATION** |
+| `group_memberships` | Independent Group membership | Operating-role assignment becomes authority | **REUSE ONLY IF DERIVED/SYNCHRONIZED** |
 | `group_role_assignments` | Group can add role(s) | Conflicts with target | **RETIRE FROM ACTIVE AUTHORIZATION** |
-| Group create/update/member/role mutation APIs | Arbitrary Group administration | Replace by read-only role-aligned Group APIs | **RETIRE/REPLACE** |
+| Group create/member/role mutation APIs | Arbitrary Group administration | Replace with role-aligned read APIs | **RETIRE/REPLACE** |
 
 ### 2.5 Platform/admin roles
 
 | Current component | Current purpose | Target disposition | Classification |
 |---|---|---|---|
-| `platform_roles` | Platform role catalogue | Reuse only where it aligns to target admin classifications; no human JWT dependency | **REUSE WITH MODIFICATION** |
-| `platform_user_role_assignments` | Platform role assignment | Useful base for SuperAdmin; target TenantAdmin/ModuleAdmin need scoped model | **REUSE PARTIALLY** |
-| `initial_super_admin.py` | One-time exact Clerk subject provisioning | Strongly aligned to one Phase-1 SuperAdmin | **REUSE WITH MODIFICATION** |
-| `provision_initial_super_admin.py` | Operator provisioning entrypoint | Retain; requires full exact Clerk subject at deployment | **REUSE** |
-| `0005_super_admin_full_authority.sql` trigger | Gives SuperAdmin every ACTIVE permission | Retain invariant; it already applies to all permissions registered in `security.permissions`, including module permissions | **REUSE STRONGLY** |
-| Current `platform.security_admin`, `platform.module_catalog_admin`, `platform.auditor` | Legacy/current platform roles | Not part of confirmed Phase-1 human role taxonomy unless separately retained for compatibility | **RETAIN HISTORICALLY / REMOVE FROM TARGET ASSIGNMENT FLOW** |
+| `platform_roles` | Platform role catalogue | Reuse only where aligned; no human Security JWT dependency | **REUSE WITH MODIFICATION** |
+| `platform_user_role_assignments` | Platform role assignment | Useful base for SuperAdmin migration | **REUSE PARTIALLY** |
+| `initial_super_admin.py` | Exact Clerk subject provisioning | Strongly aligned with one Phase-1 SuperAdmin | **REUSE WITH MODIFICATION** |
+| SuperAdmin provisioning script | Operator provisioning entrypoint | Retain using confirmed exact Clerk subject | **REUSE** |
+| `0005_super_admin_full_authority.sql` | Synchronizes SuperAdmin with all ACTIVE permissions | Retain invariant and extend runtime use consistently | **REUSE STRONGLY** |
+| Legacy/current platform admin personas not in final taxonomy | Older control-plane model | Keep historically, remove from new assignment flow unless explicitly retained | **RETAIN HISTORICALLY** |
 
 ### 2.6 Machine / ServiceIntegration
 
@@ -113,26 +135,18 @@ The following implementation decisions are confirmed and are treated as binding 
 | `security.security_principals` with `SERVICE_INTEGRATION` | Machine principal base | Retain | **REUSE** |
 | `security.service_integrations` | Service integration identity metadata | Retain as canonical service identity table | **REUSE** |
 | `security.principal_credentials` | Client ID + hashed secret + lifecycle | Retain | **REUSE** |
-| `principal_tenant_scopes` | Tenant-scoped machine scope | Does not fit platform-global ServiceIntegration | **RETIRE FROM TARGET SERVICE AUTHZ** |
-| `principal_permission_grants` | Tenant-scoped machine permissions | Does not fit platform-global ServiceIntegration | **RETIRE FROM TARGET SERVICE AUTHZ** |
-| `/oauth/token` client_credentials flow | Machine token issuance | Strong reusable implementation base; semantics must become platform-global and audience-aware | **REUSE WITH MODIFICATION** |
+| `principal_tenant_scopes` | Tenant-scoped machine scope | Not used by target ServiceIntegration | **RETIRE FROM TARGET SERVICE AUTHZ** |
+| `principal_permission_grants` | Tenant-scoped machine permission grants | Not used by target Phase-1 ServiceIntegration | **RETIRE FROM TARGET SERVICE AUTHZ** |
+| `/oauth/token` client_credentials flow | Existing machine token issuance | Reuse underlying implementation patterns only | **DEPRECATE ENDPOINT / REUSE INTERNALS** |
 | `/oauth/token` token-exchange grant | USER token delegation | Not required Phase 1 | **RETIRE/DEFER** |
-| `TokenService` RSA signing/JWKS | Security access JWTs | Retain signing/JWKS; split target machine claim model from retired human claim shape | **REUSE WITH MODIFICATION** |
-| `access_sessions` machine rows | Tenant-scoped service sessions | Do not use as target platform-global machine authorization prerequisite | **RETAIN HISTORICALLY / DEFER** |
+| `TokenService` RSA signing/JWKS | Security-signed tokens | Retain signing/JWKS; create machine-only target claim model | **REUSE WITH MODIFICATION** |
+| Tenant-scoped machine `access_sessions` | Legacy service sessions | Not required for target platform-global machine auth | **RETAIN HISTORICALLY / DEFER** |
 
 ### 2.7 Device / Geo / Schedule / VPN
 
-Current implementation has substantial capability around:
+Keep existing tables, code, administration surfaces and tests where they validate the deferred feature itself.
 
-- `registered_devices`;
-- `tenant_locations`;
-- `user_location_assignments`;
-- access schedules/windows/overrides;
-- `tenant_security_policies`;
-- network/VPN risk adapters;
-- access sessions and geolocation validation.
-
-**Confirmed Phase-1 implementation decision:** keep these tables, code and administration surfaces, but do not invoke them as required checks for the new Clerk-JWT + live-Security-authorization human path.
+Do not invoke these as mandatory checks in the Phase-1 Clerk-JWT + synchronous Security authorization path.
 
 Classification: **DEFER FROM ACTIVE PHASE-1 HUMAN AUTHORIZATION; DO NOT DELETE**.
 
@@ -149,10 +163,10 @@ Web/Mobile
    v
 Security API
    |
-   +-- locally validate Clerk JWT
+   +-- validate Clerk JWT locally
    +-- Clerk sub -> global USER
    +-- USER status check
-   +-- in-process authorization policy
+   +-- in-process Security authorization
    +-- execute Security operation
 ```
 
@@ -170,44 +184,76 @@ Audit Core / DI
    +-- validate Clerk JWT locally
    +-- extract trusted Clerk subject
    |
-   | ServiceIntegration JWT of calling backend
+   | backend's ServiceIntegration JWT, aud=security
    v
 Security /authorization/check
    |
-   +-- validate backend service token
+   +-- validate registered machine caller
    +-- resolve Clerk subject -> USER
    +-- USER must be ACTIVE
    +-- resolve Tenant/admin/test authorization
-   +-- evaluate canonical permission
+   +-- evaluate requested human permission
    v
 ALLOW / DENY
 ```
 
+The machine caller's token proves the backend is a trusted Verigence internal service. The human permission being checked remains the USER's permission, not the machine's permission.
+
 ### 3.3 Module-to-module machine request
 
 ```text
-Registered service
+Registered internal service
    |
-   | client_id + secret + target audience + requested scope
+   | client_id + secret + target audience
    v
-Security token endpoint
+POST /security/v1/service/token
    |
-   +-- authenticate ServiceIntegration principal
-   +-- verify ACTIVE
-   +-- verify target audience grant
-   +-- verify requested permission grant
+   +-- registered ServiceIntegration principal?
+   +-- principal ACTIVE?
+   +-- credential valid and ACTIVE?
+   +-- requested audience is a registered Verigence module/security audience?
    v
-short-lived Security-signed JWT
+Security issues 4-hour signed machine JWT
    |
    v
 Target module
-   +-- signature / issuer / exp
+   +-- signature / issuer / expiry
    +-- actor_type=SERVICE_INTEGRATION
-   +-- expected audience
-   +-- required permission
+   +-- aud matches this target module
+   +-- target endpoint is not human-admin-only
+   v
+ALLOW / DENY
 ```
 
-No Tenant scope is required to authenticate or authorize the service principal itself.
+Phase 1 does **not** maintain service-specific functional permission grants or Tenant scopes for machine callers.
+
+### 3.4 Administrative endpoint rule
+
+Administrative/control-plane endpoints include operations such as:
+
+- global USER approval/rejection/suspension/reactivation/deletion administration;
+- Tenant creation/lifecycle administration;
+- operating/admin role assignment;
+- Tenant role-bundle modification;
+- module/security configuration administration;
+- ServiceIntegration registration/credential lifecycle administration;
+- SuperAdmin/bootstrap operations.
+
+These endpoints:
+
+```text
+require actor_type = USER
++ Clerk authentication
++ appropriate human admin classification/scope
+```
+
+They explicitly reject:
+
+```text
+actor_type = SERVICE_INTEGRATION
+```
+
+Normal system-to-system business/integration endpoints may accept `SERVICE_INTEGRATION` when the machine JWT audience matches the target module.
 
 ---
 
@@ -234,33 +280,31 @@ Retain:
 - `security.service_integrations`
 - `security.principal_credentials`
 
-### 4.2 USER status change
+### 4.2 USER statuses
 
-Modify `security.users.status` target allowed set for new writes to:
+Target new-write states:
 
 ```text
 PENDING | REJECTED | ACTIVE | SUSPENDED | DISABLED
 ```
 
-Historical `INVITED` / `EXITED` values may remain readable during migration compatibility, but target APIs must not create new `INVITED` or `EXITED` state transitions.
+Historical legacy values may remain readable during reconciliation, but target APIs do not create new legacy states.
 
-Migration must reconcile any existing rows in legacy states before tightening the database constraint. No automatic mapping is allowed without data review.
+Do not tighten constraints until current data is reconciled.
 
-### 4.3 Global role definition table — NEW
-
-Proposed physical table:
+### 4.3 Global human role definitions — NEW
 
 ```text
 security.role_definitions
-  role_key varchar(...) PK
-  role_class varchar(...)  -- OPERATING | ADMIN | TEST
+  role_key PK
+  role_class        -- OPERATING | ADMIN | TEST
   display_name
-  status                  -- ACTIVE | INACTIVE
+  status            -- ACTIVE | INACTIVE
   created_at_utc
   updated_at_utc
 ```
 
-Seed fixed Phase-1 human classifications:
+Seed:
 
 ```text
 PC
@@ -274,132 +318,139 @@ SuperAdmin
 TestUser
 ```
 
-`ServiceIntegration` is not inserted as a human role definition; it remains a machine actor type/classification.
+`ServiceIntegration` remains a machine actor classification, not a human role assignment.
 
-### 4.4 Platform default operating-role permissions — NEW
+### 4.4 Platform default role permissions — NEW
 
 ```text
 security.platform_role_permission_defaults
-  role_key FK role_definitions
-  permission_key FK permissions
+  role_key
+  permission_key
   source_catalog_version nullable
-  status ACTIVE | RETIRED
+  status
   created_at_utc
   PRIMARY KEY(role_key, permission_key)
 ```
 
-Only approved default bundles are seeded.
+Seed only approved default bundles.
 
-### 4.5 Tenant operating-role permissions — NEW
+### 4.5 Tenant role permissions — NEW
 
 ```text
 security.tenant_role_permissions
-  tenant_id FK tenants
-  role_key FK role_definitions
-  permission_key FK permissions
-  assigned_by_user_id FK users
+  tenant_id
+  role_key
+  permission_key
+  assigned_by_user_id
   assigned_at_utc
   PRIMARY KEY(tenant_id, role_key, permission_key)
 ```
 
 Rules:
 
-- `role_key` must be an OPERATING role for normal Tenant bundles.
-- every referenced permission must exist and be ACTIVE when written;
-- SuperAdmin updates are atomic replace operations at API/service level;
-- changing a Tenant bundle does not create a new role.
+- role is an approved operating role;
+- permission exists in canonical catalogue and is ACTIVE when written;
+- SuperAdmin updates use atomic replace semantics;
+- changing the permission set does not create a new role identity.
 
 ### 4.6 Operating-role assignment — NEW
 
 ```text
 security.user_tenant_operating_roles
   assignment_id uuid PK
-  user_id FK users
-  tenant_id FK tenants
-  role_key FK role_definitions
+  user_id
+  tenant_id
+  role_key
   status ACTIVE | ENDED
   valid_from_utc nullable
   valid_to_utc nullable
-  assigned_by_user_id FK users
+  assigned_by_user_id
   assigned_at_utc
   ended_at_utc nullable
 ```
 
-Required database protections:
+Required protections:
 
-1. Partial unique index: one ACTIVE row per `(user_id, tenant_id)`.
-2. Partial unique index: one ACTIVE row per `tenant_id` where `role_key='PM'`.
-3. Application/service validation: role must be `OPERATING`.
-4. Application/service validation: USER must be `ACTIVE` before a new operating assignment.
-5. Global admin/operating exclusivity check in the same transaction.
-
-The operating-role update service uses row/advisory locking or equivalent transaction serialization for `(user_id, tenant_id)` and PM replacement to prevent concurrency races.
+- one ACTIVE role per `(user_id, tenant_id)`;
+- one ACTIVE `PM` per Tenant;
+- only approved operating roles;
+- USER must be ACTIVE for new assignment;
+- admin/operating exclusivity is checked in the same transaction.
 
 ### 4.7 Role-aligned Groups
 
-Preferred Phase-1 implementation: **derived Groups**, not independently writable membership.
+Preferred Phase-1 implementation is derived Groups rather than independently writable authorization membership.
 
-Reason:
+Logical Groups:
 
-- role assignment is already the authority;
-- independent persisted membership creates synchronization risk;
-- target Groups are only PC/TL/PM/CRM/Executive user collections.
+```text
+PC
+TL
+PM
+CRM
+Executive
+```
 
-Recommended physical approach:
+Group members are the users whose active operating assignment has the corresponding `role_key` in the Tenant.
 
-- optionally retain `security.groups` rows as system metadata for display/name purposes;
-- do not use `group_role_assignments` in target authorization;
-- do not require `group_memberships` as authorization state;
-- Group listing/users query `user_tenant_operating_roles` directly by `tenant_id + role_key`.
-
-If persisted `group_memberships` is retained for UI compatibility, it must be transactionally derived from operating-role assignment and never be an independent grant source. The first implementation preference is to avoid the duplicate write.
+Do not consult `group_role_assignments` for target authorization.
 
 ### 4.8 Administrative-role assignment — NEW
 
 ```text
 security.user_admin_role_assignments
   assignment_id uuid PK
-  user_id FK users
-  role_key FK role_definitions
+  user_id
+  role_key
   scope_type PLATFORM | TENANT | MODULE
   scope_id nullable
   status ACTIVE | ENDED
-  assigned_by_user_id FK users nullable for bootstrap
+  assigned_by_user_id nullable for bootstrap
   assigned_at_utc
   ended_at_utc nullable
 ```
 
-Scope shape rules:
+Scope semantics:
 
 ```text
-SuperAdmin  -> scope_type=PLATFORM, scope_id=NULL
-TenantAdmin -> scope_type=TENANT,   scope_id=<tenant UUID>
-ModuleAdmin -> scope_type=MODULE,   scope_id=<module_key>
+SuperAdmin  -> PLATFORM, scope_id=NULL
+TenantAdmin -> TENANT,   scope_id=<tenant UUID>
+ModuleAdmin -> MODULE,   scope_id=<module key>
 ```
 
 Required invariants:
 
 - exactly one ACTIVE SuperAdmin in Phase 1;
-- TenantAdmin uniqueness per `(user_id, tenant_id)`;
-- ModuleAdmin uniqueness per `(user_id, module_key)`;
-- administrative assignments may stack;
-- a USER with any ACTIVE admin assignment may not have an ACTIVE operating assignment anywhere;
-- a USER with any ACTIVE operating assignment may not receive an admin assignment.
-
-The existing `platform_user_role_assignments` can remain for historical compatibility while SuperAdmin is migrated to the new scoped table. During transition there must be one canonical resolver only; double counting must not occur.
+- TenantAdmin unique per USER/Tenant;
+- ModuleAdmin unique per USER/module;
+- administrative roles may coexist with administrative roles;
+- any ACTIVE admin role excludes all operating roles globally;
+- any ACTIVE operating role excludes all admin roles globally.
 
 ### 4.9 TestTenant and TestUser
 
-TestTenant uses normal `security.tenants` with one canonical Tenant UUID selected/generated during implementation.
+TestTenant is a **normal Security Tenant** created through the same standard Tenant creation mechanism used for other Tenants.
 
-TestUser uses normal:
+The existing `PlatformTenantService` generates Tenant IDs using `uuid4()`. TestTenant must use the same system-level behavior. No manual UUID is provided by a user.
 
-- `security.users`;
-- `security.external_identities`;
-- `security.role_definitions(TestUser)` classification;
-- one explicit TestTenant association/configuration record as required by implementation.
+Implementation rule:
 
-Recommended new singleton/config table rather than overloading production operating role:
+```text
+Security creates TestTenant
+  -> standard Tenant service generates UUIDv4
+  -> resulting tenant_id is persisted as canonical TestTenant ID
+  -> Audit Core and DI use that exact same tenant_id
+```
+
+Tenant code/name are system-seeded configuration values and must satisfy the same existing Tenant validation rules as every other Tenant; they are not external user inputs for this implementation.
+
+Exact TestUser Clerk subject:
+
+```text
+user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+```
+
+Recommended singleton/config relationship:
 
 ```text
 security.phase1_test_identity
@@ -410,16 +461,14 @@ security.phase1_test_identity
   created_at_utc
 ```
 
-Authorization resolver rule:
+Authorization:
 
 ```text
-TestUser + configured TestTenant
+TestUser + canonical TestTenant
   -> effective permissions = TestTenant PC bundle
 ```
 
-No production operating-role assignment is created for TestUser.
-
-The canonical TestTenant UUID and full exact Clerk TestUser subject are implementation inputs and must not be guessed.
+TestUser does not receive a production operating/admin role in Phase 1.
 
 ### 4.10 Global deletion requests — NEW
 
@@ -437,7 +486,7 @@ security.user_deletion_requests
   correlation_id
 ```
 
-Deletion request is not Tenant-scoped.
+Deletion request is global and Tenant-independent.
 
 Phase-1 maker may be:
 
@@ -447,13 +496,9 @@ Phase-1 maker may be:
 - ModuleAdmin;
 - SuperAdmin.
 
-The confirmed lifecycle diagram explicitly defines `ACTIVE -> DISABLED` for deletion request. The implementation must not silently broaden deletion-source states beyond the approved lifecycle. Requests from unsupported states return conflict until separately approved.
+Final hard delete is SuperAdmin-only.
 
 ### 4.11 Deleted USER tombstone — NEW
-
-Hard delete cannot leave audit FK dependency on the live USER row.
-
-Proposed table:
 
 ```text
 security.deleted_user_tombstones
@@ -472,20 +517,11 @@ Default:
 retain_until_utc = deleted_at_utc + 21 days
 ```
 
-Do not store:
+Do not store authentication secrets, JWTs, service credentials, passwords or OTP material.
 
-- password;
-- Clerk JWT/session token;
-- machine credentials;
-- client secrets;
-- OTP;
-- other authentication secrets.
+### 4.12 ServiceIntegration physical model — SIMPLIFIED PHASE 1
 
-A scheduled cleanup mechanism may remove expired tombstones after 21 days. Exact scheduler mechanism is implementation-level and should reuse existing runtime/job infrastructure if available rather than adding infrastructure solely for this purpose.
-
-### 4.12 Platform-global ServiceIntegration grants — NEW around reused service identity
-
-Reuse:
+Reuse only:
 
 ```text
 security.security_principals
@@ -493,42 +529,34 @@ security.service_integrations
 security.principal_credentials
 ```
 
-Add:
+Target Phase-1 ServiceIntegration does **not** require new per-service audience-grant tables or per-service permission-grant tables.
+
+It also does not consult:
 
 ```text
-security.service_integration_audiences
-  principal_id FK service_integrations
-  audience
-  status ACTIVE | ENDED
-  assigned_by_user_id
-  assigned_at_utc
-  PRIMARY KEY(principal_id, audience)
+principal_tenant_scopes
+principal_permission_grants
 ```
 
-```text
-security.service_integration_permissions
-  principal_id FK service_integrations
-  permission_key FK permissions
-  target_module
-  status ACTIVE | ENDED
-  assigned_by_user_id
-  assigned_at_utc
-  PRIMARY KEY(principal_id, target_module, permission_key)
-```
+for the target machine authorization path.
 
-`principal_tenant_scopes` and Tenant-scoped `principal_permission_grants` are not consulted for the target ServiceIntegration authorization path.
+A registered ACTIVE ServiceIntegration principal with a valid ACTIVE credential may request a machine token for a valid registered Verigence target audience.
 
-### 4.13 Machine token issuance audit
+The target audience is encoded in the JWT and enforced by the receiving module.
 
-Do not require target platform-global service tokens to create a Tenant-scoped `access_sessions` row.
+Administrative endpoint access is prevented by endpoint actor-type policy, not by introducing a Phase-1 permission classification.
 
-Instead, reuse `security_events` / admin audit for token-security events and service credential lifecycle. The existing `access_sessions` rows can remain for historical legacy/deferred flows.
+### 4.13 Permission catalogue classification
 
-This avoids reintroducing a fake Tenant merely to issue a platform-global service token.
+No `FUNCTIONAL` / `ADMIN` column or equivalent classification is added in Phase 1.
+
+Current permission catalogue structure remains authoritative.
+
+Formal permission classification/segregation is a Phase-2 item.
 
 ---
 
-## 5. Authorization resolver design
+## 5. Human authorization resolver design
 
 ### 5.1 Resolve global USER
 
@@ -541,89 +569,87 @@ provider_subject = Clerk sub
 
 Rules:
 
-1. active external identity must exist;
-2. linked USER must exist;
-3. security principal must be ACTIVE where retained as a principal gate;
-4. USER status must be `ACTIVE` for protected application authorization.
+1. active external identity exists;
+2. linked global USER exists;
+3. retained principal status is ACTIVE where applicable;
+4. USER status must be ACTIVE for protected business authorization.
 
 ### 5.2 Resolve SuperAdmin
 
-If USER has ACTIVE SuperAdmin admin assignment:
+Exact Clerk subject:
 
 ```text
-effective permissions = every ACTIVE permission in security.permissions
+user_3I7HFuZZiFC9K2muiweXFRoeoud
 ```
 
-Do not copy a per-Tenant bundle.
+If USER has the one ACTIVE SuperAdmin assignment:
 
-The existing `0005` synchronization logic is reusable, but the runtime can also resolve SuperAdmin directly against ACTIVE permission catalogue. The implementation should use one canonical mechanism and tests must prove newly registered ACTIVE permissions are immediately/transactionally available according to the chosen mechanism.
+```text
+effective permissions = every ACTIVE registered permission
+```
+
+across Security, Audit Core, DI and future registered modules.
+
+No Tenant permission bundle is required for SuperAdmin.
 
 ### 5.3 Resolve TenantAdmin
 
 For requested Tenant `T1`:
 
-- USER must have ACTIVE `TenantAdmin(T1)` admin assignment;
-- grant only TenantAdmin approved permissions scoped to T1;
-- do not allow use against T2 unless separately assigned;
-- TenantAdmin cannot change Tenant role bundles;
-- TenantAdmin may suspend an ACTIVE USER according to Section 8, with a global status effect;
-- deletion request remains a separately confirmed global USER operation.
+- USER has ACTIVE `TenantAdmin(T1)` assignment;
+- authority is scoped to T1 for normal administration;
+- Tenant role-bundle modification remains SuperAdmin-only;
+- TenantAdmin may suspend an ACTIVE USER under the confirmed applicable-Tenant rule, with global USER effect;
+- deletion request remains a global USER operation.
 
 ### 5.4 Resolve ModuleAdmin
 
-For target module:
-
-- USER must have ACTIVE ModuleAdmin assignment for that module;
+- USER has ACTIVE ModuleAdmin assignment for target module;
 - module scope applies across Tenants;
-- permissions are the approved ModuleAdmin permissions already listed in the solution design;
+- approved ModuleAdmin permissions from the solution design are used;
 - operating-user permissions are not inherited automatically.
 
 ### 5.5 Resolve TestUser
 
-If USER is configured TestUser and request Tenant is canonical TestTenant:
+If the exact TestUser is configured and request Tenant is canonical TestTenant:
 
 ```text
-effective permissions = TestTenant PC Tenant bundle
+effective permissions = TestTenant PC bundle
 ```
 
-Otherwise deny TestUser protected production Tenant authorization.
+Otherwise protected production-Tenant authorization is denied.
 
 ### 5.6 Resolve operating USER
 
-For ordinary employee:
+For ordinary operating USER:
 
-1. select one ACTIVE `user_tenant_operating_roles` row for `(user, tenant)`;
-2. read `tenant_role_permissions` for that role key;
+1. read one ACTIVE operating role for `(user, tenant)`;
+2. read Tenant role bundle for that role key;
 3. required canonical permission must be present;
 4. Group does not add permissions.
-
-No permission union across multiple operating roles is allowed.
 
 ---
 
 ## 6. Human USER lifecycle implementation
 
-### 6.1 Target first-party onboarding flow
-
-Do not send human password/TOTP/OTP through Security.
+### 6.1 First-party onboarding
 
 Target sequence:
 
 ```text
-1. Client obtains/uses platform onboarding key.
-2. POST Security onboarding request with approved profile fields; no password.
-3. Security creates global USER=PENDING + onboarding request.
-4. Client completes Clerk first-party signup/authentication directly with Clerk.
-5. Authenticated client calls Security bind endpoint with Clerk session JWT + onboarding request ID.
-6. Security validates Clerk JWT locally and validates expected email/identity relationship.
-7. Security binds Clerk subject to existing global USER.
-8. USER remains PENDING.
-9. SuperAdmin lists/reviews PENDING USER.
-10. SuperAdmin changes PENDING -> ACTIVE or PENDING -> REJECTED.
-11. Tenant/role assignment happens separately.
+1. Client uses approved global onboarding gate/key.
+2. Security creates global USER=PENDING + onboarding request; no password handling.
+3. Employee completes Clerk first-party signup/authentication directly with Clerk.
+4. Authenticated client calls Security bind operation with Clerk session JWT.
+5. Security validates Clerk JWT and expected identity/email relationship.
+6. Security binds Clerk subject to the existing global USER.
+7. USER remains PENDING.
+8. SuperAdmin lists/reviews PENDING USER.
+9. SuperAdmin selects ACTIVE or REJECTED.
+10. Tenant/role assignment occurs separately.
 ```
 
-The existing `GlobalUserOnboardingService.bind_authenticated_clerk_user` is a strong base because it already checks the Clerk identity/email relationship and one-to-one binding. It must be invoked from first-party Clerk JWT context rather than Security receiving user credentials.
+Reuse the existing global onboarding/bind logic where compatible; remove Security-mediated password/TOTP ownership from the active flow.
 
 ### 6.2 Status-transition authority matrix
 
@@ -631,96 +657,82 @@ The existing `GlobalUserOnboardingService.bind_authenticated_clerk_user` is a st
 |---|---|
 | `PENDING -> ACTIVE` | SuperAdmin only |
 | `PENDING -> REJECTED` | SuperAdmin only |
-| `ACTIVE -> SUSPENDED` | Executive or TenantAdmin within existing Tenant scope; SuperAdmin also has authority through all-permissions rule |
+| `ACTIVE -> SUSPENDED` | Executive or TenantAdmin within applicable Tenant scope; SuperAdmin through all-authority rule |
 | `REJECTED -> ACTIVE` | SuperAdmin only |
 | `SUSPENDED -> ACTIVE` | SuperAdmin only |
 | `DISABLED -> ACTIVE` | SuperAdmin only |
 | deletion request `ACTIVE -> DISABLED` | self, Executive, TenantAdmin, ModuleAdmin, SuperAdmin |
 | hard DELETE of DISABLED USER | SuperAdmin only |
 
-For Executive/TenantAdmin suspension, the caller's authority is established in an applicable Tenant context, but the Security USER status is global; therefore subsequent authorization fails in all Tenants.
+Suspension status is global even when the authority to initiate it came from an applicable Tenant context.
 
 ### 6.3 Clerk synchronization
 
-On `SUSPENDED` or `DISABLED`:
+For `SUSPENDED` or `DISABLED`:
 
-1. commit/establish Security denial state first;
-2. revoke target live Security legacy USER sessions where still present;
-3. request Clerk ban/session termination as defense in depth;
-4. if Clerk sync fails, return/report synchronization failure but keep local USER non-ACTIVE and fail closed.
+1. establish Security denial state;
+2. revoke remaining legacy Security USER sessions if any;
+3. terminate/ban Clerk sessions/account state as appropriate for defense in depth;
+4. if Clerk synchronization fails, retain local non-ACTIVE state and fail closed.
 
-On SuperAdmin reactivation:
+Reactivation is SuperAdmin-only.
 
-1. restore Clerk lifecycle as required;
-2. only set Security USER ACTIVE when reactivation can complete safely under the selected ordering;
-3. audit old/new state.
-
-### 6.4 Hard delete coordinator
+### 6.4 Hard-delete coordinator
 
 Preconditions:
 
 - USER exists;
-- USER is `DISABLED` due to a recorded deletion request;
+- USER is DISABLED because of recorded deletion request;
 - caller is the one ACTIVE SuperAdmin;
 - deletion evidence exists.
 
-Coordinator stages:
+Coordinator:
 
-1. lock target USER/deletion request;
+1. lock USER/deletion request;
 2. verify preconditions;
-3. delete/retire Clerk identity/account as required;
-4. snapshot minimum approved deletion evidence into tombstone independent of live USER FKs;
-5. remove/end live operating/admin/test assignments;
-6. revoke external identity mapping and live user-related credentials/sessions;
-7. hard delete live USER/principal rows in FK-safe order;
-8. mark deletion request/audit outcome using FK-independent evidence where needed;
-9. make email reusable;
-10. retain tombstone/deletion reference for 21 days.
-
-Do not report success if the required live identity deletion cannot complete safely.
+3. remove/retire Clerk identity/account as required;
+4. create FK-independent tombstone/evidence;
+5. end live operating/admin/test assignments;
+6. revoke external identity mapping and remaining live sessions/credentials;
+7. hard-delete live USER/principal rows in safe order;
+8. record completion outcome;
+9. release email for reuse;
+10. retain approved tombstone/deletion reference for 21 days.
 
 ---
 
 ## 7. Role and Group implementation
 
-### 7.1 No Tenant role creation
+### 7.1 No Tenant-created operating roles
 
-Retire target use of:
+Retire active use of arbitrary Tenant role creation for PC/TL/PM/CRM/Executive.
 
-```text
-POST /security/v1/admin/tenants/{tenantId}/roles
-```
+Global role definitions are fixed classifications.
 
-and other role-ID mutation semantics for fixed operating roles.
-
-The fixed global role definition catalogue is read-only for normal Phase-1 API callers.
-
-### 7.2 Operating role set/replace service
-
-Target service transaction:
+### 7.2 Operating role set/replace
 
 ```text
 set_operating_role(user, tenant, role_key, actor)
 ```
 
-Steps:
+Transaction:
 
 1. validate USER ACTIVE;
 2. validate Tenant ACTIVE;
-3. validate role_key is one of PC/TL/PM/CRM/Executive;
-4. reject if USER has any ACTIVE admin assignment;
-5. if `PM`, lock/check no other active PM exists;
-6. end existing active operating assignment for `(user,tenant)` if different;
-7. insert new active assignment;
-8. Group view automatically reflects new role;
+3. validate approved operating role;
+4. reject if USER has any admin assignment;
+5. for PM, lock/check uniqueness;
+6. end current `(user, tenant)` operating assignment if different;
+7. insert new assignment;
+8. role-aligned Group view changes automatically;
 9. audit before/after;
 10. commit atomically.
 
-Idempotent behavior: assigning the already-active same role returns current state without creating duplicate history.
+Assigning the same role again is idempotent.
 
 ### 7.3 Group implementation
 
-Expose read-only logical groups:
+Read-only logical groups:
 
 ```text
 PC
@@ -730,16 +742,9 @@ CRM
 Executive
 ```
 
-Group APIs query operating assignments, not independent Group grants.
+Group APIs query operating-role assignments.
 
-Retire active authorization use of:
-
-- arbitrary Group creation;
-- manual Group membership writes;
-- Group-to-role writes;
-- Group-derived role union.
-
-Historical rows remain untouched until later cleanup decision.
+Do not use arbitrary Group role grants or Group-derived permission union in target authorization.
 
 ---
 
@@ -747,18 +752,17 @@ Historical rows remain untouched until later cleanup decision.
 
 ### 8.1 SuperAdmin
 
-Phase 1 has exactly one ACTIVE SuperAdmin.
+Exactly one ACTIVE SuperAdmin in Phase 1.
 
-Reuse `InitialSuperAdminProvisioningService` because it already:
+Exact Clerk subject:
 
-- takes immutable Clerk `user_` ID;
-- refuses replacement when another active SuperAdmin exists;
-- creates global USER/external identity;
-- audits provisioning.
+```text
+user_3I7HFuZZiFC9K2muiweXFRoeoud
+```
 
-Modify target provisioning/assignment persistence to the canonical v2 admin assignment model when introduced.
+Reuse current initial-SuperAdmin provisioning concepts that bind immutable Clerk subject and prevent conflicting active SuperAdmin.
 
-Implementation requires the full exact Clerk subject; the redacted value in the solution document must not be used literally.
+SuperAdmin has every ACTIVE registered permission and all Phase-1 platform administration authority.
 
 ### 8.2 TenantAdmin
 
@@ -768,11 +772,11 @@ Scope:
 one Tenant across modules
 ```
 
-Default activities are those already approved in the solution design. Security implementation should map them to existing canonical Security permission keys wherever the semantics match, rather than inventing parallel keys.
+TenantAdmin manages approved Tenant-level administration and operating-role assignments for its Tenant.
 
-TenantAdmin does not receive Tenant role-bundle modification authority.
+TenantAdmin cannot change the Tenant role->permission definition in Phase 1.
 
-`ACTIVE -> SUSPENDED` is allowed when the caller is TenantAdmin in the applicable Tenant context; effect is global.
+TenantAdmin can initiate global suspension under the confirmed applicable-Tenant rule.
 
 ### 8.3 ModuleAdmin
 
@@ -782,95 +786,92 @@ Scope:
 one module across all Tenants
 ```
 
-Use the exact Audit Core and DI ModuleAdmin permission lists approved in `SECURITY_SOLUTION_DESIGN_v2.0.md`.
-
-Do not add operating permissions merely because the USER is ModuleAdmin.
+Use only approved module-administration permissions already defined in the solution design/current canonical module catalogues.
 
 ### 8.4 Admin/operating exclusivity
 
-Every admin assignment and operating assignment service must call the same invariant checker inside the write transaction.
+Admin assignment and operating-role assignment use the same invariant checker inside the write transaction.
 
-Do not rely only on UI prevention.
+### 8.5 Machine exclusion from administrative APIs
+
+Every administrative/control-plane route must verify human actor type before administrative authorization.
+
+`SERVICE_INTEGRATION` is rejected even if its JWT is otherwise valid for the Security/module audience.
 
 ---
 
 ## 9. Permission catalogue and default seed implementation
 
-### 9.1 Module catalogue
+### 9.1 Module permission discovery
 
-Retain current module catalogue registration/update service and permission retirement conflict checks.
-
-Add explicit read API:
+Retain the current catalogue and expose:
 
 ```text
+GET /security/v1/platform/modules
+GET /security/v1/platform/modules/{moduleKey}
 GET /security/v1/platform/modules/{moduleKey}/permissions
 ```
 
-This should be a projection of the existing registered catalogue, not a second permission store.
+Permission discovery reads the existing Security catalogue; no second permission store is created.
 
-### 9.2 Platform default bundles
+### 9.2 Platform role defaults
 
-Seed platform defaults exactly from `SECURITY_SOLUTION_DESIGN_v2.0.md` Section 21.6 for:
+Seed the exact approved cross-module PC/TL/PM/CRM defaults already recorded in `SECURITY_SOLUTION_DESIGN_v2.0.md`.
 
-- PC;
-- TL;
-- PM;
-- CRM.
+Do not silently drop a missing/retired permission. Surface catalogue mismatch before migration is approved.
 
-Do not alter those lists during implementation unless a canonical permission is missing/retired in the registered module catalogue; if that occurs, fail the seed validation and surface the catalogue conflict.
+Executive default remains:
 
-Executive default is implemented from the approved rule in Section 21.7:
-
-- Audit Core: all current approved read permissions + normal non-destructive update/write permissions;
-- exclude create/delete/upload/submit/verify/decide/resolve/execute/publish/admin-manage unless separately approved;
+- Audit Core: approved read permissions plus normal non-destructive update/write privileges;
 - DI: read-only;
-- no DI configuration writes.
+- no DI configuration administration;
+- no stronger destructive/admin capabilities unless separately approved.
 
-Because Executive is a rule-based default rather than an explicitly enumerated list in the solution design, implementation must produce the concrete generated list from the registered catalogues and include that list in review/tests before migration is committed. No name should be invented.
+The concrete Executive list must be generated from existing registered keys and reviewed before seed migration.
 
 ### 9.3 Tenant creation seeding
 
-Tenant creation transaction/initialization flow:
-
 ```text
 create Tenant
-   -> create/copy current approved PC bundle
-   -> TL bundle
-   -> PM bundle
-   -> CRM bundle
-   -> Executive bundle
+  -> copy PC default bundle
+  -> copy TL default bundle
+  -> copy PM default bundle
+  -> copy CRM default bundle
+  -> copy Executive default bundle
 ```
-
-If any required default references a missing/non-ACTIVE permission, Tenant initialization must not silently drop that permission. Return an initialization/configuration error for administrative correction.
 
 ### 9.4 Tenant override
 
-Only SuperAdmin may atomically replace:
+Only SuperAdmin may atomically replace a Tenant's role permission bundle.
 
-```text
-(tenant_id, role_key) -> permission set
-```
+### 9.5 Permission classification deferred
 
-Each requested permission must already exist and be ACTIVE.
+No new permission class is introduced in Phase 1.
 
-Audit records capture before/after permission sets.
+`FUNCTIONAL` versus `ADMIN` segregation is explicitly deferred to Phase 2.
 
 ---
 
 ## 10. TestUser / TestTenant implementation
 
-Implementation sequence:
+Exact TestUser Clerk subject:
 
-1. create/select one canonical TestTenant UUID in Security;
-2. store/mark it as the configured TestTenant;
-3. seed normal Tenant PC/TL/PM/CRM/Executive defaults;
-4. bind the exact existing Clerk TestUser subject to one global Security USER if not already mapped;
-5. configure TestUser -> TestTenant test association;
-6. authorization resolver maps TestUser's TestTenant permissions to TestTenant PC bundle;
-7. deny TestUser production Tenant role/admin assignment in Phase 1;
-8. expose canonical TestTenant ID for dependent Audit Core/DI provisioning/configuration.
+```text
+user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+```
 
-Security must not create different TestTenant IDs for each module.
+Implementation:
+
+1. create TestTenant through the existing standard Tenant creation service;
+2. let the service generate the Tenant UUID using normal UUIDv4 behavior;
+3. persist that generated UUID as canonical TestTenant ID;
+4. seed normal Tenant defaults;
+5. bind the exact TestUser Clerk subject to one global Security USER if not already mapped;
+6. configure TestUser -> TestTenant;
+7. resolve TestUser permissions as TestTenant PC bundle;
+8. expose the canonical generated TestTenant ID for Audit Core and DI so all modules use the same Tenant identity.
+
+No user-supplied TestTenant UUID is required.
 
 ---
 
@@ -880,183 +881,190 @@ Security must not create different TestTenant IDs for each module.
 
 Reuse:
 
-- `security_principals.actor_type='SERVICE_INTEGRATION'`;
+- machine principal `actor_type='SERVICE_INTEGRATION'`;
 - `service_integrations`;
 - `principal_credentials`;
-- Argon2 secret hashing/verification already used by current machine access;
-- Security RSA signing key and JWKS endpoint;
-- client-credentials request handling patterns in `api/routes/access.py`;
-- existing canonical permission validation.
+- existing Argon2 secret hashing/verification;
+- Security RSA signing key;
+- Security JWKS endpoint;
+- current Basic/client-credential parsing patterns where useful;
+- existing service audit patterns.
 
-### 11.2 Remove Tenant dependency from target service token path
+### 11.2 Platform-global service identity
 
-Current machine flow requires:
+Target ServiceIntegration has no Tenant authorization dependency.
 
-```text
-tenant_id
-principal_tenant_scopes
-principal_permission_grants
-```
+Do not consult `principal_tenant_scopes` or Tenant-scoped `principal_permission_grants` in the new machine path.
 
-Target ServiceIntegration does not.
-
-New resolver uses:
+### 11.3 Canonical service-token endpoint
 
 ```text
-service principal
-  + active credential
-  + allowed audience
-  + platform-global service permission grant
+POST /security/v1/service/token
 ```
 
-### 11.3 Target machine JWT claim shape
+This is the only target Phase-1 external contract for new machine-token issuance.
 
-Required claims:
+Existing:
+
+```text
+POST /oauth/token
+```
+
+is deprecated. Its implementation may be reused internally while the route itself is removed from the active contract after clients migrate.
+
+### 11.4 Request contract
+
+Conceptually:
+
+```text
+Authorization: Basic <client_id:client_secret>
+Content-Type: application/x-www-form-urlencoded
+
+audience=<registered target module/security audience>
+```
+
+No Tenant ID is required.
+
+No per-service functional scope list is required in Phase 1.
+
+### 11.5 Token TTL
+
+```text
+4 hours
+```
+
+No refresh token is required. The service obtains a new token when needed.
+
+### 11.6 Machine JWT claim shape
+
+Required target claims:
 
 ```text
 iss
-sub = service identity
+sub = registered service identity
 actor_type = SERVICE_INTEGRATION
-aud = requested approved target
-exp
+aud = requested target module/security audience
 iat
+exp = iat + 4 hours
 jti
-permissions[]
 ```
 
-Do not require target machine tokens to carry:
+No required machine claims for:
 
 - tenant_id;
-- USER role;
+- human roles;
 - device_id;
 - location_id;
-- human authorization version.
+- human authorization version;
+- per-service functional permission list.
 
-`TokenService` should be refactored so machine-token claim validation is separate from the retired human access-token claim shape.
+### 11.7 Audience enforcement
 
-### 11.4 Audience enforcement
+Security only issues a token when the requested audience corresponds to a valid registered Verigence module/security audience.
 
-Token request includes a target audience.
+Receiving module validates exact expected audience locally.
 
-Security issues only if an ACTIVE `service_integration_audiences` grant exists for the caller and requested audience.
-
-Target module validates its expected audience locally.
-
-### 11.5 Service-specific permissions
-
-Requested scope is intersected/validated against platform-global service grants for the target module.
-
-No service gets all module permissions merely because its actor type is ServiceIntegration.
-
-### 11.6 Service token endpoint reuse recommendation
-
-Current `POST /oauth/token` with `grant_type=client_credentials` is a strong reusable base and follows an established machine-token pattern.
-
-Implementation recommendation:
-
-- retain `/oauth/token` for `client_credentials`;
-- remove `tenant_id` from target client-credentials request;
-- add/use explicit target `audience` request parameter;
-- validate service permissions globally;
-- retire the USER token-exchange grant from Phase-1 active use.
-
-The solution design also shows logical `POST /security/v1/service/token`. Before coding, choose one canonical URI. Preferred reuse choice is `/oauth/token`; if the solution-design URI must be preserved, implement it as the canonical route or a thin compatibility alias rather than duplicating token logic.
-
-This URI choice is an **implementation approval**, not an architecture change.
-
-### 11.7 Internal Security authorization caller
-
-Audit Core/DI/Web call `/authorization/check` using a ServiceIntegration JWT with:
+Example:
 
 ```text
+aud = di
+```
+
+is valid for DI and must be rejected by Security/Audit Core as the wrong target audience.
+
+### 11.8 Broad machine access rule
+
+A registered ACTIVE ServiceIntegration with a valid credential may call normal non-administrative integration/business endpoints of the target module using a correctly audience-bound machine JWT.
+
+Phase 1 does not maintain service-specific functional permission grants.
+
+### 11.9 Administrative endpoint exclusion
+
+Administrative endpoints are human-admin-only.
+
+ServiceIntegration must be rejected from operations including, but not limited to:
+
+- USER approval/rejection/suspension/reactivation/deletion administration;
+- Tenant creation/lifecycle changes;
+- role/admin assignment;
+- Tenant permission-bundle changes;
+- module/security administration;
+- service-client credential administration;
+- SuperAdmin/bootstrap administration.
+
+This is enforced through allowed actor type at the endpoint/policy layer.
+
+### 11.10 Authorization-check caller
+
+Audit Core/DI/Web may call:
+
+```text
+POST /security/v1/authorization/check
+```
+
+using a valid ServiceIntegration JWT with:
+
+```text
+actor_type = SERVICE_INTEGRATION
 aud = security
 ```
 
-and an approved Security service permission allowing that backend to invoke the authorization capability.
+No new `security.authorization.check` permission key is created in Phase 1.
 
-No canonical permission key for this new integration operation is already approved in the reviewed catalogue. Do not invent it in code. Before migration, approve either:
+The machine identity establishes that the human authorization context came from a trusted registered backend; Security then evaluates the human USER's permission.
 
-- a dedicated Security integration permission key; or
-- an explicitly approved existing Security permission whose semantics truly cover this operation.
+### 11.11 External/unregistered systems
 
-The same rule applies to any new service-client administration permission not already represented by an existing approved Security key.
+External callers cannot obtain a valid machine token unless explicitly provisioned into the Security service registry with a valid credential.
+
+DI/Audit Core/Security reject:
+
+- missing token;
+- fake/untrusted signature;
+- expired token;
+- wrong issuer;
+- wrong audience;
+- actor type other than accepted type for the endpoint;
+- unregistered/inactive service identity where live service-state validation is performed.
 
 ---
 
 ## 12. Target API/OpenAPI design
 
-Exact Pydantic/OpenAPI models are created during implementation after this blueprint approval.
+### 12.1 Human Security API authentication
 
-### 12.1 Human authentication rule for Security APIs
-
-All protected human Security APIs:
+Protected human Security APIs:
 
 ```text
 Authorization: Bearer <Clerk session JWT>
 ```
 
-Dependency chain:
+Dependency:
 
 ```text
-verify Clerk JWT -> resolve USER -> validate USER status -> in-process permission/scope policy
+validate Clerk JWT
+ -> resolve global USER
+ -> validate USER status
+ -> require human actor
+ -> evaluate admin/operating/test permission and scope
 ```
-
-No PlatformAdmin Security JWT is required.
 
 ### 12.2 USER APIs
 
-#### List/search
-
 ```text
 GET /security/v1/platform/users
-```
-
-Inputs:
-
-- `status` optional: PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED;
-- search text optional;
-- pagination;
-- deterministic sort.
-
-Caller: human admin.
-
-Base read permission: reuse existing `security.user.read` where applicable.
-
-#### Detail
-
-```text
 GET /security/v1/platform/users/{userId}
-```
-
-Returns only Security-owned USER/identity/lifecycle data.
-
-#### Status
-
-Canonical target:
-
-```text
 PATCH /security/v1/users/{userId}/status
-```
-
-Request contains target status and optional reason/reason code.
-
-Authorization is transition-policy based, not merely one broad permission check.
-
-Important transition rules are listed in Section 6.2.
-
-#### Hard delete
-
-```text
 DELETE /security/v1/platform/users/{userId}
 ```
 
-SuperAdmin only.
+Status API enforces transition-specific authority, not only a generic permission.
 
-Returns success only after hard-delete coordinator completes required steps.
+Hard DELETE is SuperAdmin-only.
 
 ### 12.3 Tenant APIs
 
-Reuse existing logical APIs:
+Reuse logical surface:
 
 ```text
 POST  /security/v1/platform/tenants
@@ -1066,28 +1074,17 @@ PATCH /security/v1/platform/tenants/{tenantId}
 POST  /security/v1/platform/tenants/{tenantId}/activate
 ```
 
-Use current `security.tenant.*` canonical permissions where semantics match.
-
 ### 12.4 Role APIs
 
 ```text
 GET /security/v1/roles
-```
-
-Read fixed global human role catalogue.
-
-```text
 PUT /security/v1/tenants/{tenantId}/users/{userId}/operating-role
 DELETE /security/v1/tenants/{tenantId}/users/{userId}/operating-role
 ```
 
-Set/replace and remove only.
-
-Use existing `security.role.read` / `security.role.assign` permissions where their semantics match. Tenant role creation permissions are not used for the target operating-role catalogue.
+Set/replace semantics only.
 
 ### 12.5 Group APIs
-
-Read-only Phase-1 surface:
 
 ```text
 GET /security/v1/tenants/{tenantId}/groups
@@ -1095,11 +1092,9 @@ GET /security/v1/tenants/{tenantId}/groups/{roleKey}
 GET /security/v1/tenants/{tenantId}/groups/{roleKey}/users
 ```
 
-Reuse `security.group.read` for read authorization where applicable.
+No independent Group permission or Group role mutation API in the target model.
 
-No Group create/update/member/role grant API is part of the target Phase-1 authorization model.
-
-### 12.6 Admin assignment APIs
+### 12.6 Admin-role APIs
 
 TenantAdmin:
 
@@ -1117,9 +1112,7 @@ DELETE /security/v1/modules/{moduleKey}/users/{userId}/admin-role/ModuleAdmin
 
 No second-SuperAdmin assignment API in Phase 1.
 
-Use existing approved Security admin-management permission where semantically valid; if a dedicated admin-assignment permission is required, approve it before coding rather than inventing it.
-
-### 12.7 Permission discovery/default APIs
+### 12.7 Permission/default APIs
 
 ```text
 GET /security/v1/platform/modules
@@ -1132,268 +1125,233 @@ GET /security/v1/tenants/{tenantId}/role-bundles/{roleKey}
 PUT /security/v1/tenants/{tenantId}/role-bundles/{roleKey}
 ```
 
-Module read/manage and permission read should reuse existing canonical permissions where applicable.
-
-Tenant role-bundle PUT is SuperAdmin-only regardless of a lower-scope admin possessing a generic role-read/assign capability.
+Tenant bundle PUT is SuperAdmin-only.
 
 ### 12.8 Runtime human authorization API
 
 ```text
 POST /security/v1/authorization/check
-Authorization: Bearer <ServiceIntegration JWT aud=security>
+Authorization: Bearer <ServiceIntegration JWT, aud=security>
 ```
 
 Request:
 
 ```json
 {
-  "clerkSubject": "<validated Clerk subject>",
-  "tenantId": "<tenant UUID or null for platform-scope operation>",
-  "permissionKey": "<registered canonical permission>"
+  "clerkSubject": "<subject extracted from a Clerk JWT already validated by caller>",
+  "tenantId": "<tenant UUID or null for supported platform context>",
+  "permissionKey": "<registered human permission>"
 }
 ```
 
-Response:
+Security:
 
-```json
-{
-  "allowed": true,
-  "userId": "<global USER UUID>",
-  "decisionId": "<correlation/decision id>",
-  "classification": "PC"
-}
-```
+1. authenticates ServiceIntegration caller;
+2. validates audience `security`;
+3. resolves Clerk subject to global USER;
+4. requires ACTIVE human USER;
+5. evaluates current human classification/scope/Tenant bundle;
+6. returns allow/deny.
 
-Deny response should not expose sensitive authorization internals to untrusted callers; internal registered services may receive stable reason codes as needed for diagnostics.
-
-Behavior:
-
-- authenticate ServiceIntegration caller;
-- ensure service is authorized to call Security AuthZ;
-- reject unregistered permission key;
-- resolve human USER;
-- require ACTIVE status;
-- evaluate scope/classification/current bundle;
-- return allow/deny;
-- no Dealer/Outlet evaluation in Security.
+No separate machine permission key is required to invoke this endpoint in Phase 1.
 
 ### 12.9 Service token API
 
-Reuse-oriented target request based on current OAuth route:
-
 ```text
-POST /oauth/token
+POST /security/v1/service/token
 Authorization: Basic <client_id:client_secret>
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=client_credentials
-audience=di
-scope=...
+audience=<target>
 ```
 
-No Tenant ID in target service client-credentials request.
+Response includes the signed bearer token and 4-hour expiry metadata.
 
-Alternative canonical URI from solution design remains an implementation naming approval as noted in Section 11.6.
+`/oauth/token` is deprecated from the target contract.
 
 ---
 
-## 13. Endpoint-to-permission / caller matrix
+## 13. Endpoint caller policy matrix
 
-This matrix uses existing canonical permissions where confirmed. Rows that require a new service-administration/integration permission are deliberately marked `APPROVAL REQUIRED` rather than inventing a key.
+| Capability | Human USER | ServiceIntegration | Main Phase-1 rule |
+|---|---:|---:|---|
+| Human onboarding/bind | Yes | No | Clerk-authenticated human flow |
+| Approve/reject PENDING USER | SuperAdmin | No | human admin only |
+| Suspend USER | Executive/TenantAdmin/SuperAdmin | No | human admin/Executive rule |
+| Reactivate USER | SuperAdmin | No | human admin only |
+| Request USER deletion | approved human makers | No | global USER operation |
+| Final hard delete | SuperAdmin | No | human admin only |
+| Create/update Tenant | approved human admin | No | administrative |
+| Assign operating/admin role | approved human admin | No | administrative |
+| Change Tenant role bundle | SuperAdmin | No | administrative |
+| Module permission catalogue administration | approved human admin | No | administrative |
+| Service registry/credential administration | human admin; SuperAdmin necessarily authorized | No | administrative |
+| `/authorization/check` | Security uses resolver in-process | Yes, aud=security | trusted backend path |
+| Normal Audit Core business integration API | as human permission allows | Yes, aud=audit-core | non-admin endpoint |
+| Normal DI integration API | as human permission allows | Yes, aud=di | non-admin endpoint |
 
-| API/capability | Caller type | Authentication | Permission / policy | Scope |
-|---|---|---|---|---|
-| List global USERs | Human admin | Clerk JWT | `security.user.read` | platform/read filtering |
-| PENDING -> ACTIVE | SuperAdmin | Clerk JWT | SuperAdmin classification + all-permission invariant | global |
-| PENDING -> REJECTED | SuperAdmin | Clerk JWT | SuperAdmin classification | global |
-| ACTIVE -> SUSPENDED | Executive | Clerk JWT | transition policy + applicable Tenant context | global USER effect |
-| ACTIVE -> SUSPENDED | TenantAdmin | Clerk JWT | TenantAdmin assignment in applicable Tenant | global USER effect |
-| Reactivate USER | SuperAdmin | Clerk JWT | SuperAdmin classification | global |
-| Request self delete | Human self | Clerk JWT | target user == caller | global |
-| Request delete | Executive/TenantAdmin/ModuleAdmin/SuperAdmin | Clerk JWT | confirmed maker classification/scope policy | global |
-| Hard DELETE USER | SuperAdmin | Clerk JWT | SuperAdmin classification | global |
-| Create Tenant | SuperAdmin | Clerk JWT | `security.tenant.create` | platform |
-| Read Tenant | approved admin | Clerk JWT | `security.tenant.read` | according to admin scope |
-| Set operating role | SuperAdmin/TenantAdmin where approved | Clerk JWT | `security.role.assign` + scope/invariant policy | Tenant |
-| Read Groups | approved admin | Clerk JWT | `security.group.read` | Tenant |
-| Read module catalogue | approved admin | Clerk JWT | `security.module.read` | platform/scope policy |
-| Read permissions | approved admin | Clerk JWT | `security.permission.read` | catalogue |
-| Update module catalogue | SuperAdmin / approved Module catalogue admin if retained | Clerk JWT | `security.module.manage` | platform |
-| Read Tenant role bundle | approved admin | Clerk JWT | existing read permissions + scope policy | Tenant |
-| Update Tenant role bundle | SuperAdmin only | Clerk JWT | SuperAdmin classification | Tenant |
-| Authorization check | Registered backend service | ServiceIntegration JWT | **APPROVAL REQUIRED for exact canonical service permission** | platform service -> human Tenant context in payload |
-| Service token issuance | Registered service | client ID/secret | credential + audience + granted scopes | platform-global |
-| Service registry admin | SuperAdmin | Clerk JWT | **APPROVAL REQUIRED if no existing permission is adopted** | platform |
+Phase 1 does not require a separate machine permission key for `/authorization/check` and does not maintain per-service functional permission matrices.
 
 ---
 
 ## 14. Migration and reconciliation plan
 
-No historical migration is edited.
+Historical migrations remain unchanged.
 
-### 14.1 Additive migration sequence
+### 14.1 Additive sequence
 
-Recommended sequence:
-
-1. add new role definition/default/Tenant bundle tables;
-2. add new operating-role assignment table and indexes;
-3. add scoped admin assignment table/invariants;
-4. add TestUser/TestTenant configuration table if approved;
-5. add deletion request + tombstone tables;
-6. add platform-global ServiceIntegration audience/permission tables;
-7. adjust USER status constraints only after data reconciliation;
-8. seed fixed global role definitions;
-9. seed approved default bundles;
-10. migrate/reconcile active legacy role data;
-11. migrate the one SuperAdmin assignment to canonical admin assignment representation while preserving the existing all-ACTIVE permission invariant;
-12. provision/configure TestTenant and TestUser with exact implementation inputs;
-13. register/reconcile platform-global service clients from existing machine principals;
-14. deploy new authorization resolver/APIs;
+1. add target role-definition/default/Tenant-bundle tables;
+2. add operating-role assignment table and indexes;
+3. add scoped admin-role assignment structures;
+4. add TestUser/TestTenant configuration relation;
+5. add deletion request and tombstone structures;
+6. adjust USER status constraint after reconciliation;
+7. seed fixed global role definitions;
+8. seed approved default role bundles;
+9. migrate/reconcile active legacy role data;
+10. migrate the confirmed SuperAdmin identity to canonical target admin assignment;
+11. create TestTenant through standard Tenant service and bind confirmed TestUser;
+12. reconcile existing machine principals/credentials as platform-global ServiceIntegration identities;
+13. implement new `/security/v1/service/token` using reused credential/signing internals;
+14. implement synchronous `/authorization/check`;
 15. migrate human Security routes to Clerk JWT dependencies;
-16. switch machine client-credentials issuance to platform-global audience model;
-17. retire old human Security token routes from active routing after dependent clients are migrated;
+16. cut target RBAC reads to the new role model;
+17. deprecate `/oauth/token` and retire old human Security token routes after dependent callers migrate;
 18. leave historical/deferred tables intact.
 
-### 14.2 Mandatory data reconciliation before role cutover
+### 14.2 Mandatory reconciliation report
 
-Produce a report for:
+Before role cutover identify:
 
-- users with >1 active direct role in same Tenant;
-- users with effective roles added through Groups;
-- users with both legacy platform/admin and operating roles;
-- Tenants with >1 user that would become PM;
-- custom Tenant roles with no mapping to PC/TL/PM/CRM/Executive;
-- permissions granted only through custom Group-role chains;
+- users with multiple direct roles in a Tenant;
+- Group-derived extra roles;
+- admin + operating mixtures;
+- Tenants with more than one candidate PM;
+- custom Tenant roles with no approved target-role mapping;
+- permissions available only via arbitrary Group-role chains;
 - arbitrary Groups not equivalent to role-aligned Group;
-- users in legacy INVITED/EXITED states;
-- multiple/incorrect SuperAdmin assignments;
-- machine principals with Tenant-only scopes/grants that need platform-global audience mapping.
+- legacy USER states requiring explicit mapping;
+- conflicting SuperAdmin assignments;
+- machine principals/credentials that need conversion from Tenant-scoped behavior to platform-global ServiceIntegration.
 
-Do not auto-pick winners for conflicts. Produce the report and require explicit remediation/mapping.
-
-### 14.3 Existing Tenant role objects
-
-Do not delete them during first migration.
-
-After target tables are populated and verified:
-
-- stop writes to legacy Tenant role creation/assignment APIs;
-- target runtime reads only new role tables;
-- legacy rows remain historical/compatibility data until separate cleanup approval.
-
-### 14.4 Existing arbitrary Groups
-
-Do not delete rows initially.
-
-Target authorization stops using `group_role_assignments` and Group-derived union.
-
-Target Group APIs return only role-aligned operating collections.
+Do not auto-pick winners for ambiguous data.
 
 ---
 
-## 15. Device/Geo/Schedule/VPN deferral plan
+## 15. Device/Geo/Schedule/VPN deferral
 
-Keep current:
+Keep:
 
 - schema;
 - migrations;
+- feature code;
 - administration code;
-- tests where they validate the legacy/deferred feature independently.
+- independent feature tests.
 
 Do not require these controls in:
 
-- Clerk-JWT identity validation;
+- Clerk JWT authentication;
+- Security in-process human authorization;
 - `/authorization/check`;
-- Security's in-process v2 permission authorization;
-- SuperAdmin/TenantAdmin/ModuleAdmin/operating role authorization.
+- operating/admin/test permission resolution.
 
-Mark corresponding runtime access-session issuance route as legacy/deferred once human Security token issuance is retired.
-
-Do not remove the feature; future Phase 2 can reintroduce selected controls as separate conditional policy checks without changing the global USER/RBAC architecture.
+Future Phase 2 can reintroduce selected controls without redesigning global identity/RBAC.
 
 ---
 
 ## 16. Code-level implementation work breakdown
 
-No file is changed by this blueprint. The following is the expected code work after approval.
+No code is authorized by this blueprint yet.
 
-### Step 1 — Target schema migration
+### Step 1 — Additive target schema
 
-**Reuse:** existing migration framework/schema.  
-**New:** one or more additive v2 migrations.  
-**Affects:** role definitions, bundles, admin assignments, deletion, service grants, statuses.  
-**Tests:** migration up test, constraints, conflict fixtures.
+**Reuse:** migration framework/current schema.  
+**Add:** role definitions, bundles, scoped admin roles, deletion/tombstone, test identity relation.  
+**Do not add:** service permission/audience grant tables for Phase 1.  
+**Tests:** constraints, indexes, migration-up fixtures.
 
-### Step 2 — Clerk human authentication dependency
+### Step 2 — Clerk human dependency
 
 **Reuse:** `api/dependencies.py`, `adapters/identity.py`.  
-**Modify:** Clerk verifier configuration/JWKS handling as required; human route dependencies.  
-**Retire active use:** `ClerkCredentialService` for human route login.  
-**Tests:** valid/expired/invalid issuer/invalid azp/unmapped Clerk subject.
+**Modify:** protected human routes to use Clerk JWT directly.  
+**Retire active use:** Security human credential facade.  
+**Tests:** signature, issuer, expiry, azp, unmapped subject.
 
-### Step 3 — Global USER lifecycle service
+### Step 3 — USER lifecycle
 
-**Reuse:** `GlobalUserOnboardingService`, global USER tables.  
-**Modify:** first-party bind flow, REJECTED, transition policy, SuperAdmin-only approval/reactivation, Executive/TenantAdmin suspension.  
-**New:** transition policy/coordinator abstraction if useful to prevent route-level duplication.  
-**Tests:** every allowed/denied transition.
+**Reuse:** global onboarding/user service.  
+**Modify:** first-party bind, PENDING/REJECTED, transition authority.  
+**Tests:** all allowed/denied transitions.
 
 ### Step 4 — Deletion coordinator
 
-**New:** deletion request/tombstone repository/service and hard-delete coordinator.  
-**Reuse:** Clerk backend lifecycle adapter, audit mechanisms.  
-**Tests:** maker rules, DISABLED, hard-delete SuperAdmin-only, failure rollback/partial dependency behavior, 21-day retention metadata.
+**New:** deletion request/tombstone/coordinator.  
+**Reuse:** Clerk lifecycle adapter and Security audit patterns.  
+**Tests:** makers, global DISABLED, hard-delete SuperAdmin-only, 21-day retention.
 
-### Step 5 — Role resolver and assignment
+### Step 5 — Operating roles
 
-**Reuse:** canonical permission validation and audit patterns.  
-**Replace:** `TenantRbacGateService` additive operating-role semantics.  
-**New:** operating-role repository/service using role_key.  
-**Tests:** one role/Tenant, different roles across Tenants, PM uniqueness, idempotent replace.
+**Replace:** additive Tenant-role assignment runtime.  
+**Add:** role-key assignment service.  
+**Tests:** one role/Tenant, cross-Tenant variation, one PM/Tenant, idempotent replace.
 
 ### Step 6 — Role-aligned Groups
 
-**Reuse:** only read presentation concepts where useful.  
-**Retire active:** Group create/member/role mutation for authorization.  
-**New/modify:** read-only Group queries from operating-role assignment.  
-**Tests:** PC->TL moves Group view; PM Group max one; no Group-derived extra permission.
+**Modify:** Group reads to project operating assignments.  
+**Retire active:** arbitrary Group role grants.  
+**Tests:** role change changes Group membership; Group cannot add authorization.
 
 ### Step 7 — Admin assignments
 
-**Reuse:** initial SuperAdmin provisioning logic and audit patterns.  
-**New:** scoped admin assignment persistence/resolver.  
-**Tests:** TenantAdmin scope, ModuleAdmin scope, admin stacking, global operating/admin exclusivity, exactly one SuperAdmin.
+**Reuse:** initial SuperAdmin provisioning concepts.  
+**Add:** scoped TenantAdmin/ModuleAdmin persistence/resolver.  
+**Tests:** scope, stacking, admin/operating exclusivity, exactly one SuperAdmin.
 
-### Step 8 — Default/Tenant role bundles
+### Step 8 — Defaults and Tenant bundles
 
-**Reuse:** module catalogue, permission registry, template source data.  
-**New:** platform defaults + Tenant bundles.  
-**Tests:** exact PC/TL/PM/CRM seed, generated Executive review list, TestUser PC inheritance, SuperAdmin all-ACTIVE.
+**Reuse:** permission/module catalogue.  
+**Add:** platform defaults and Tenant copies.  
+**Tests:** approved PC/TL/PM/CRM defaults, Executive generated list, TestUser PC inheritance, SuperAdmin all ACTIVE permissions.
 
-### Step 9 — Authorization check API
+### Step 9 — TestTenant/TestUser bootstrap
 
-**New:** `/authorization/check` route, request/response schema, ServiceIntegration caller dependency.  
-**Reuse:** identity mapping, permission validator, new resolver.  
-**Tests:** allowed, denied, non-ACTIVE USER, no role, wrong Tenant, invalid permission, backend caller not authorized, Security fail closed at clients.
+**Use exact TestUser:** `user_3I7FdD5Pkmydsp23OfjH9hBMxpN`.  
+**Create TestTenant:** standard `PlatformTenantService`, generated UUIDv4.  
+**Tests:** canonical ID, TestUser only in TestTenant, PC-equivalent permissions.
 
-### Step 10 — ServiceIntegration platform-global token flow
+### Step 10 — ServiceIntegration token flow
 
-**Reuse:** `/oauth/token` parsing/Basic client auth, machine secret verification, RSA signing/JWKS.  
-**Modify:** remove tenant grant dependency, add audience, new machine claim shape, global scopes.  
-**Retire:** USER token-exchange grant from active Phase 1.  
-**Tests:** invalid client, expired/revoked credential, invalid audience, excessive scope, correct aud token, wrong aud rejection, external unknown client.
+**Reuse:** client credential verification, Argon2 hashing, RSA signing/JWKS.  
+**New canonical route:** `/security/v1/service/token`.  
+**Modify:** machine claim shape becomes platform-global/audience-bound; no Tenant or per-service functional grant.  
+**TTL:** 4 hours.  
+**Deprecate:** `/oauth/token`.  
+**Tests:** valid/invalid credential, expiry, wrong audience, fake token, external unregistered client.
 
-### Step 11 — Platform/Tenant/module admin routes
+### Step 11 — Authorization check
 
-**Reuse:** Tenant CRUD, module catalogue routes.  
-**Modify:** human authentication from PlatformAdmin JWT to Clerk JWT + in-process AuthZ.  
-**Tests:** SuperAdmin global, TenantAdmin limited Tenant, ModuleAdmin limited module.
+**Add:** `/security/v1/authorization/check`.  
+**Caller:** ServiceIntegration with `aud=security`.  
+**No new machine permission key.**  
+**Tests:** valid backend/human allow, inactive USER deny, arbitrary browser deny, wrong audience deny.
 
-### Step 12 — Retire old human token flow
+### Step 12 — Human-admin endpoint gating
 
-**Retire active routes/services:** human `/auth/login`, human access-session token issuance, PlatformAdmin Security JWT login, USER token exchange.  
-**Keep:** code/history until dependent tests/clients are migrated and explicit cleanup approved.  
-**Tests:** target human APIs reject Security human legacy JWT where Clerk JWT is required.
+**Modify:** all administrative Security routes to require human Clerk actor and appropriate admin scope.  
+**Explicitly reject:** ServiceIntegration.  
+**Tests:** machine token cannot create Tenant, approve USER, assign role, change role bundle or manage service credentials.
+
+### Step 13 — Retire old human and OAuth contracts
+
+Retire active use of:
+
+- Security-issued human access JWT;
+- PlatformAdmin Security JWT;
+- human `/auth/login` Security token path;
+- USER token exchange;
+- old `/oauth/token` machine endpoint after migration.
+
+Keep historical code/migrations until cleanup is separately approved.
 
 ---
 
@@ -1402,168 +1360,191 @@ No file is changed by this blueprint. The following is the expected code work af
 ### 17.1 Human authentication
 
 - valid Clerk JWT accepted;
-- expired Clerk JWT denied;
+- expired/invalid Clerk JWT denied;
 - invalid issuer/signature denied;
 - unauthorized party denied;
-- unmapped Clerk subject denied for protected app operations;
-- DEV mock accepted only in permitted environments.
+- unmapped subject denied for protected operations;
+- DEV mock only in permitted environments.
 
-### 17.2 USER status
+### 17.2 USER lifecycle
 
-- PENDING denied protected access;
-- REJECTED denied;
-- SUSPENDED denied;
-- DISABLED denied;
-- only SuperAdmin approves PENDING;
-- only SuperAdmin rejects PENDING;
-- Executive can suspend only under applicable Tenant scope policy;
-- TenantAdmin can suspend only under applicable Tenant scope policy;
-- SuperAdmin reactivation works;
-- non-SuperAdmin reactivation denied.
+- PENDING/REJECTED/SUSPENDED/DISABLED denied protected access;
+- only SuperAdmin approves/rejects PENDING;
+- Executive suspension scope enforced;
+- TenantAdmin suspension scope enforced;
+- suspension effect global;
+- only SuperAdmin reactivates.
 
-### 17.3 Role invariants
+### 17.3 Role/admin invariants
 
-- one operating role per USER/Tenant;
-- same USER can hold different roles in different Tenants;
-- second PM rejected transactionally;
-- admin USER cannot receive operating role;
-- operating USER cannot receive admin role;
-- admin roles stack legally.
+- one operating role/User/Tenant;
+- different operating roles across Tenants;
+- one PM/Tenant;
+- admin and operating mutually exclusive globally;
+- admin roles may stack;
+- one active SuperAdmin.
 
 ### 17.4 Groups
 
-- five role-aligned groups shown per Tenant as applicable;
-- group members equal operating assignment query;
-- role replace changes group view;
-- no independent Group write grants authorization;
-- legacy Group-role grants ignored by target authorization.
+- logical Group members match active operating assignments;
+- role replace changes Group membership;
+- no arbitrary Group permission inheritance.
 
 ### 17.5 Permission bundles
 
-- exact approved PC default;
-- exact approved TL default;
-- exact approved PM default;
-- exact approved CRM default;
-- Executive generated list reviewed against registered catalogues;
-- Tenant copy created on initialization;
-- Tenant override affects only target Tenant;
-- retired/nonexistent permission cannot be written;
-- SuperAdmin obtains every ACTIVE permission including newly registered module permission.
+- exact approved PC/TL/PM/CRM defaults;
+- Executive generated list reviewed against registered keys;
+- Tenant copy created;
+- SuperAdmin override affects only intended Tenant;
+- invalid/retired permission cannot be added;
+- SuperAdmin gets newly registered ACTIVE permissions.
 
 ### 17.6 TestUser/TestTenant
 
-- exact Clerk TestUser maps to configured TestUser;
-- TestUser authorized only in TestTenant;
+- exact Clerk TestUser subject maps correctly;
+- TestTenant uses normal UUIDv4 Tenant ID generation;
+- same canonical TestTenant ID is exposed to dependent modules;
 - TestUser effective permissions equal TestTenant PC bundle;
-- TestUser cannot receive production operating/admin assignment.
+- TestUser denied in production Tenant context.
 
 ### 17.7 Deletion
 
-- self delete request -> DISABLED;
-- Executive/TenantAdmin/ModuleAdmin/SuperAdmin maker cases;
-- final delete non-SuperAdmin denied;
-- hard delete requires recorded request + DISABLED;
+- approved makers -> DISABLED;
+- final hard delete non-SuperAdmin denied;
 - same SuperAdmin maker/checker allowed;
 - Clerk dependency failure does not report false success;
-- live USER removed on successful hard delete;
-- email becomes reusable;
+- live USER removed on successful delete;
+- email reusable;
 - tombstone independent of USER FK;
-- retention deadline = +21 days;
-- no secrets in tombstone/audit.
+- retention deadline +21 days;
+- no secrets retained.
 
 ### 17.8 ServiceIntegration
 
-- valid registered service credential;
+- exact 4-hour token lifetime;
+- valid registered credential obtains token;
 - unknown client denied;
 - wrong secret denied;
-- revoked/expired credential denied;
-- wrong target audience denied;
-- excessive scope denied;
-- service JWT has expected actor type and audience;
-- expired machine JWT denied;
-- fake/untrusted JWT denied;
-- Security JWT for `aud=security` rejected by DI;
-- one service's grants do not confer another service's access;
-- no Tenant scope required for platform-global service principal.
+- inactive/revoked credential denied;
+- token has `actor_type=SERVICE_INTEGRATION`;
+- target audience required;
+- wrong audience rejected by target;
+- fake/untrusted signature denied;
+- external unregistered caller cannot get token;
+- no Tenant ID required;
+- no per-service functional permission grant required;
+- normal non-admin machine endpoint allowed when audience is correct;
+- administrative endpoint rejects valid ServiceIntegration token.
 
 ### 17.9 Authorization check
 
-- valid backend + active human + permission -> allow;
-- valid backend + inactive human -> deny;
-- backend without Security AuthZ service privilege -> deny;
-- arbitrary browser call without machine identity -> deny;
-- unregistered permission key -> deny/error;
+- valid backend `aud=security` + active human + permission -> allow;
+- inactive human -> deny;
+- arbitrary browser without machine identity -> deny;
+- wrong audience -> deny;
+- invalid human permission -> deny/error;
 - role permission absent -> deny;
-- SuperAdmin -> allow for any ACTIVE permission;
-- TenantAdmin/module scope boundaries enforced;
-- Security internal routes use same resolver in-process.
+- SuperAdmin human -> allow for any ACTIVE registered permission;
+- TenantAdmin/ModuleAdmin scope enforced;
+- Security itself uses resolver in-process.
 
 ### 17.10 Deferred controls
 
-Regression tests should prove Device/Geo/Schedule/VPN code remains intact where directly exercised, while v2 authorization tests prove those inputs are not required by `/authorization/check` or Clerk-JWT Security API authorization.
+Regression tests prove Device/Geo/Schedule/VPN code remains available while target authorization does not require those inputs.
 
 ---
 
-## 18. Operational and failure rules
+## 18. Operational/failure rules
 
-1. Security authorization unavailable -> protected backend operation fails closed.
-2. Clerk JWT invalid -> deny before authorization.
+1. Security authorization unavailable -> protected backend human operation fails closed.
+2. Clerk JWT invalid -> deny before human authorization.
 3. Machine token invalid/wrong audience -> deny before target operation.
-4. USER status change to non-ACTIVE affects the next synchronous authorization decision immediately.
-5. Tenant role-bundle update affects subsequent decisions without human token reissue.
-6. Audit Core remains responsible for Dealer/Outlet business-scope checks.
-7. DI remains outside onboarding.
-8. Partial Web BFF orchestration success must be reported accurately; Security role success does not imply Audit Core Dealer/Outlet assignment success.
-9. No service credential/plaintext secret is logged.
-10. No human JWT or machine JWT is stored in audit records.
+4. ServiceIntegration never bypasses human-admin-only endpoint actor-type checks.
+5. USER non-ACTIVE status affects the next synchronous authorization decision immediately.
+6. Tenant role-bundle update affects subsequent decisions without human token reissue.
+7. Audit Core remains responsible for Dealer/Outlet business scope.
+8. DI remains outside onboarding.
+9. No plaintext service credential or JWT is logged.
+10. TestTenant uses one canonical generated Security Tenant ID across modules.
 
 ---
 
-## 19. Explicitly retired/deferred active behavior
+## 19. Explicitly retired/deferred behavior
 
-### Retire from Phase-1 active human flow
+### Retire from active Phase 1
 
 - Security-issued human access JWT;
 - PlatformAdmin Security JWT;
 - Security-owned human credential login facade;
-- user token exchange/delegated token grant;
-- Tenant-owned arbitrary operating role creation;
-- multiple/additive operating roles;
-- arbitrary Group->Role permission inheritance;
-- Group-derived effective permission union;
-- Tenant membership as human authorization prerequisite.
+- USER token exchange;
+- arbitrary Tenant operating-role creation;
+- additive/multiple operating roles;
+- arbitrary Group->Role permission union;
+- Tenant membership as a human authorization prerequisite;
+- Tenant-scoped ServiceIntegration authorization grants;
+- per-service functional permission matrices;
+- `/oauth/token` as target machine-token contract.
 
 ### Keep but defer
 
-- Device registration as a mandatory access gate;
-- geofence/location as a mandatory access gate;
-- schedules as a mandatory access gate;
-- VPN/network-risk as a mandatory access gate;
-- human authorization-version/token invalidation mechanism;
+- Device mandatory gate;
+- Geo/geofence mandatory gate;
+- Schedule mandatory gate;
+- VPN/network-risk mandatory gate;
+- human authorization-version/token invalidation design;
 - mTLS;
 - distributed authorization projection/cache;
 - additional SuperAdmins;
-- Dealer/Outlet staffing ratios;
-- arbitrary custom Groups.
+- Dealer/Outlet staffing/cardinality rules;
+- arbitrary custom Groups;
+- permission `FUNCTIONAL`/`ADMIN` classification.
 
 ---
 
-## 20. Implementation inputs / approvals required before coding specific items
+## 20. Remaining implementation inputs
 
-These are not architecture questions and must not be guessed:
+The following are now **resolved**:
 
-1. Full exact unredacted Clerk subject for the one SuperAdmin.
-2. Full exact unredacted Clerk subject for TestUser.
-3. Canonical TestTenant UUID/code/name.
-4. Exact short-lived ServiceIntegration token TTL.
-5. Service credential validity/rotation interval.
-6. Canonical token endpoint URI choice: reuse `/oauth/token` client_credentials (recommended) versus canonical `/security/v1/service/token`/alias.
-7. Exact canonical Security permission key for a ServiceIntegration principal to invoke `/authorization/check`, unless an existing approved key is explicitly selected.
-8. Exact permission key(s) for ServiceIntegration registry administration if existing Security admin permissions are not intentionally reused.
-9. Concrete initial ServiceIntegration registrations and their approved audience/permission matrices (for example Audit Core, DI, Web), derived from actual module integration needs rather than broad grants.
-10. Concrete generated Executive default permission list must be reviewed against the registered Audit Core/DI catalogues before seed migration is finalized.
+```text
+SuperAdmin Clerk subject
+= user_3I7HFuZZiFC9K2muiweXFRoeoud
 
-No code should invent values for items 1-9.
+TestUser Clerk subject
+= user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+
+TestTenant tenant_id
+= generated by standard Security Tenant creation using UUIDv4
+
+ServiceIntegration token TTL
+= 4 hours
+
+Machine token endpoint
+= POST /security/v1/service/token
+
+Legacy machine endpoint
+= /oauth/token deprecated
+
+ServiceIntegration functional grants
+= no per-service functional permission matrix in Phase 1
+
+Authorization-check machine permission key
+= no new permission key; valid ServiceIntegration + aud=security is sufficient
+
+Administrative endpoint rule
+= human-admin-only; SERVICE_INTEGRATION rejected
+
+Permission classification
+= unchanged in Phase 1; formal segregation deferred to Phase 2
+```
+
+Still implementation-level but not a business/design input from the user:
+
+1. system-seeded TestTenant `tenantCode` and `tenantName` values must use the existing Tenant validation/convention; no user-supplied UUID is required;
+2. service credential rotation/expiry operations should reuse existing credential lifecycle capability and can be finalized as an operational setting without altering the architecture;
+3. concrete Executive default permission list must be generated from the already registered Audit Core/DI keys and reviewed before the seed migration is committed;
+4. current `dev` data must be reconciled before deterministic role migration.
+
+No implementation should invent new business permissions to resolve these items.
 
 ---
 
@@ -1571,55 +1552,69 @@ No code should invent values for items 1-9.
 
 ```text
 1. Approve this implementation blueprint
-2. Resolve implementation inputs in Section 20 that block first migration/API code
+2. Run current dev reconciliation report
 3. Add additive target schema
-4. Add Clerk-JWT human dependency + common authorization resolver
-5. Implement USER lifecycle/transition policy
+4. Add Clerk-JWT human dependency + common human authorization resolver
+5. Implement global USER lifecycle and transition policy
 6. Implement deletion request/hard-delete/tombstone
-7. Implement global role definitions + operating assignments
+7. Implement global role definitions + one operating role/User/Tenant
 8. Implement role-aligned Group reads
-9. Implement scoped admin assignments + SuperAdmin migration
-10. Implement platform defaults + Tenant role bundles
-11. Configure TestTenant/TestUser
-12. Implement platform-global ServiceIntegration grants
-13. Refactor machine token issuance/JWT audience model
-14. Implement /authorization/check
-15. Rewire Security human admin/Tenant/module routes to Clerk JWT + in-process AuthZ
-16. Run data reconciliation report
-17. Migrate clean legacy assignments into target tables
-18. Cut target runtime reads to new RBAC model
-19. Retire old human Security token/login/token-exchange active routes
-20. End-to-end Security tests
-21. Only after Security is proven, align dependent Audit Core/DI contracts in their own approved changes
+9. Implement scoped admin assignments
+10. Bind confirmed single SuperAdmin identity and all-ACTIVE invariant
+11. Implement platform defaults + Tenant role bundles
+12. Create canonical TestTenant through standard Tenant service
+13. Bind confirmed TestUser and PC-equivalent TestTenant behavior
+14. Refactor machine JWT claim/signing model for platform-global ServiceIntegration
+15. Implement POST /security/v1/service/token with 4-hour TTL
+16. Implement POST /security/v1/authorization/check
+17. Add human-admin-only actor gate to administrative endpoints
+18. Rewire human Security admin/Tenant/module APIs to Clerk JWT + in-process AuthZ
+19. Migrate clean legacy role/admin records into target structures
+20. Cut target runtime authorization to new model
+21. Deprecate /oauth/token and retire old Security human token/login/token-exchange active paths
+22. Run Security end-to-end tests
+23. Only after Security is proven, align Audit Core/DI contracts in their own separately approved changes
 ```
 
 ---
 
 ## 22. Definition of implementation-ready
 
-Security v2 Phase-1 is ready for code implementation only when:
+Security v2 Phase-1 is ready for coding when:
 
-- this blueprint is reviewed/approved;
-- required exact Clerk/TestTenant inputs are supplied;
-- any new canonical Security integration permission names are approved;
-- the ServiceIntegration endpoint URI and token TTL are selected;
-- the initial service audience/permission matrix is approved;
-- existing `dev` data reconciliation is understood sufficiently to write deterministic migrations.
+- this implementation blueprint is approved;
+- current `dev` data reconciliation is understood sufficiently for deterministic migrations;
+- concrete Executive default key list is reviewed from existing registered permissions;
+- system TestTenant seed values are selected using the existing Tenant format during implementation preparation.
+
+The following no longer block implementation planning:
+
+- SuperAdmin identity;
+- TestUser identity;
+- TestTenant UUID selection;
+- ServiceIntegration TTL;
+- service-token endpoint naming;
+- authorization-check machine permission naming;
+- service-specific functional grant matrix;
+- Phase-1 permission classification.
 
 Security v2 Phase-1 is implementation-complete only when:
 
 - Clerk session JWT is the active human authentication token;
 - Security no longer issues active human access JWTs;
-- live synchronous Security authorization enforces the target role/admin/test model;
+- synchronous Security human authorization enforces the target role/admin/test model;
 - one operating role/User/Tenant and one PM/Tenant are enforced;
-- Group authorization is role-aligned and non-additive;
-- the one SuperAdmin has every ACTIVE registered permission;
+- role-aligned Groups are non-additive;
+- exact SuperAdmin identity is active and has every ACTIVE registered permission;
 - TenantAdmin and ModuleAdmin scope tests pass;
 - PENDING approval/rejection is SuperAdmin-only;
 - Executive/TenantAdmin suspension policy passes;
 - deletion and 21-day retention tests pass;
-- TestUser/TestTenant behavior passes;
-- ServiceIntegration is platform-global, audience-restricted and least-privilege;
-- unregistered/external machine callers cannot obtain or use valid target tokens;
-- Device/Geo/Schedule/VPN code remains available but is not a mandatory Phase-1 authorization gate;
-- legacy Tenant role/Group/human-token state no longer participates in the target runtime authorization result.
+- exact TestUser/TestTenant behavior passes;
+- ServiceIntegration is platform-global;
+- machine tokens use `/security/v1/service/token`, have 4-hour TTL and correct target audience;
+- normal system-to-system calls work without per-service functional permission matrices;
+- administrative endpoints reject `SERVICE_INTEGRATION`;
+- unregistered/external systems cannot obtain or use a valid target machine token;
+- Device/Geo/Schedule/VPN capabilities remain available but are not mandatory Phase-1 authorization gates;
+- legacy Tenant role/Group/human-token state no longer contributes to the target runtime authorization result.
