@@ -4,19 +4,23 @@ import os
 
 from verigence_security.config import Settings
 from verigence_security.db.session import build_session_factory
-from verigence_security.services.initial_super_admin import InitialSuperAdminProvisioningService
+from verigence_security.services.initial_super_admin import (
+    PHASE1_SUPER_ADMIN_CLERK_USER_ID,
+    InitialSuperAdminProvisioningService,
+)
 
 
 def main() -> int:
     settings = Settings()
     database_url = settings.database_url.strip()
-    clerk_user_id = os.getenv("SECURITY_INITIAL_SUPER_ADMIN_CLERK_USER_ID", "").strip()
+    clerk_user_id = os.getenv(
+        "SECURITY_INITIAL_SUPER_ADMIN_CLERK_USER_ID",
+        PHASE1_SUPER_ADMIN_CLERK_USER_ID,
+    ).strip()
     display_name = os.getenv("SECURITY_INITIAL_SUPER_ADMIN_DISPLAY_NAME", "superadmin").strip()
 
     if not database_url:
         raise RuntimeError("DATABASE_URL is required for initial Super Admin provisioning")
-    if not clerk_user_id:
-        raise RuntimeError("SECURITY_INITIAL_SUPER_ADMIN_CLERK_USER_ID is required")
 
     factory = build_session_factory(settings)
     if factory is None:
@@ -28,7 +32,7 @@ def main() -> int:
             display_name=display_name,
         )
 
-    state = "created" if result.created else "already_provisioned"
+    state = "created" if result.created else "already_provisioned_or_reconciled"
     print(f"Initial Platform Super Admin {state}; security_user_id={result.user_id}")
     return 0
 
