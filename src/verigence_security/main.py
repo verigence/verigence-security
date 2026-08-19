@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI
 
 from verigence_security.api.dependencies import correlation_header_parameter
 from verigence_security.api.routes import (
+    access,
     authorization,
     dev_mock,
     health,
@@ -39,6 +40,11 @@ app.add_exception_handler(SecurityError, security_error_handler)
 app.add_exception_handler(Exception, unexpected_error_handler)
 app.include_router(health.router)
 app.include_router(jwks.router)
+# Temporary compatibility only. Audit Core dev still consumes the legacy OAuth/token-
+# exchange surface; remove these routers only after that dependent caller migrates to
+# /security/v1/service/token and Clerk-subject authorization/check.
+app.include_router(access.oauth_router)
+app.include_router(access.router)
 app.include_router(service_tokens.router)
 app.include_router(authorization.router)
 app.include_router(platform_admin.router)
