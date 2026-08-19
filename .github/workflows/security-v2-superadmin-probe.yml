@@ -55,28 +55,31 @@ jobs:
                 (SELECT user_id FROM security.external_identities
                  WHERE provider='CLERK' AND provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
                  LIMIT 1) AS test_id
-            ), legacy AS (
-              SELECT
-                count(*) FILTER (WHERE p.user_id=i.approved_id) AS approved,
-                count(*) FILTER (WHERE p.user_id=i.test_id) AS test,
-                count(*) FILTER (WHERE p.user_id IS DISTINCT FROM i.approved_id AND p.user_id IS DISTINCT FROM i.test_id) AS other
-              FROM security.platform_user_role_assignments p CROSS JOIN ids i
+            ), conflict AS (
+              SELECT p.user_id,p.assignment_source,u.status AS user_status,
+                     sp.status AS principal_status,
+                     COALESCE(e.provider,'NONE') AS identity_provider
+              FROM security.platform_user_role_assignments p
+              CROSS JOIN ids i
+              JOIN security.users u ON u.user_id=p.user_id
+              JOIN security.security_principals sp ON sp.principal_id=p.user_id
+              LEFT JOIN LATERAL (
+                SELECT provider FROM security.external_identities e
+                WHERE e.user_id=p.user_id AND e.status='ACTIVE'
+                ORDER BY provider LIMIT 1
+              ) e ON true
               WHERE p.role_key='platform.super_admin' AND p.status='ACTIVE'
-            ), v2 AS (
-              SELECT
-                count(*) FILTER (WHERE a.user_id=i.approved_id) AS approved,
-                count(*) FILTER (WHERE a.user_id=i.test_id) AS test,
-                count(*) FILTER (WHERE a.user_id IS DISTINCT FROM i.approved_id AND a.user_id IS DISTINCT FROM i.test_id) AS other
-              FROM security.user_admin_role_assignments a CROSS JOIN ids i
-              WHERE a.role_key='SuperAdmin' AND a.status='ACTIVE'
+                AND p.user_id IS DISTINCT FROM i.approved_id
+                AND p.user_id IS DISTINCT FROM i.test_id
             )
             SELECT
-              'ai=' || CASE WHEN i.approved_id IS NULL THEN '0' ELSE '1' END ||
-              ',ti=' || CASE WHEN i.test_id IS NULL THEN '0' ELSE '1' END ||
-              ',L=' || l.approved || '/' || l.test || '/' || l.other ||
-              ',V=' || v.approved || '/' || v.test || '/' || v.other
-            FROM ids i CROSS JOIN legacy l CROSS JOIN v2 v;
+              'n=' || count(*) ||
+              ',src=' || COALESCE(string_agg(DISTINCT assignment_source,','),'NONE') ||
+              ',prov=' || COALESCE(string_agg(DISTINCT identity_provider,','),'NONE') ||
+              ',user=' || COALESCE(string_agg(DISTINCT user_status,','),'NONE') ||
+              ',principal=' || COALESCE(string_agg(DISTINCT principal_status,','),'NONE')
+            FROM conflict;
           ")"
-          echo "SANITIZED_SUPERADMIN_STATE=$result"
-          post success "$result (approved/test/other)"
+          echo "SANITIZED_SUPERADMIN_CONFLICT=$result"
+          post success "$result"
           trap - ERR
