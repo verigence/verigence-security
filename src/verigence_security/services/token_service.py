@@ -130,6 +130,41 @@ class TokenService:
         except (ValueError, TypeError, jwt.PyJWTError) as exc:
             raise security_error("SIGNING_KEY_UNAVAILABLE") from exc
 
+    def verify_human_token(self, token: str) -> dict[str, Any]:
+        """Validate a Security-issued human token for the active v2 human boundary.
+
+        The token proves the global USER identity only. Roles, permissions, Tenant context and
+        other legacy session claims are deliberately not trusted here; protected operations
+        resolve current authorization from Security-owned state after token verification.
+        """
+
+        if not self.settings.security_public_key_pem:
+            raise security_error("SIGNING_KEY_UNAVAILABLE")
+        try:
+            payload = jwt.decode(
+                token,
+                self.settings.security_public_key_pem,
+                algorithms=["RS256"],
+                issuer=self.settings.security_token_issuer,
+                audience=self.settings.security_token_audience,
+                options={
+                    "require": ["exp", "iat", "sub", "jti", "actor_type"]
+                },
+            )
+            if payload.get("actor_type") != ActorType.USER.value:
+                raise security_error("ACTOR_TYPE_NOT_ALLOWED")
+            if not isinstance(payload.get("sub"), str) or not str(payload["sub"]).strip():
+                raise security_error("AUTH_TOKEN_INVALID")
+            # Token exchange is a retired/deferred human path. A delegated USER token must not
+            # enter the direct human administrative boundary.
+            if "act" in payload:
+                raise security_error("AUTH_TOKEN_INVALID")
+            return payload
+        except jwt.ExpiredSignatureError as exc:
+            raise security_error("AUTH_TOKEN_EXPIRED") from exc
+        except jwt.PyJWTError as exc:
+            raise security_error("AUTH_TOKEN_INVALID") from exc
+
     def verify(self, token: str) -> dict[str, Any]:
         if not self.settings.security_public_key_pem:
             raise security_error("SIGNING_KEY_UNAVAILABLE")
