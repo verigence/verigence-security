@@ -24,8 +24,9 @@ It covers:
 - USER role classifications and assignment rules;
 - administrative-role rules;
 - `TestUser`;
+- role-aligned operating Groups;
 - module permission catalogues;
-- Tenant-specific role-to-permission mapping;
+- platform default and Tenant-specific role-to-permission mapping;
 - synchronous runtime authorization;
 - BFF/API-layer responsibilities within the Web module;
 - Security integration with Audit Core and DI;
@@ -301,8 +302,9 @@ Security owns:
 - Tenant entity and Tenant lifecycle capability;
 - global role classifications;
 - USER role assignments;
+- role-aligned operating Groups;
 - module permission catalogue registry;
-- Tenant-specific operating-role permission bundles;
+- platform default and Tenant-specific operating-role permission bundles;
 - functional authorization decisions;
 - Security administrative audit history.
 
@@ -730,6 +732,60 @@ Business APIs authorize using required permission keys evaluated by Security.
 
 The operating role may be returned for administration/audit/UI context, but modules must not replace permission checks with `if role == ...` logic.
 
+### 14.4 Role-aligned Groups — CONFIRMED
+
+Phase 1 includes a simple Group concept aligned 1:1 with the operating roles.
+
+For each Tenant, the operating Groups are:
+
+- `PC`
+- `TL`
+- `PM`
+- `CRM`
+- `Executive`
+
+A Group is **not a second RBAC authority** and does not own a separate permission list.
+
+The relationship is:
+
+```text
+Tenant role Group
+      |
+      v
+same role_key
+      |
+      v
+Tenant role permission bundle
+```
+
+For example:
+
+```text
+Tenant T1 / PC Group
+        -> role_key = PC
+        -> Tenant T1 PC permission bundle
+```
+
+Therefore Group and Role always expose the same effective permissions because the Group references the Role; Security does not maintain a separate `group_permissions` mapping.
+
+Operating-role assignment is authoritative for Group membership. When a USER is assigned or changed to an operating role, the USER is automatically represented in the matching role Group for that Tenant.
+
+```text
+U100 + T1 -> PC
+             |
+             +-> member of T1 / PC Group
+```
+
+Changing `PC -> TL` moves the USER from the PC Group to the TL Group as part of the same logical assignment change.
+
+The existing invariants therefore also govern Group membership:
+
+- one active operating Group per USER/Tenant;
+- exactly one active PM member in the PM Group per Tenant;
+- admin/operating global exclusivity remains unchanged.
+
+Arbitrary custom Groups, Group-specific permissions and Group-to-multiple-role inheritance are not part of the Phase-1 model.
+
 ---
 
 ## 15. Operating-role assignment rules
@@ -759,6 +815,8 @@ U100 + T1 -> TL
 The operating-role API sets/replaces the USER's one role in that Tenant.
 
 It must not be an additive role API that can accumulate `PC + TL`.
+
+The corresponding role-aligned Group membership follows the role assignment automatically; Group membership does not independently add another role.
 
 ### 15.3 Exactly one PM per Tenant — CONFIRMED
 
@@ -806,7 +864,7 @@ Confirmed here:
 - it may coexist with other administrative roles;
 - it cannot coexist with operating roles;
 - only SuperAdmin executes final global USER hard deletion;
-- SuperAdmin can review module permission catalogues and map approved module permissions into the applicable role permission bundle before that role is assigned to users.
+- SuperAdmin can review module permission catalogues and update the applicable Tenant role permission bundle.
 
 No additional SuperAdmin privilege semantics are introduced by this revision.
 
@@ -851,7 +909,7 @@ user_id
 
 For operating roles the active uniqueness rule is `(user_id, tenant_id)` rather than `(user_id, tenant_id, role_id)`.
 
-A role change replaces the active role assignment for that USER/Tenant.
+A role change replaces the active role assignment for that USER/Tenant and updates the USER's role-aligned Group membership as the same logical operation.
 
 ---
 
@@ -869,6 +927,8 @@ Tenant T1
 A request to assign `U200` as PM while `U100` remains active PM returns a conflict rather than creating a second PM.
 
 The administrative UI/Web BFF may guide the user through replacing the PM, but Security owns and enforces the invariant.
+
+The Tenant PM Group therefore also has at most one active member.
 
 ---
 
@@ -898,10 +958,13 @@ Security stores the active module permission catalogue
 SuperAdmin lists modules and available permissions
         |
         v
-SuperAdmin maps selected approved permissions to a role bundle
+Security shows the Tenant's current role bundle
         |
         v
-The configured role is assigned to a USER in the applicable scope
+SuperAdmin keeps the default or changes selected permissions
+        |
+        v
+The configured role is assigned to a USER
 ```
 
 A role-permission mapping must reference permission keys that exist and are ACTIVE in the registered module catalogue. Security must not allow an arbitrary unregistered permission string to be mapped to a role bundle.
@@ -916,70 +979,285 @@ Existing catalogue logic detects conflicts when a permission is still referenced
 
 ---
 
-## 21. Tenant-specific role-to-permission mapping
+## 21. Platform defaults and Tenant-specific role-to-permission mapping
 
-### 21.1 Stable role, Tenant-specific bundle — CONFIRMED
+### 21.1 Default-first model — CONFIRMED
+
+SuperAdmin must not have to construct every operational role bundle from scratch when a Tenant is onboarded.
+
+Security shall maintain platform default permission mappings for the operating roles where an approved default bundle exists.
+
+When a new Tenant is initialized, Security copies/seeds those defaults into that Tenant's role permission configuration.
+
+Conceptually:
+
+```text
+Platform default PC bundle
+          |
+          +---- seed ----> Tenant A / PC bundle
+          |
+          +---- seed ----> Tenant B / PC bundle
+```
+
+A later Tenant-specific change affects that Tenant's bundle only.
+
+```text
+Tenant A / PC bundle -> customized
+Tenant B / PC bundle -> remains its own current bundle
+```
+
+SuperAdmin can review the registered module permissions and update the role definition's permission mapping for the given Tenant when required.
+
+### 21.2 Stable role, Tenant-specific bundle — CONFIRMED
 
 Conceptually:
 
 ```text
 GLOBAL ROLE: PC
 
+Platform default bundle:
+  approved Audit Core + DI permissions
+
 Tenant A bundle:
-  permission-1
-  permission-2
+  seeded from default, then optionally customized
 
 Tenant B bundle:
-  permission-1
-  permission-3
+  seeded from default, then optionally customized
 ```
 
 Tenant A does not create a new PC role object; it configures the functional bundle for the global `PC` classification.
 
-### 21.2 Target data relationship
+The Tenant's role-aligned PC Group references exactly the same Tenant PC bundle.
+
+### 21.3 Target data relationship
 
 ```text
 role_definitions (global)
        |
+       +-- platform_role_permission_defaults
+       |      role_key
+       |      permission_key
+       |
        +-- tenant_role_permissions
-             tenant_id
-             role_key
-             permission_key
+              tenant_id
+              role_key
+              permission_key
 ```
 
-### 21.3 Existing Tenant-created role objects — RETIRE/MODIFY
+Role-aligned Groups reference `role_key`; there is no separate Group-permission table.
+
+### 21.4 Existing Tenant-created role objects — RETIRE/MODIFY
 
 Current `security.roles` and `/admin/tenants/{tenantId}/roles` APIs create independent Tenant-owned role records. That model conflicts with the confirmed role-classification rule.
 
 The target removes Tenant role creation for the fixed Phase-1 role catalogue.
 
-### 21.4 Module role templates — EXISTING BUT MODIFY
+### 21.5 Existing module role templates — EXISTING BUT MODIFY
 
-Existing module role templates can remain reusable seeds/reference bundles for permission configuration, but they must not create a new business role identity per Tenant.
+Existing module role templates can remain reusable source material for platform default permission bundles, but they must not create a new business role identity per Tenant.
 
-Applying a template may materialize permissions into a Tenant's bundle for one of the approved global role classifications.
+### 21.6 Approved default PC/TL/PM/CRM bundles — CONFIRMED FROM CURRENT AUDIT CORE BASELINE
 
-### 21.5 Permission mapping before user-role assignment — CONFIRMED
+The current Audit Core baseline already contains an approved default cross-module role-bundle document for `PC`, `TL`, `PM` and `CRM`. The permissions below are copied exactly from that approved baseline and are therefore the Phase-1 default seed for those roles.
 
-The administration sequence must expose module capabilities before role assignment:
+#### PC default
+
+**Audit Core**
+
+- `audit.project.read`
+- `audit.master.read`
+- `audit.customer.read`
+- `audit.customer.write`
+- `audit.journey.create`
+- `audit.journey.read`
+- `audit.journey.update`
+- `audit.journey.submit`
+- `audit.evidence.read`
+- `audit.evidence.upload`
+- `audit.evidence.refresh`
+- `audit.payment.read`
+- `audit.payment.write`
+- `audit.delivery.read`
+- `audit.delivery.write`
+- `audit.trade_in.read`
+- `audit.trade_in.write`
+- `audit.finding.read`
+- `audit.finding.create`
+- `audit.work.read`
+- `audit.work.update`
+- `audit.daily_ops.read`
+- `audit.daily_ops.execute`
+
+**DI**
+
+- `di.subject.create`
+- `di.subject.read`
+- `di.document.upload`
+- `di.document.read`
+- `di.document.content.read`
+- `di.document.fields.read`
+- `di.document.quality.read`
+- `di.entity_link.read`
+- `di.entity_link.write`
+
+**Guard:** PC receives no `audit.*.verify` capability and no `di.verification.write` in the approved default.
+
+#### TL default
+
+**Audit Core**
+
+- `audit.project.read`
+- `audit.master.read`
+- `audit.customer.read`
+- `audit.journey.read`
+- `audit.evidence.read`
+- `audit.evidence.refresh`
+- `audit.payment.read`
+- `audit.payment.verify`
+- `audit.delivery.read`
+- `audit.delivery.verify`
+- `audit.trade_in.read`
+- `audit.trade_in.verify`
+- `audit.finding.read`
+- `audit.finding.create`
+- `audit.finding.update`
+- `audit.review.read`
+- `audit.review.decide`
+- `audit.work.read`
+- `audit.work.update`
+- `audit.work.manage`
+- `audit.daily_ops.read`
+- `audit.daily_ops.review`
+- `audit.escalation.read`
+- `audit.analytics.read`
+
+**DI**
+
+- `di.subject.read`
+- `di.document.read`
+- `di.document.content.read`
+- `di.document.fields.read`
+- `di.document.quality.read`
+- `di.verification.read`
+- `di.verification.write`
+- `di.operations.read`
+
+#### PM default
+
+**Audit Core**
+
+- `audit.project.read`
+- `audit.project.update`
+- `audit.project.assignment.manage`
+- `audit.master.read`
+- `audit.customer.read`
+- `audit.journey.read`
+- `audit.evidence.read`
+- `audit.evidence.refresh`
+- `audit.payment.read`
+- `audit.payment.verify`
+- `audit.delivery.read`
+- `audit.delivery.verify`
+- `audit.trade_in.read`
+- `audit.trade_in.verify`
+- `audit.finding.read`
+- `audit.finding.create`
+- `audit.finding.update`
+- `audit.finding.resolve`
+- `audit.review.read`
+- `audit.review.decide`
+- `audit.work.read`
+- `audit.work.update`
+- `audit.work.manage`
+- `audit.daily_ops.read`
+- `audit.daily_ops.review`
+- `audit.crm.read`
+- `audit.crm.manage`
+- `audit.escalation.read`
+- `audit.escalation.manage`
+- `audit.analytics.read`
+- `audit.audit_trail.read`
+
+**DI**
+
+- `di.subject.read`
+- `di.document.read`
+- `di.document.content.read`
+- `di.document.fields.read`
+- `di.document.quality.read`
+- `di.verification.read`
+- `di.verification.write`
+- `di.operations.read`
+
+#### CRM default
+
+**Audit Core**
+
+- `audit.project.read`
+- `audit.customer.read`
+- `audit.journey.read`
+- `audit.evidence.read`
+- `audit.finding.read`
+- `audit.work.read`
+- `audit.work.update`
+- `audit.crm.read`
+- `audit.crm.execute`
+- `audit.escalation.read`
+
+**DI**
+
+- `di.subject.read`
+- `di.document.read`
+- `di.document.content.read`
+- `di.document.fields.read`
+- `di.document.quality.read`
+
+CRM is read-only in DI by default.
+
+### 21.7 Executive default bundle — OPEN DECISION, NOT GUESSED
+
+`Executive` is a confirmed operating role and has a role-aligned Tenant Group, but the current approved cross-module default-bundle document explicitly defines defaults only for `PC/TL/PM/CRM` and treats Executive separately.
+
+This Security design therefore does not invent an Executive Audit Core/DI default permission list.
+
+The Executive default bundle must be explicitly approved before it is seeded. Until then, Security must not silently infer a permission list from the role name.
+
+### 21.8 TestUser default bundle — OPEN DECISION
+
+The exact deliberately limited TestUser permission set remains open and is not inferred from the operational defaults.
+
+### 21.9 Default seed and Tenant override flow — CONFIRMED
 
 ```text
-1. Read registered modules.
-2. Read the permissions available in the selected module(s).
-3. SuperAdmin selects approved permissions and maps them to the applicable role bundle.
-4. Security validates that every selected permission exists and is ACTIVE.
-5. The role can then be assigned to a USER in its applicable Tenant/admin context.
+Module permission catalogues registered in Security
+        |
+        v
+Platform default role bundles available
+        |
+        v
+Tenant created / initialized
+        |
+        v
+Security seeds approved role defaults into Tenant role bundles
+        |
+        v
+SuperAdmin reviews current Tenant role bundle
+        |
+        +-- no change -> assign role to USER
+        |
+        +-- change required
+               |
+               v
+        GET module permissions
+               |
+               v
+        update Tenant role bundle
+               |
+               v
+        assign role to USER
 ```
 
-This separates three different concepts:
-
-```text
-Module -> defines available permissions
-Security/SuperAdmin -> configures role-to-permission mapping
-Security -> assigns configured role to USER
-```
-
-The role-to-permission mapping and USER-to-role assignment remain separate APIs and separate audited operations.
+Every Tenant-specific role-bundle change is an audited Security operation.
 
 ---
 
@@ -1010,7 +1288,7 @@ Resource Server (Security / Audit Core / DI as applicable)
   |        Clerk sub -> global USER
   |        USER status == ACTIVE
   |        Tenant active where applicable
-  |        resolve USER role assignment
+  |        resolve USER operating role
   |        resolve Tenant role permission bundle
   |        evaluate required permission
   |        return ALLOW/DENY + stable decision context
@@ -1019,6 +1297,8 @@ Resource Server (Security / Audit Core / DI as applicable)
   |
   +-- execute operation
 ```
+
+The role-aligned Group does not add permissions at runtime. It is the USER collection corresponding to the same operating role and same Tenant permission bundle.
 
 ### 22.2 Authorization API — TARGET
 
@@ -1181,7 +1461,7 @@ SuperAdmin checker only, subject to the confirmed deletion preconditions.
 
 ---
 
-## 25. Role APIs
+## 25. Role and Group APIs
 
 ### 25.1 Global role catalogue — TARGET
 
@@ -1212,6 +1492,7 @@ This API:
 - replaces the prior active operating role for that USER/Tenant;
 - rejects admin/operating persona conflicts;
 - enforces one PM per Tenant;
+- updates the role-aligned Group membership;
 - records Security audit evidence.
 
 ### 25.3 Remove operating role — TARGET
@@ -1220,9 +1501,27 @@ This API:
 DELETE /security/v1/tenants/{tenantId}/users/{userId}/operating-role
 ```
 
-Removal changes Tenant authorization only; it does not delete the global USER.
+Removal changes Tenant authorization only; it does not delete the global USER. The USER also leaves the corresponding role-aligned Group.
 
-### 25.4 Administrative-role assignment — TARGET SEMANTICS, EXACT CONTRACT OPEN
+### 25.4 Role-aligned Groups — TARGET
+
+The Phase-1 Groups are system-defined operating-role views/collections.
+
+Logical APIs:
+
+```text
+GET /security/v1/tenants/{tenantId}/groups
+GET /security/v1/tenants/{tenantId}/groups/{roleKey}
+GET /security/v1/tenants/{tenantId}/groups/{roleKey}/users
+```
+
+These APIs expose the users currently assigned to each operating role Group.
+
+No independent Group-permission API is required because Group permissions are the role's Tenant bundle.
+
+No separate Group membership write is required to grant operating authorization; the operating-role assignment API is authoritative and updates Group membership automatically.
+
+### 25.5 Administrative-role assignment — TARGET SEMANTICS, EXACT CONTRACT OPEN
 
 Administrative roles require additive/removal semantics because admin roles may coexist.
 
@@ -1230,7 +1529,7 @@ The target API must support assigning/removing `ModuleAdmin` and `TenantAdmin` w
 
 Exact URI/body for admin-role scope should be finalized together with the detailed admin-permission design.
 
-### 25.5 SuperAdmin assignment — DEFERRED
+### 25.6 SuperAdmin assignment — DEFERRED
 
 Initial/subsequent SuperAdmin creation and assignment is outside this document except for the confirmed responsibilities explicitly stated in this design.
 
@@ -1258,7 +1557,21 @@ Module catalogue registration/update remains conceptually equivalent to:
 PUT /security/v1/platform/modules/{moduleKey}/catalog
 ```
 
-### 26.2 Tenant role bundle — TARGET
+### 26.2 Platform default role bundles — TARGET
+
+Security must expose the platform default permission mapping for roles that have an approved default.
+
+Logical API:
+
+```text
+GET /security/v1/platform/role-defaults/{roleKey}
+```
+
+Phase 1 seeds the approved `PC/TL/PM/CRM` defaults from Section 21.6 into a newly initialized Tenant.
+
+This design does not invent defaults for Executive or TestUser.
+
+### 26.3 Tenant role bundle — TARGET
 
 Replace Tenant role creation with Tenant configuration of the permission bundle for a global role classification.
 
@@ -1276,58 +1589,47 @@ The API does not create a new role identity.
 The confirmed administration flow is:
 
 ```text
-GET module permissions
+Tenant role bundle already seeded from approved default
       |
       v
-SuperAdmin chooses approved permission keys
+SuperAdmin reviews current bundle
       |
-      v
-PUT Tenant role bundle
+      +-- acceptable -> role assignment
       |
-      v
-Security validates permission catalogue references
-      |
-      v
-Role can be assigned to USER
+      +-- change required
+              |
+              v
+       GET module permissions
+              |
+              v
+       PUT Tenant role bundle
+              |
+              v
+       Security validates permission catalogue references
+              |
+              v
+       role assignment
 ```
 
-### 26.3 Template seeding — OPTIONAL EXISTING CAPABILITY
+### 26.4 Role-aligned Groups — PHASE 1
 
-Existing module role templates may be offered as seed/input when configuring a Tenant role bundle, but final permissions are owned by the Tenant role-bundle configuration in Security.
+Groups are included in Phase 1 because their target semantics are deliberately simple:
 
-### 26.4 Groups — PHASE-2 RECOMMENDATION
+```text
+Group == collection of users having one operating role in one Tenant
+```
 
-The current Security implementation already contains:
+The Group does not independently grant permissions.
 
-- Tenant Group CRUD;
-- Group membership;
-- Group-to-role assignment;
-- effective-permission resolution that unions group-derived roles with direct roles.
+```text
+Group role_key -> Tenant role permission bundle
+```
 
-Therefore a basic Group entity is **not greenfield**.
+This avoids the conflict in the current implementation where Group-derived roles are additive and permission sets are unioned.
 
-However, the current authorization behaviour is not directly compatible with the redesigned role model. Group-derived role assignment can add roles to a USER and union permissions, while the target requires:
+Phase 1 therefore retains the useful Group/listing concept but **does not retain** current arbitrary Group-to-role inheritance as an authorization mechanism.
 
-- exactly one active operating role per USER/Tenant;
-- admin/operating persona exclusivity;
-- exactly one PM per Tenant.
-
-To make Groups authorization-effective in the target model, the design would first need confirmed rules for:
-
-- what a Group represents;
-- whether Groups may assign operating roles, permissions, or neither;
-- how Group effects interact with the one-operating-role rule;
-- conflict handling when direct and Group assignments disagree;
-- PM uniqueness through Groups;
-- whether administrative roles may ever be Group-derived.
-
-Those rules are not yet confirmed.
-
-**Recommendation:** keep authorization-effective Groups in **Phase 2** rather than carrying the current additive Group RBAC semantics into Phase 1.
-
-If Groups are later required only as a non-authorizing way to organize/list users, with no role or permission inheritance, that is a much smaller change and can be reconsidered separately for Phase 1.
-
-No Group implementation is changed by this design-document update.
+Custom/general-purpose Groups may be considered later if required.
 
 ---
 
@@ -1366,6 +1668,8 @@ Web BFF orchestrates Security + Audit Core but stores neither record.
 
 The actual Dealer cardinality is not constrained in Phase 1.
 
+The corresponding Security role-aligned Group membership is updated automatically by the role assignment; the Web BFF does not need a second Group-membership write.
+
 ### 27.3 Partial-failure behaviour
 
 The Web BFF must report partial failure accurately and must not fabricate a combined success.
@@ -1389,6 +1693,7 @@ Security records authoritative audit evidence for at least:
 - deletion request / transition to DISABLED;
 - SuperAdmin hard delete;
 - operating-role assignment/change/removal;
+- resulting role-aligned Group membership change;
 - administrative-role assignment/change/removal;
 - Tenant role-bundle permission changes;
 - module permission-catalogue changes;
@@ -1436,6 +1741,8 @@ Because Security is called synchronously for each protected request, status chan
 
 Because permissions are resolved by Security at authorization time, changing a USER's role or a Tenant role bundle affects subsequent protected requests without reissuing a Verigence user token.
 
+Role-aligned Group membership follows the role assignment and has no independent authorization cache.
+
 ### 29.3 Clerk session still valid after Security suspension
 
 Even if a Clerk session JWT remains cryptographically valid, Security denies the USER because status is no longer ACTIVE.
@@ -1467,7 +1774,13 @@ Security remains the sole functional authorization authority.
 
 Audit Core remains the Dealer/Outlet/business-scope authority.
 
-### 30.4 Existing Audit Core design conflict
+### 30.4 Default operational permission bundles — EXISTING AND RETAIN AS SECURITY DEFAULT SOURCE
+
+Audit Core already contains an approved `PC/TL/PM/CRM` default cross-module bundle covering Audit Core and DI permissions. Security uses those approved values as the Phase-1 platform defaults listed in Section 21.6.
+
+This does not transfer permission ownership to Audit Core; Audit Core owns its permission catalogue while Security owns the default/Tenant role mapping used for authorization.
+
+### 30.5 Existing Audit Core design conflict
 
 Current Audit Core design states that it verifies Security-issued JWTs through Security JWKS and authorizes from `permissions[]` claims.
 
@@ -1571,6 +1884,8 @@ Security rejects:
 - admin role assigned to a USER with any active operating persona;
 - operating role assigned to a USER with any administrative persona.
 
+The role-aligned Group representation cannot bypass these checks because Group membership is derived from the operating-role assignment.
+
 ### 32.9 Hard-delete dependency failure
 
 If final deletion cannot complete safely across required live identity stores, Security must record failure and avoid reporting hard-delete success.
@@ -1636,7 +1951,26 @@ Phase-1 fixed keys include:
 - SuperAdmin
 - TestUser
 
-### 33.4 Operating role assignment
+### 33.4 Platform default role permissions
+
+```text
+security.platform_role_permission_defaults
+  role_key
+  permission_key
+  source_catalog_version
+  status
+```
+
+Phase-1 approved seed exists for:
+
+- PC
+- TL
+- PM
+- CRM
+
+Executive and TestUser remain pending explicit default approval.
+
+### 33.5 Operating role assignment
 
 ```text
 security.user_tenant_operating_roles
@@ -1659,7 +1993,23 @@ one ACTIVE PM per tenant_id
 role_key must be OPERATING
 ```
 
-### 33.5 Administrative role assignment
+### 33.6 Role-aligned Groups
+
+Phase-1 operating Groups may be implemented as a derived/query view over `user_tenant_operating_roles` or as persisted group metadata whose membership is transactionally synchronized from the operating-role assignment.
+
+The authoritative semantic relationship is fixed:
+
+```text
+Tenant + role_key -> one role-aligned Group
+Group membership  -> users whose active operating role is role_key
+Group permissions -> same Tenant role bundle for role_key
+```
+
+There is no independent Group permission grant.
+
+The physical choice between a derived view and persisted metadata is an implementation detail to settle in the physical DB design; it must preserve the same semantics.
+
+### 33.7 Administrative role assignment
 
 Conceptually:
 
@@ -1677,11 +2027,11 @@ security.user_admin_role_assignments
 
 Exact SuperAdmin/ModuleAdmin/TenantAdmin scope rules require final admin-role design.
 
-### 33.6 TestUser assignment
+### 33.8 TestUser assignment
 
 A dedicated assignment representation may be used if TestUser is Tenant-contextual. Exact assignment scope is finalized with the TestUser permission bundle.
 
-### 33.7 Module permissions — EXISTING CONCEPT RETAINED
+### 33.9 Module permissions — EXISTING CONCEPT RETAINED
 
 ```text
 security.modules
@@ -1690,7 +2040,7 @@ security.module_role_templates
 security.module_role_template_permissions
 ```
 
-### 33.8 Tenant role permission bundle
+### 33.10 Tenant role permission bundle
 
 ```text
 security.tenant_role_permissions
@@ -1703,7 +2053,7 @@ security.tenant_role_permissions
 
 This replaces Tenant-created business role identity with Tenant-specific permission configuration for a global role classification.
 
-### 33.9 Deletion requests
+### 33.11 Deletion requests
 
 ```text
 security.user_deletion_requests
@@ -1720,18 +2070,19 @@ security.user_deletion_requests
 
 This preserves maker/checker evidence separately from the live USER status.
 
-### 33.10 Security audit
+### 33.12 Security audit
 
 Retain/extend the existing immutable administrative/security event/change-record concept so it can survive live USER hard deletion without cascade loss.
 
-### 33.11 Objects not used as Phase-1 authorization gates
+### 33.13 Objects not used as Phase-1 authorization gates
 
 - `tenant_memberships`
-- group-derived role/permission grants
+- current arbitrary Group-to-role additive grants
+- current Group-derived permission union
 - Security-issued human access sessions/tokens
 - per-user human token authorization versions for token invalidation
 
-Group data structures may remain for compatibility while authorization-effective Groups are deferred for the target model.
+Existing Group data/API implementation may be reused only after it is constrained to the role-aligned Group semantics above; the current arbitrary additive RBAC behaviour is not retained.
 
 Historical tables need not be destructively dropped merely because they leave the active runtime model.
 
@@ -1767,7 +2118,21 @@ PUT    /security/v1/tenants/{tenantId}/users/{userId}/operating-role
 DELETE /security/v1/tenants/{tenantId}/users/{userId}/operating-role
 ```
 
-### Role-bundle administration
+### Role-aligned Groups
+
+```text
+GET /security/v1/tenants/{tenantId}/groups
+GET /security/v1/tenants/{tenantId}/groups/{roleKey}
+GET /security/v1/tenants/{tenantId}/groups/{roleKey}/users
+```
+
+### Platform default role bundles
+
+```text
+GET /security/v1/platform/role-defaults/{roleKey}
+```
+
+### Tenant role-bundle administration
 
 ```text
 GET /security/v1/tenants/{tenantId}/role-bundles/{roleKey}
@@ -1788,10 +2153,6 @@ GET /security/v1/platform/modules/{moduleKey}
 GET /security/v1/platform/modules/{moduleKey}/permissions
 PUT /security/v1/platform/modules/{moduleKey}/catalog
 ```
-
-### Groups
-
-Authorization-effective Group APIs are deferred from the target Phase-1 authorization contract pending the rules in Section 26.4.
 
 ### Tenant administration
 
@@ -1817,11 +2178,13 @@ Existing Tenant entity/lifecycle APIs remain valuable. Detailed authority mappin
 | Operating-role cardinality | Current assignment API is additive by role ID. | Exactly one active operating role per USER/Tenant. | **EXISTING BUT MODIFY** |
 | One PM per Tenant | Not enforced by generic current RBAC. | Required invariant. | **NEW** |
 | Direct role union | Current effective permission resolver unions multiple direct Tenant roles. | One operating role per USER/Tenant. | **RETIRE FOR OPERATING USERS** |
-| Groups | Current implementation has Group CRUD, membership and Group-to-role assignment; effective permissions union Group-derived roles. | Group concept is reusable, but authorization-effective Group semantics need redesign against the one-role/admin-exclusivity invariants. Recommend Phase 2. | **EXISTING BUT REDESIGN / PHASE 2** |
+| Groups | Current implementation has arbitrary Group CRUD, memberships and Group-to-role assignment; effective permissions union Group-derived roles. | Phase-1 Groups are role-aligned collections for PC/TL/PM/CRM/Executive and inherit exactly the same Tenant role bundle; no separate Group permission grant. | **EXISTING BUT SIMPLIFY/MODIFY** |
+| Platform default operational bundles | Approved Audit Core baseline already defines PC/TL/PM/CRM cross-module defaults, but current target Security design did not previously freeze them as the onboarding seed. | Security seeds those exact Audit Core + DI defaults into each new Tenant. | **EXISTING DESIGN INPUT / ADD TO TARGET** |
+| Executive default bundle | Executive exists, but current approved cross-module default bundle explicitly covers PC/TL/PM/CRM only. | Executive role/group retained; exact default permission seed requires explicit approval. | **OPEN** |
 | Platform/admin roles | Current platform roles exist. | Admin personas retained conceptually but exact bundles/scopes redesigned. | **EXISTING BUT MODIFY** |
-| SuperAdmin | Existing migration grants `platform.super_admin` every active permission and bootstrap code exists. | Confirmed responsibilities include hard-delete checker and permission-to-role mapping; broader authority/bootstrap deferred. | **EXISTING BUT MODIFY / DEFER** |
+| SuperAdmin | Existing migration grants `platform.super_admin` every active permission and bootstrap code exists. | Confirmed responsibilities include hard-delete checker and Tenant role-bundle permission management; broader authority/bootstrap deferred. | **EXISTING BUT MODIFY / DEFER** |
 | Module permission catalogue | Existing module catalogue, permissions and role templates. | Modules publish permissions; Security exposes module permission discovery; Security remains registry/authority. | **EXISTING AND RETAIN / EXTEND CONTRACT** |
-| Role templates | Current templates seed Tenant role objects. | Templates may seed Tenant permission bundles for global role classifications. | **EXISTING BUT MODIFY** |
+| Role templates | Current templates seed Tenant role objects. | Approved templates/defaults seed Tenant permission bundles for global role classifications. | **EXISTING BUT MODIFY** |
 | Tenant role permissions | Current permissions bind to Tenant role IDs. | Bind Tenant + global role_key + permission_key. | **EXISTING BUT MODIFY** |
 | Human runtime token | Current `/auth/login` and access session flows issue Verigence access tokens. | Clerk session JWT only for human authentication. | **RETIRE HUMAN TOKEN ISSUANCE** |
 | Security JWKS for human USER token | Current downstream modules trust Security JWT/JWKS. | Not used for human Phase-1 access. | **RETIRE FOR HUMAN FLOW** |
@@ -1834,7 +2197,7 @@ Existing Tenant entity/lifecycle APIs remain valuable. Detailed authority mappin
 | Audit Core human trust | Current design expects Security-issued JWT + permissions. | Clerk JWT + Security synchronous AuthZ + Audit Core business scope. | **DEPENDENT DESIGN CHANGE** |
 | DI human trust | Current DI expects Security-issued USER JWT. | Human may call DI directly using Clerk JWT authentication + synchronous Security authorization; DI performs no onboarding. | **DEPENDENT DESIGN CHANGE** |
 | DI service trust | DI already supports Security service/system identities. | Reuse for Audit Core -> DI where appropriate. | **EXISTING AND RETAIN/MODIFY** |
-| Security audit records | Existing admin/security change/audit structures exist. | Extend to redesigned lifecycle, hard delete and role model. | **EXISTING AND RETAIN/MODIFY** |
+| Security audit records | Existing admin/security change/audit structures exist. | Extend to redesigned lifecycle, hard delete, role defaults and role-aligned Groups. | **EXISTING AND RETAIN/MODIFY** |
 
 ---
 
@@ -1852,21 +2215,23 @@ Recommended sequence:
 4. add the new authorization-check service contract;
 5. move first-party human authentication to Clerk session JWT validation;
 6. migrate active operating-role assignments into one-role-per-USER/Tenant representation after conflict analysis;
-7. create Tenant-specific permission bundles for the approved global role classifications;
-8. remove current group-derived/additive role resolution from Phase-1 runtime authorization while preserving Group data for later redesign;
-9. retire human Security token issuance routes after all clients/modules are migrated;
-10. keep historical tables/routes disabled or compatibility-only until explicit retention cleanup is approved;
-11. align Audit Core and DI designs/contracts after Security behaviour is proven.
+7. load the approved PC/TL/PM/CRM platform default bundles from the current approved Audit Core cross-module baseline;
+8. seed Tenant-specific permission bundles from those approved defaults;
+9. simplify Groups to role-aligned collections and remove current additive Group-derived permission behaviour from Phase-1 authorization;
+10. retire human Security token issuance routes after all clients/modules are migrated;
+11. keep historical tables/routes disabled or compatibility-only until explicit retention cleanup is approved;
+12. align Audit Core and DI designs/contracts after Security behaviour is proven.
 
 ### Migration safety checks
 
 Before migrating active role assignments, identify:
 
 - users currently holding multiple direct roles in one Tenant;
-- users receiving effective roles through groups;
+- users receiving additional effective roles through existing arbitrary Groups;
 - users mixing current platform/admin and Tenant roles;
 - Tenants with more than one user who would map to PM;
-- permissions currently granted by arbitrary custom Tenant roles that have no mapping to the approved target role catalogue.
+- permissions currently granted by arbitrary custom Tenant roles that have no mapping to the approved target role catalogue;
+- current Group memberships that do not correspond 1:1 with the USER's target operating role.
 
 These require explicit remediation rather than automatic guessing.
 
@@ -1880,19 +2245,19 @@ These require explicit remediation rather than automatic guessing.
 4. **Implement/align global USER onboarding and PENDING/REJECTED/ACTIVE lifecycle.**
 5. **Implement status change + DISABLED deletion-request flow + SuperAdmin hard-delete checker API.**
 6. **Implement global role definitions and one operating-role-per-USER/Tenant assignment model.**
-7. **Enforce one PM per Tenant and admin/operating exclusivity.**
-8. **Expose module permission discovery and adapt module catalogue/templates to Tenant-specific role-permission bundles.**
-9. **Implement SuperAdmin permission-to-role-bundle mapping flow before USER role assignment.**
-10. **Implement synchronous Security authorization-check API and use common in-process logic for Security admin endpoints.**
-11. **Implement Web BFF user-administration flows inside the Web module without moving authority into Web.**
-12. **Implement/align Audit Core Dealer assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
-13. **Migrate Audit Core human auth contract to Clerk JWT + synchronous Security AuthZ.**
-14. **Align DI direct-human protected access to Clerk JWT + synchronous Security AuthZ; DI remains outside onboarding.**
-15. **Retain the required machine/service auth path for Audit Core -> DI.**
-16. **Retire Security-issued human access-token flows and downstream USER-JWT assumptions.**
-17. **Run migration reconciliation and end-to-end authorization/lifecycle tests before production use.**
-
-Authorization-effective Groups are not part of this Phase-1 implementation sequence; see Section 26.4.
+7. **Implement Phase-1 role-aligned Groups as the PC/TL/PM/CRM/Executive user collections tied 1:1 to operating roles.**
+8. **Enforce one PM per Tenant and admin/operating exclusivity.**
+9. **Expose module permission discovery.**
+10. **Seed the approved PC/TL/PM/CRM Audit Core + DI platform default permission bundles into Tenant role bundles.**
+11. **Implement SuperAdmin Tenant role-bundle review/update flow.**
+12. **Implement synchronous Security authorization-check API and use common in-process logic for Security admin endpoints.**
+13. **Implement Web BFF user-administration flows inside the Web module without moving authority into Web.**
+14. **Implement/align Audit Core Dealer assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
+15. **Migrate Audit Core human auth contract to Clerk JWT + synchronous Security AuthZ.**
+16. **Align DI direct-human protected access to Clerk JWT + synchronous Security AuthZ; DI remains outside onboarding.**
+17. **Retain the required machine/service auth path for Audit Core -> DI.**
+18. **Retire Security-issued human access-token flows and downstream USER-JWT assumptions.**
+19. **Run migration reconciliation and end-to-end authorization/lifecycle tests before production use.**
 
 ---
 
@@ -1910,7 +2275,7 @@ The following are deliberately not implemented or overdesigned in Phase 1:
 - custom human OAuth authorization-server implementation;
 - authorization permission-epoch/revocation cache design for a Verigence human token;
 - delegated user-on-behalf-of token exchange;
-- authorization-effective Groups / Group-derived RBAC pending confirmed target semantics;
+- arbitrary/custom Groups and Group-specific permission inheritance beyond the Phase-1 role-aligned Groups;
 - detailed SuperAdmin powers/bootstrap beyond the responsibilities explicitly confirmed in this document;
 - performance caching of Security allow decisions until measurement proves it necessary.
 
@@ -1929,7 +2294,7 @@ The following must be resolved before the relevant implementation area is finali
 7. **Outlet assignment:** whether Phase 1 needs any USER-to-Outlet business restriction in Audit Core beyond Dealer association.
 8. **Hard-delete retention:** exact non-PII actor tombstone/snapshot and retention period across Security/Audit records.
 9. **Internal caller authentication to Security AuthZ:** exact machine credential profile to use for Web BFF/backend-to-Security calls, reusing approved service identity capability rather than inventing a human-token scheme.
-10. **Groups:** final purpose and authorization semantics before any Phase-2 Group-derived role/permission behaviour is enabled.
+10. **Executive default permission bundle:** exact Audit Core + DI default permission seed for Executive.
 
 ---
 
@@ -1970,7 +2335,8 @@ SECURITY AUTHORIZATION
   USER must be ACTIVE
   Tenant context where applicable
   exactly one operating role per USER/Tenant
-  Tenant-specific permission bundle
+  role-aligned Group = same operating role collection
+  Tenant role bundle seeded from approved default and optionally customized
   required permission must be present
        |
        v
@@ -1981,4 +2347,4 @@ ALLOW / DENY
 
 The governing separation is:
 
-> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Audit Core decides Dealer/business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding. The Web BFF is part of the Web module and owns no Security authority.**
+> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. Audit Core decides Dealer/business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding. The Web BFF is part of the Web module and owns no Security authority.**
