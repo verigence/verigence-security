@@ -1,0 +1,127 @@
+name: Security v2 DEV Finalization Check
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/security-v2-dev-finalize.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  verify-dev-database:
+    name: Verify v2 DEV database and dry-run reconciliation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v6
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          psql --version
+
+      - name: Verify foundation and apply DI catalogue sync
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          context='security-v2-db-foundation'
+          post_status() {
+            local state="$1" description="$2"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state="$state" -f context="$context" -f description="$description" >/dev/null
+          }
+          trap 'post_status failure "Security v2 DEV database foundation verification failed"' ERR
+          post_status pending 'Waiting for Security v2 DEV foundation migrations'
+
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo 'MIGRATION_DATABASE_URL is not configured'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo 'MIGRATION_DATABASE_URL is not PostgreSQL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          echo "SECURITY_V2_DB=$db" >> "$GITHUB_ENV"
+
+          ready='f'
+          for attempt in $(seq 1 90); do
+            ready="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "
+              SELECT
+                to_regclass('security.role_definitions') IS NOT NULL
+                AND to_regclass('security.platform_role_permission_defaults') IS NOT NULL
+                AND to_regclass('security.tenant_role_permissions') IS NOT NULL
+                AND to_regclass('security.user_tenant_operating_roles') IS NOT NULL
+                AND to_regclass('security.user_admin_role_assignments') IS NOT NULL
+                AND to_regclass('security.phase1_test_identity') IS NOT NULL
+                AND to_regclass('security.user_deletion_requests') IS NOT NULL
+                AND to_regclass('security.deleted_user_tombstones') IS NOT NULL
+                AND (SELECT count(*) FROM security.role_definitions
+                     WHERE status='ACTIVE'
+                       AND role_key IN ('PC','TL','PM','CRM','Executive','TenantAdmin','ModuleAdmin','SuperAdmin','TestUser'))=9
+                AND (SELECT count(*) FROM security.platform_role_permission_defaults d
+                     JOIN security.permissions p ON p.permission_key=d.permission_key
+                     WHERE d.status='ACTIVE' AND p.status='ACTIVE'
+                       AND d.role_key IN ('PC','TL','PM','CRM','Executive'))=156;
+            ")" || true
+            [ "$ready" = 't' ] && break
+            sleep 10
+          done
+          [ "$ready" = 't' ] || { echo 'Timed out waiting for migrations 0011-0015'; exit 1; }
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -f migrations/0017_di_permission_catalogue_sync.sql >/dev/null
+          di_count="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM security.permissions
+            WHERE status='ACTIVE' AND permission_key IN (
+              'di.document.delete',
+              'di.unassigned_document.assign',
+              'di.subject_matching.write',
+              'di.platform.whatsapp.admin'
+            );
+          ")"
+          [ "$di_count" = '4' ] || { echo 'DI canonical permission catalogue sync verification failed'; exit 1; }
+
+          post_status success 'v2 schema, 156 role defaults and DI catalogue are ready'
+          trap - ERR
+
+      - name: Run private reconciliation report and dry-run migration 0016
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          context='security-v2-reconciliation'
+          post_status() {
+            local state="$1" description="$2"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state="$state" -f context="$context" -f description="$description" >/dev/null
+          }
+          trap 'post_status failure "Legacy RBAC reconciliation requires review before 0016"' ERR
+          post_status pending 'Running private reconciliation report and 0016 dry-run'
+
+          # Keep row-level DEV identity/role data out of public Actions logs.
+          psql "$SECURITY_V2_DB" -X -v ON_ERROR_STOP=1 \
+            -f scripts/security_v2_reconciliation_report.sql >/tmp/security-v2-reconciliation.txt
+
+          # Exercise every guard and write in 0016, but replace its final COMMIT with ROLLBACK.
+          # A successful dry-run proves the migration can execute deterministically without
+          # changing DEV data during this review step.
+          sed 's/^COMMIT;$/ROLLBACK;/' \
+            migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql \
+            >/tmp/0016-dry-run.sql
+          psql "$SECURITY_V2_DB" -X -v ON_ERROR_STOP=1 -f /tmp/0016-dry-run.sql >/dev/null
+
+          post_status success 'Reconciliation report ran; guarded migration 0016 dry-run is clean'
+          trap - ERR
