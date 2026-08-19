@@ -12,7 +12,9 @@ from verigence_security.api.module_catalog_schemas import (
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_human_dependencies import clerk_human_actor
 from verigence_security.core.errors import security_error
-from verigence_security.repositories.module_catalog_repository import ModuleCatalogRepository
+from verigence_security.repositories.v2_module_catalog_repository import (
+    V2AwareModuleCatalogRepository,
+)
 from verigence_security.services.module_catalog import (
     CatalogInput,
     ModuleCatalogError,
@@ -41,10 +43,8 @@ def list_modules(
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
-    # Catalogue discovery is readable by any ACTIVE Clerk-backed Verigence human.
-    # Machine actors cannot enter this human control-plane route.
     _ = actor
-    return ModuleCatalogService(ModuleCatalogRepository(session)).list_modules()
+    return ModuleCatalogService(V2AwareModuleCatalogRepository(session)).list_modules()
 
 
 @router.get("/{moduleKey}", response_model=ModuleCatalogResponse)
@@ -54,7 +54,9 @@ def get_module(
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _ = actor
-    catalog = ModuleCatalogService(ModuleCatalogRepository(session)).get_catalog(moduleKey.lower())
+    catalog = ModuleCatalogService(V2AwareModuleCatalogRepository(session)).get_catalog(
+        moduleKey.lower()
+    )
     if catalog is None:
         raise HTTPException(status_code=404, detail="Module not found")
     return catalog
@@ -66,9 +68,10 @@ def list_module_permissions(
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
-    # Permission discovery is an administrative view used by SuperAdmin/TenantAdmin/ModuleAdmin.
     _require_admin(actor)
-    catalog = ModuleCatalogService(ModuleCatalogRepository(session)).get_catalog(moduleKey.lower())
+    catalog = ModuleCatalogService(V2AwareModuleCatalogRepository(session)).get_catalog(
+        moduleKey.lower()
+    )
     if catalog is None:
         raise HTTPException(status_code=404, detail="Module not found")
     return list(catalog["permissions"])  # type: ignore[arg-type]
@@ -82,10 +85,8 @@ def put_module_catalog(
     actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    # Permission/module catalogue mutation is platform authority, not ModuleAdmin
-    # functional administration. Phase 1 reserves it for the one SuperAdmin.
     _require_super_admin(actor)
-    service = ModuleCatalogService(ModuleCatalogRepository(session))
+    service = ModuleCatalogService(V2AwareModuleCatalogRepository(session))
     try:
         return service.put_catalog(
             actor_user_id=actor.user_id,
