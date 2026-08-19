@@ -24,9 +24,9 @@ Implementation rules:
 3. Retire conflicting runtime paths without rewriting historical migrations.
 4. Keep historical/deferred tables and code where removal is not required for Phase 1.
 5. Do not invent business rules or permission keys.
-6. Human authentication remains Clerk first-party session JWT only.
-7. Security issues JWTs only for machine/service identities in the target Phase-1 model.
-8. Human authorization is synchronous and fail-closed.
+6. Human user creation, email verification and credential authentication use the Clerk Backend API **through Security only**; Web/Mobile, Web BFF, Audit Core and DI do not integrate with Clerk.
+7. Security issues the Verigence human access JWT after successful Clerk-backed authentication and separately issues JWTs for machine/service identities; human and machine token semantics remain distinct.
+8. Human authorization is synchronous and fail-closed; the Security human JWT proves authenticated USER identity but does not replace live Security authorization.
 9. Device/Geo/Schedule/VPN capabilities are retained but deferred from the active Phase-1 human authorization path.
 10. Administrative endpoints are human-admin-only and explicitly reject `SERVICE_INTEGRATION` callers.
 11. Permission classification into `FUNCTIONAL` versus `ADMIN` is deferred to Phase 2; Phase 1 keeps the current permission catalogue structure unchanged.
@@ -43,9 +43,11 @@ The following decisions are binding for Phase 1:
 - The canonical machine-token endpoint is `POST /security/v1/service/token`.
 - Existing `/oauth/token` machine-token behavior is deprecated and removed from the target active contract after migration.
 - Registered ServiceIntegration identities are intended for broad module-to-module access. Phase 1 does not maintain per-service functional permission grants.
-- Administrative/control-plane endpoints require a human Clerk-authenticated admin and reject `SERVICE_INTEGRATION` regardless of the module.
+- Administrative/control-plane endpoints require a human authenticated through the canonical Security human authentication boundary and reject `SERVICE_INTEGRATION` regardless of the module.
 - Audience restriction remains mandatory in machine JWTs to prevent a token issued for one module being replayed against another module.
 - Permission classification/segregation is deferred to Phase 2.
+- `/security/v1/auth/login` is the canonical human login facade for ordinary USERs and human administrative/test classifications; separate PlatformAdmin login/token issuance is not a target authentication model.
+- Human signup/login secrets remain transient through Security and must never be persisted, audited, traced, cached or logged.
 
 ### 1.2 Exact Clerk identities — CONFIRMED
 
@@ -71,21 +73,21 @@ They must be treated as immutable identity inputs. Do not substitute the previou
 |---|---|---|---|
 | `security.users` | Security human USER | Keep global USER; status model changes | **REUSE WITH MODIFICATION** |
 | `security.external_identities` | Clerk/DEV_MOCK subject mapping | Keep one Clerk subject -> one global USER | **REUSE AS-IS / MINOR MODIFICATION** |
-| `adapters/identity.py::ClerkJwtIdentityProvider` | Local Clerk JWT verification | Keep; align final Clerk key/JWKS configuration and required checks | **REUSE WITH MODIFICATION** |
-| `api/dependencies.py::identity_from_token` | Select Clerk/DEV mock identity verifier | Keep for Clerk human resource endpoints; DEV mock remains environment-limited | **REUSE WITH MODIFICATION** |
-| `services/clerk_credentials.py` human password brokerage | Security receives human password/TOTP and calls Clerk Backend API | Not part of target human login | **RETIRE FROM ACTIVE HUMAN FLOW** |
-| `api/routes/access.py::POST /security/v1/auth/login` | Clerk backend credential auth + Security human token issuance | Remove from active target human flow | **RETIRE FROM ACTIVE HUMAN FLOW** |
-| `services/platform_admin_token.py` | Security-issued human Platform Admin JWT | Human admins use Clerk JWT instead | **RETIRE FROM ACTIVE HUMAN FLOW** |
-| `api/routes/platform_admin.py::/auth/login` | Clerk credential auth + Security Platform Admin JWT | Replace with Clerk JWT resource authentication | **RETIRE/REWIRE** |
+| `adapters/identity.py::ClerkJwtIdentityProvider` | Local Clerk JWT verification | Not part of target Verigence client/resource-server human authentication; retain only if needed historically/provider-internally and remove from active human route dependency | **RETIRE FROM ACTIVE HUMAN FLOW / KEEP HISTORICALLY** |
+| `api/dependencies.py::identity_from_token` | Select Clerk/DEV mock identity verifier | Rewire protected human routes to validate the Security-issued human access JWT and resolve the global USER; DEV mock remains environment-limited | **REUSE WITH MODIFICATION** |
+| `services/clerk_credentials.py` human password brokerage | Security receives human password/TOTP and calls Clerk Backend API | Retain as the Security-only Clerk credential-verification boundary; keep secrets transient/redacted and align Phase-1 no-MFA behavior | **REUSE WITH MODIFICATION** |
+| `api/routes/access.py::POST /security/v1/auth/login` | Clerk backend credential auth + Security human token issuance | Retain as the canonical human login facade; align returned human token/session to the target identity-only/live-AuthZ model | **REUSE WITH MODIFICATION** |
+| `services/platform_admin_token.py` | Separate Security-issued human Platform Admin JWT model | Do not keep a separate PlatformAdmin authentication/token model; admins use the canonical Security human login/token boundary | **RETIRE DUPLICATE HUMAN AUTH MODEL** |
+| `api/routes/platform_admin.py::/auth/login` | Separate Clerk credential auth + Platform Admin JWT | Retire as duplicate authentication surface; use canonical `/security/v1/auth/login` plus Security authorization classification | **RETIRE ACTIVE DUPLICATE ROUTE** |
 
 ### 2.2 Global USER onboarding and lifecycle
 
 | Current component | Current purpose | Target disposition | Classification |
 |---|---|---|---|
 | `platform_user_onboarding_settings` | Platform-global onboarding key | Retain | **REUSE** |
-| `platform_user_onboarding_requests` | Global onboarding workflow | Retain; align status transitions and first-party Clerk flow | **REUSE WITH MODIFICATION** |
-| `GlobalUserOnboardingService` | Global USER lifecycle/onboarding | Strong base; modify credential flow, REJECTED, deletion, transition authority | **REUSE WITH MODIFICATION** |
-| Current password/OTP self-onboarding facade | Security-mediated Clerk signup | Replace with Clerk-owned signup + authenticated bind | **RETIRE/REPLACE ACTIVE FLOW** |
+| `platform_user_onboarding_requests` | Global onboarding workflow | Retain; align status transitions while preserving Security-mediated Clerk creation/email verification | **REUSE WITH MODIFICATION** |
+| `GlobalUserOnboardingService` | Global USER lifecycle/onboarding | Strong base; modify REJECTED, deletion, transition authority while retaining Security-owned Clerk integration | **REUSE WITH MODIFICATION** |
+| Current password/OTP self-onboarding facade | Security-mediated Clerk signup/email verification | Retain as target integration shape; remove only behavior that conflicts with the v2 lifecycle, not the Security-only Clerk boundary | **REUSE WITH MODIFICATION** |
 | `GET /platform/users` | Global USER listing | Retain and extend filtering/search/pagination/detail | **REUSE WITH MODIFICATION** |
 | Current USER status route | ACTIVE/SUSPENDED/DISABLED/EXITED style lifecycle | Replace with approved PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED transition policy | **REUSE WITH MODIFICATION** |
 | Current `EXITED` state | Legacy terminal state | Not part of target Phase-1 canonical statuses | **RETAIN HISTORICALLY; RETIRE FROM NEW FLOW** |
@@ -95,7 +97,7 @@ They must be treated as immutable identity inputs. Do not substitute the previou
 | Current component | Current purpose | Target disposition | Classification |
 |---|---|---|---|
 | `security.tenants` | Tenant source of truth | Retain | **REUSE** |
-| `PlatformTenantService` and Tenant CRUD | Platform Tenant lifecycle | Retain; switch human auth dependency to Clerk + in-process Security AuthZ | **REUSE WITH MODIFICATION** |
+| `PlatformTenantService` and Tenant CRUD | Platform Tenant lifecycle | Retain; switch human auth dependency to canonical Security human JWT + in-process Security AuthZ | **REUSE WITH MODIFICATION** |
 | `security.modules` | Registered module catalogue | Retain | **REUSE** |
 | `security.permissions` | Canonical permission registry | Retain unchanged in Phase 1 | **REUSE** |
 | `ModuleCatalogService` | Register/update module permissions/templates | Retain | **REUSE WITH MODIFICATION** |
@@ -121,7 +123,7 @@ They must be treated as immutable identity inputs. Do not substitute the previou
 
 | Current component | Current purpose | Target disposition | Classification |
 |---|---|---|---|
-| `platform_roles` | Platform role catalogue | Reuse only where aligned; no human Security JWT dependency | **REUSE WITH MODIFICATION** |
+| `platform_roles` | Platform role catalogue | Reuse only where aligned; human admins authenticate through the canonical Security human JWT | **REUSE WITH MODIFICATION** |
 | `platform_user_role_assignments` | Platform role assignment | Useful base for SuperAdmin migration | **REUSE PARTIALLY** |
 | `initial_super_admin.py` | Exact Clerk subject provisioning | Strongly aligned with one Phase-1 SuperAdmin | **REUSE WITH MODIFICATION** |
 | SuperAdmin provisioning script | Operator provisioning entrypoint | Retain using confirmed exact Clerk subject | **REUSE** |
@@ -139,14 +141,14 @@ They must be treated as immutable identity inputs. Do not substitute the previou
 | `principal_permission_grants` | Tenant-scoped machine permission grants | Not used by target Phase-1 ServiceIntegration | **RETIRE FROM TARGET SERVICE AUTHZ** |
 | `/oauth/token` client_credentials flow | Existing machine token issuance | Reuse underlying implementation patterns only | **DEPRECATE ENDPOINT / REUSE INTERNALS** |
 | `/oauth/token` token-exchange grant | USER token delegation | Not required Phase 1 | **RETIRE/DEFER** |
-| `TokenService` RSA signing/JWKS | Security-signed tokens | Retain signing/JWKS; create machine-only target claim model | **REUSE WITH MODIFICATION** |
+| `TokenService` RSA signing/JWKS | Security-signed tokens | Retain signing/JWKS for both the canonical human access JWT and the distinct machine ServiceIntegration claim model | **REUSE WITH MODIFICATION** |
 | Tenant-scoped machine `access_sessions` | Legacy service sessions | Not required for target platform-global machine auth | **RETAIN HISTORICALLY / DEFER** |
 
 ### 2.7 Device / Geo / Schedule / VPN
 
 Keep existing tables, code, administration surfaces and tests where they validate the deferred feature itself.
 
-Do not invoke these as mandatory checks in the Phase-1 Clerk-JWT + synchronous Security authorization path.
+Do not invoke these as mandatory checks in the Phase-1 Security-human-JWT + synchronous Security authorization path.
 
 Classification: **DEFER FROM ACTIVE PHASE-1 HUMAN AUTHORIZATION; DO NOT DELETE**.
 
@@ -154,42 +156,51 @@ Classification: **DEFER FROM ACTIVE PHASE-1 HUMAN AUTHORIZATION; DO NOT DELETE**
 
 ## 3. Target runtime component model
 
-### 3.1 Human request to Security
+### 3.1 Human authentication and request to Security
 
 ```text
 Web/Mobile
    |
-   | Clerk session JWT
+   | login credentials to /security/v1/auth/login
+   v
+Security
+   |
+   +-- authenticate credentials through Clerk Backend API
+   +-- Clerk subject -> global USER
+   +-- USER/session policy checks
+   +-- issue Security human access JWT
+   |
+   | later protected Security request with Security human JWT
    v
 Security API
    |
-   +-- validate Clerk JWT locally
-   +-- Clerk sub -> global USER
+   +-- validate Security human JWT
+   +-- resolve global USER
    +-- USER status check
    +-- in-process Security authorization
    +-- execute Security operation
 ```
 
-Security does not call its own `/authorization/check` endpoint.
+Security does not call its own `/authorization/check` endpoint for Security-owned human/admin operations.
 
 ### 3.2 Human request to Audit Core or DI
 
 ```text
 Human
    |
-   | Clerk session JWT
+   | Security-issued human access JWT
    v
 Audit Core / DI
    |
-   +-- validate Clerk JWT locally
-   +-- extract trusted Clerk subject
+   +-- validate Security JWT locally using Security trusted signing/JWKS
+   +-- extract trusted global Verigence USER identity
    |
    | backend's ServiceIntegration JWT, aud=security
    v
 Security /authorization/check
    |
    +-- validate registered machine caller
-   +-- resolve Clerk subject -> USER
+   +-- resolve supplied USER identity
    +-- USER must be ACTIVE
    +-- resolve Tenant/admin/test authorization
    +-- evaluate requested human permission
@@ -243,7 +254,7 @@ These endpoints:
 
 ```text
 require actor_type = USER
-+ Clerk authentication
++ valid Security-issued human access JWT
 + appropriate human admin classification/scope
 ```
 
@@ -560,23 +571,23 @@ Formal permission classification/segregation is a Phase-2 item.
 
 ### 5.1 Resolve global USER
 
-Input:
+Runtime protected-request input:
 
 ```text
-provider = CLERK
-provider_subject = Clerk sub
+user_id = global Verigence USER ID from a validated Security-issued human access JWT
 ```
 
 Rules:
 
-1. active external identity exists;
-2. linked global USER exists;
-3. retained principal status is ACTIVE where applicable;
-4. USER status must be ACTIVE for protected business authorization.
+1. global USER exists;
+2. retained principal status is ACTIVE where applicable;
+3. USER status must be ACTIVE for protected business authorization.
+
+The Clerk external identity mapping is resolved/validated inside Security during onboarding/login and lifecycle operations; Audit Core/DI do not receive or trust Clerk subjects for runtime authorization.
 
 ### 5.2 Resolve SuperAdmin
 
-Exact Clerk subject:
+Exact Clerk subject used by Security provisioning/mapping:
 
 ```text
 user_3I7HFuZZiFC9K2muiweXFRoeoud
@@ -632,24 +643,26 @@ For ordinary operating USER:
 
 ## 6. Human USER lifecycle implementation
 
-### 6.1 First-party onboarding
+### 6.1 Security-mediated onboarding through Clerk Backend API
 
 Target sequence:
 
 ```text
-1. Client uses approved global onboarding gate/key.
-2. Security creates global USER=PENDING + onboarding request; no password handling.
-3. Employee completes Clerk first-party signup/authentication directly with Clerk.
-4. Authenticated client calls Security bind operation with Clerk session JWT.
-5. Security validates Clerk JWT and expected identity/email relationship.
-6. Security binds Clerk subject to the existing global USER.
-7. USER remains PENDING.
+1. Client submits approved global onboarding gate/key + identity data to Security.
+2. Security validates the onboarding gate and duplicate identity constraints.
+3. Security creates/co-ordinates the Clerk human identity using Clerk Backend APIs.
+4. Security initiates the approved email-code verification flow through Clerk.
+5. Client submits the email verification code to Security.
+6. Security verifies the code through Clerk Backend APIs and validates the expected identity/email relationship.
+7. Security records/binds the Clerk subject to the global USER and keeps USER=PENDING.
 8. SuperAdmin lists/reviews PENDING USER.
 9. SuperAdmin selects ACTIVE or REJECTED.
 10. Tenant/role assignment occurs separately.
 ```
 
-Reuse the existing global onboarding/bind logic where compatible; remove Security-mediated password/TOTP ownership from the active flow.
+Reuse the existing global onboarding and Security-mediated Clerk email-OTP implementation where compatible. Do **not** replace it with direct client Clerk signup/session JWT or a client-driven authenticated bind flow.
+
+Password/OTP/TOTP values are transient request secrets and must never be persisted, audited, traced, cached or logged.
 
 ### 6.2 Status-transition authority matrix
 
@@ -671,7 +684,7 @@ Suspension status is global even when the authority to initiate it came from an 
 For `SUSPENDED` or `DISABLED`:
 
 1. establish Security denial state;
-2. revoke remaining legacy Security USER sessions if any;
+2. revoke/terminate Security USER sessions/tokens according to retained session/token capability;
 3. terminate/ban Clerk sessions/account state as appropriate for defense in depth;
 4. if Clerk synchronization fails, retain local non-ACTIVE state and fail closed.
 
@@ -693,7 +706,7 @@ Coordinator:
 3. remove/retire Clerk identity/account as required;
 4. create FK-independent tombstone/evidence;
 5. end live operating/admin/test assignments;
-6. revoke external identity mapping and remaining live sessions/credentials;
+6. revoke external identity mapping and remaining live Security sessions/tokens;
 7. hard-delete live USER/principal rows in safe order;
 8. record completion outcome;
 9. release email for reuse;
@@ -794,7 +807,7 @@ Admin assignment and operating-role assignment use the same invariant checker in
 
 ### 8.5 Machine exclusion from administrative APIs
 
-Every administrative/control-plane route must verify human actor type before administrative authorization.
+Every administrative/control-plane route must verify human actor type from a valid Security-issued human access JWT before administrative authorization.
 
 `SERVICE_INTEGRATION` is rejected even if its JWT is otherwise valid for the Security/module audience.
 
@@ -1011,7 +1024,7 @@ aud = security
 
 No new `security.authorization.check` permission key is created in Phase 1.
 
-The machine identity establishes that the human authorization context came from a trusted registered backend; Security then evaluates the human USER's permission.
+The machine identity establishes that the human authorization context came from a trusted registered backend; Security then evaluates the human USER's permission using the global USER ID derived by the caller from a validated Security human JWT.
 
 ### 11.11 External/unregistered systems
 
@@ -1031,23 +1044,33 @@ DI/Audit Core/Security reject:
 
 ## 12. Target API/OpenAPI design
 
-### 12.1 Human Security API authentication
+### 12.1 Human authentication APIs and protected Security API authentication
 
-Protected human Security APIs:
+Canonical human login:
 
 ```text
-Authorization: Bearer <Clerk session JWT>
+POST /security/v1/auth/login
+```
+
+Security receives the login credential request, verifies credentials through Clerk Backend APIs, resolves the Clerk subject to the global USER, applies the approved USER/session checks and returns the Security-issued human access token/session response.
+
+Protected human Security APIs then use:
+
+```text
+Authorization: Bearer <Security-issued human access JWT>
 ```
 
 Dependency:
 
 ```text
-validate Clerk JWT
- -> resolve global USER
+validate Security human JWT
+ -> resolve global USER from trusted token identity
  -> validate USER status
  -> require human actor
  -> evaluate admin/operating/test permission and scope
 ```
+
+No protected Verigence module requires a Clerk JWT or Clerk key.
 
 ### 12.2 USER APIs
 
@@ -1138,7 +1161,7 @@ Request:
 
 ```json
 {
-  "clerkSubject": "<subject extracted from a Clerk JWT already validated by caller>",
+  "userId": "<global USER ID extracted from a Security human JWT already validated by caller>",
   "tenantId": "<tenant UUID or null for supported platform context>",
   "permissionKey": "<registered human permission>"
 }
@@ -1148,7 +1171,7 @@ Security:
 
 1. authenticates ServiceIntegration caller;
 2. validates audience `security`;
-3. resolves Clerk subject to global USER;
+3. resolves the supplied global USER ID;
 4. requires ACTIVE human USER;
 5. evaluates current human classification/scope/Tenant bundle;
 6. returns allow/deny.
@@ -1169,13 +1192,26 @@ Response includes the signed bearer token and 4-hour expiry metadata.
 
 `/oauth/token` is deprecated from the target contract.
 
+### 12.10 Onboarding/email verification APIs
+
+Target Security-only Clerk integration keeps the Verigence-facing onboarding facade:
+
+```text
+POST /security/v1/onboarding/users
+POST /security/v1/onboarding/users/{signupAttemptId}/verify-email
+POST /security/v1/onboarding/users/{signupAttemptId}/resend-email-code
+POST /security/v1/auth/precheck    # optional existing UX gate
+```
+
+There is no target client-driven Clerk session bind endpoint.
+
 ---
 
 ## 13. Endpoint caller policy matrix
 
 | Capability | Human USER | ServiceIntegration | Main Phase-1 rule |
 |---|---:|---:|---|
-| Human onboarding/bind | Yes | No | Clerk-authenticated human flow |
+| Human onboarding/email verification/login | Yes | No | Verigence client -> Security -> Clerk Backend API only |
 | Approve/reject PENDING USER | SuperAdmin | No | human admin only |
 | Suspend USER | Executive/TenantAdmin/SuperAdmin | No | human admin/Executive rule |
 | Reactivate USER | SuperAdmin | No | human admin only |
@@ -1213,10 +1249,10 @@ Historical migrations remain unchanged.
 11. create TestTenant through standard Tenant service and bind confirmed TestUser;
 12. reconcile existing machine principals/credentials as platform-global ServiceIntegration identities;
 13. implement new `/security/v1/service/token` using reused credential/signing internals;
-14. implement synchronous `/authorization/check`;
-15. migrate human Security routes to Clerk JWT dependencies;
+14. implement synchronous `/authorization/check` using global USER identity derived from validated Security human tokens;
+15. retain/align the canonical `/security/v1/auth/login` Security-only Clerk Backend authentication facade and Security human token issuance;
 16. cut target RBAC reads to the new role model;
-17. deprecate `/oauth/token` and retire old human Security token routes after dependent callers migrate;
+17. deprecate `/oauth/token` and retire duplicate/legacy human authentication/token routes such as separate PlatformAdmin token/login/bootstrap paths after dependent callers migrate; do not retire canonical `/security/v1/auth/login`;
 18. leave historical/deferred tables intact.
 
 ### 14.2 Mandatory reconciliation report
@@ -1250,7 +1286,7 @@ Keep:
 
 Do not require these controls in:
 
-- Clerk JWT authentication;
+- canonical Security human login/token issuance;
 - Security in-process human authorization;
 - `/authorization/check`;
 - operating/admin/test permission resolution.
@@ -1270,23 +1306,23 @@ No code is authorized by this blueprint yet.
 **Do not add:** service permission/audience grant tables for Phase 1.  
 **Tests:** constraints, indexes, migration-up fixtures.
 
-### Step 2 — Clerk human dependency
+### Step 2 — Security-only Clerk human authentication + Security human token
 
-**Reuse:** `api/dependencies.py`, `adapters/identity.py`.  
-**Modify:** protected human routes to use Clerk JWT directly.  
-**Retire active use:** Security human credential facade.  
-**Tests:** signature, issuer, expiry, azp, unmapped subject.
+**Reuse:** `services/clerk_credentials.py`, existing `/security/v1/auth/login` flow, Security token signing/JWKS/session primitives, external identity mapping.  
+**Modify:** keep credentials transient/redacted; align one canonical human login path for all human classifications; human token identifies the global USER while authorization remains live in Security.  
+**Retire active use:** direct Clerk-session-JWT route dependencies and separate PlatformAdmin login/token path.  
+**Tests:** successful/failed Clerk-backed credential verification, no secret persistence/logging, correct global USER binding, non-ACTIVE USER denial, valid/invalid Security human JWT validation.
 
-### Step 3 — USER lifecycle
+### Step 3 — USER lifecycle and onboarding
 
-**Reuse:** global onboarding/user service.  
-**Modify:** first-party bind, PENDING/REJECTED, transition authority.  
-**Tests:** all allowed/denied transitions.
+**Reuse:** global onboarding/user service and existing Security-mediated Clerk email OTP integration.  
+**Modify:** PENDING/REJECTED, transition authority and lifecycle policy; do not introduce direct client Clerk signup/bind.  
+**Tests:** onboarding gate, duplicate handling, Clerk creation/verification failures, resend/verify flow, PENDING after verification, all allowed/denied lifecycle transitions.
 
 ### Step 4 — Deletion coordinator
 
 **New:** deletion request/tombstone/coordinator.  
-**Reuse:** Clerk lifecycle adapter and Security audit patterns.  
+**Reuse:** Clerk lifecycle adapter, Security token/session revocation and Security audit patterns.  
 **Tests:** makers, global DISABLED, hard-delete SuperAdmin-only, 21-day retention.
 
 ### Step 5 — Operating roles
@@ -1332,24 +1368,32 @@ No code is authorized by this blueprint yet.
 
 **Add:** `/security/v1/authorization/check`.  
 **Caller:** ServiceIntegration with `aud=security`.  
+**Human context:** global USER ID derived from a validated Security human JWT, never an arbitrary client-supplied identity.  
 **No new machine permission key.**  
 **Tests:** valid backend/human allow, inactive USER deny, arbitrary browser deny, wrong audience deny.
 
 ### Step 12 — Human-admin endpoint gating
 
-**Modify:** all administrative Security routes to require human Clerk actor and appropriate admin scope.  
+**Modify:** all administrative Security routes to require a valid Security-issued human access JWT and appropriate admin scope.  
 **Explicitly reject:** ServiceIntegration.  
 **Tests:** machine token cannot create Tenant, approve USER, assign role, change role bundle or manage service credentials.
 
-### Step 13 — Retire old human and OAuth contracts
+### Step 13 — Retire only conflicting legacy human and OAuth contracts
 
 Retire active use of:
 
-- Security-issued human access JWT;
-- PlatformAdmin Security JWT;
-- human `/auth/login` Security token path;
+- direct Clerk session JWT as the Verigence client/resource-server human token;
+- separate PlatformAdmin Security JWT/login/bootstrap path;
+- legacy/deprecated human `access_sessions` bridge where it duplicates the canonical login/session model;
 - USER token exchange;
 - old `/oauth/token` machine endpoint after migration.
+
+Retain and align:
+
+- canonical human `POST /security/v1/auth/login`;
+- Security-issued human access JWT/session model;
+- Security-only Clerk Backend integration for human creation/authentication;
+- Security signing/JWKS required by downstream validation.
 
 Keep historical code/migrations until cleanup is separately approved.
 
@@ -1359,12 +1403,16 @@ Keep historical code/migrations until cleanup is separately approved.
 
 ### 17.1 Human authentication
 
-- valid Clerk JWT accepted;
-- expired/invalid Clerk JWT denied;
-- invalid issuer/signature denied;
-- unauthorized party denied;
-- unmapped subject denied for protected operations;
-- DEV mock only in permitted environments.
+- Web/Mobile/Audit Core/DI contain no direct Clerk authentication dependency in the Security contract;
+- Security successfully authenticates valid human credentials through Clerk Backend API;
+- invalid human credentials are denied;
+- password/OTP/TOTP values are not persisted, audited, traced, cached or logged;
+- successful login resolves the correct Clerk subject -> global USER mapping;
+- non-ACTIVE USER cannot obtain/use protected Verigence access merely because Clerk credential verification succeeded;
+- valid Security-issued human JWT is accepted by protected Security/resource-server validation;
+- expired/invalid Security human JWT is denied;
+- invalid issuer/signature is denied;
+- DEV mock remains environment-limited.
 
 ### 17.2 USER lifecycle
 
@@ -1438,9 +1486,10 @@ Keep historical code/migrations until cleanup is separately approved.
 
 ### 17.9 Authorization check
 
-- valid backend `aud=security` + active human + permission -> allow;
+- valid backend `aud=security` + validated Security-human-token USER + active USER + permission -> allow;
 - inactive human -> deny;
 - arbitrary browser without machine identity -> deny;
+- arbitrary client-supplied USER identity is not trusted;
 - wrong audience -> deny;
 - invalid human permission -> deny/error;
 - role permission absent -> deny;
@@ -1457,15 +1506,16 @@ Regression tests prove Device/Geo/Schedule/VPN code remains available while targ
 ## 18. Operational/failure rules
 
 1. Security authorization unavailable -> protected backend human operation fails closed.
-2. Clerk JWT invalid -> deny before human authorization.
-3. Machine token invalid/wrong audience -> deny before target operation.
-4. ServiceIntegration never bypasses human-admin-only endpoint actor-type checks.
-5. USER non-ACTIVE status affects the next synchronous authorization decision immediately.
-6. Tenant role-bundle update affects subsequent decisions without human token reissue.
-7. Audit Core remains responsible for Dealer/Outlet business scope.
-8. DI remains outside onboarding.
-9. No plaintext service credential or JWT is logged.
-10. TestTenant uses one canonical generated Security Tenant ID across modules.
+2. Clerk Backend credential/user operation failure -> Security fails the corresponding onboarding/login operation and does not report false success.
+3. Security human JWT invalid/expired/untrusted -> protected human request denied before authorization.
+4. Machine token invalid/wrong audience -> deny before target operation.
+5. ServiceIntegration never bypasses human-admin-only endpoint actor-type checks.
+6. USER non-ACTIVE status affects the next synchronous authorization decision immediately even if a human JWT remains cryptographically valid.
+7. Tenant role-bundle update affects subsequent decisions without human token reissue.
+8. Audit Core remains responsible for Dealer/Outlet business scope.
+9. DI remains outside onboarding and has no Clerk integration.
+10. No plaintext human credential, OTP, service credential or JWT is logged.
+11. TestTenant uses one canonical generated Security Tenant ID across modules.
 
 ---
 
@@ -1473,9 +1523,10 @@ Regression tests prove Device/Geo/Schedule/VPN code remains available while targ
 
 ### Retire from active Phase 1
 
-- Security-issued human access JWT;
-- PlatformAdmin Security JWT;
-- Security-owned human credential login facade;
+- direct Web/Mobile Clerk SDK/API/session-JWT authentication path;
+- direct Clerk JWT validation in Audit Core/DI/Web BFF;
+- separate PlatformAdmin Security JWT/login/bootstrap authentication path;
+- duplicate/legacy human access-session bridge that is not the canonical Security human login/session path;
 - USER token exchange;
 - arbitrary Tenant operating-role creation;
 - additive/multiple operating roles;
@@ -1491,7 +1542,7 @@ Regression tests prove Device/Geo/Schedule/VPN code remains available while targ
 - Geo/geofence mandatory gate;
 - Schedule mandatory gate;
 - VPN/network-risk mandatory gate;
-- human authorization-version/token invalidation design;
+- any new human-token authorization cache/projection design beyond the retained Security session/token primitives;
 - mTLS;
 - distributed authorization projection/cache;
 - additional SuperAdmins;
@@ -1515,6 +1566,15 @@ TestUser Clerk subject
 TestTenant tenant_id
 = generated by standard Security Tenant creation using UUIDv4
 
+Human Clerk integration boundary
+= Security only; no direct Web/Mobile/Web BFF/Audit Core/DI Clerk integration
+
+Canonical human login endpoint
+= POST /security/v1/auth/login
+
+Human token issuer
+= Verigence Security after Clerk-backed authentication
+
 ServiceIntegration token TTL
 = 4 hours
 
@@ -1531,7 +1591,7 @@ Authorization-check machine permission key
 = no new permission key; valid ServiceIntegration + aud=security is sufficient
 
 Administrative endpoint rule
-= human-admin-only; SERVICE_INTEGRATION rejected
+= Security-authenticated human admin only; SERVICE_INTEGRATION rejected
 
 Permission classification
 = unchanged in Phase 1; formal segregation deferred to Phase 2
@@ -1542,9 +1602,10 @@ Still implementation-level but not a business/design input from the user:
 1. system-seeded TestTenant `tenantCode` and `tenantName` values must use the existing Tenant validation/convention; no user-supplied UUID is required;
 2. service credential rotation/expiry operations should reuse existing credential lifecycle capability and can be finalized as an operational setting without altering the architecture;
 3. concrete Executive default permission list must be generated from the already registered Audit Core/DI keys and reviewed before the seed migration is committed;
-4. current `dev` data must be reconciled before deterministic role migration.
+4. current `dev` data must be reconciled before deterministic role migration;
+5. the concrete configured human access-token/session lifetime and revocation/version behavior must be read from the retained implementation and confirmed during implementation correction rather than invented here.
 
-No implementation should invent new business permissions to resolve these items.
+No implementation should invent new business permissions or authentication semantics to resolve these items.
 
 ---
 
@@ -1554,7 +1615,7 @@ No implementation should invent new business permissions to resolve these items.
 1. Approve this implementation blueprint
 2. Run current dev reconciliation report
 3. Add additive target schema
-4. Add Clerk-JWT human dependency + common human authorization resolver
+4. Align Security-only Clerk Backend onboarding/login + canonical Security human JWT/session boundary
 5. Implement global USER lifecycle and transition policy
 6. Implement deletion request/hard-delete/tombstone
 7. Implement global role definitions + one operating role/User/Tenant
@@ -1566,14 +1627,14 @@ No implementation should invent new business permissions to resolve these items.
 13. Bind confirmed TestUser and PC-equivalent TestTenant behavior
 14. Refactor machine JWT claim/signing model for platform-global ServiceIntegration
 15. Implement POST /security/v1/service/token with 4-hour TTL
-16. Implement POST /security/v1/authorization/check
+16. Implement POST /security/v1/authorization/check using USER identity from validated Security human JWTs
 17. Add human-admin-only actor gate to administrative endpoints
-18. Rewire human Security admin/Tenant/module APIs to Clerk JWT + in-process AuthZ
+18. Rewire human Security admin/Tenant/module APIs to the canonical Security human JWT + in-process AuthZ
 19. Migrate clean legacy role/admin records into target structures
 20. Cut target runtime authorization to new model
-21. Deprecate /oauth/token and retire old Security human token/login/token-exchange active paths
+21. Deprecate /oauth/token and retire only duplicate/incorrect human authentication routes (direct-Clerk assumptions, separate PlatformAdmin login/bootstrap, legacy access-session bridge); retain /security/v1/auth/login
 22. Run Security end-to-end tests
-23. Only after Security is proven, align Audit Core/DI contracts in their own separately approved changes
+23. Only after Security is proven, align Audit Core/DI contracts in their own separately approved changes without introducing Clerk integration outside Security
 ```
 
 ---
@@ -1592,6 +1653,8 @@ The following no longer block implementation planning:
 - SuperAdmin identity;
 - TestUser identity;
 - TestTenant UUID selection;
+- Security-only Clerk integration boundary;
+- canonical human login endpoint and Security human-token ownership;
 - ServiceIntegration TTL;
 - service-token endpoint naming;
 - authorization-check machine permission naming;
@@ -1600,9 +1663,12 @@ The following no longer block implementation planning:
 
 Security v2 Phase-1 is implementation-complete only when:
 
-- Clerk session JWT is the active human authentication token;
-- Security no longer issues active human access JWTs;
-- synchronous Security human authorization enforces the target role/admin/test model;
+- Web/Mobile, Web BFF, Audit Core and DI have no direct Clerk authentication dependency in the Security contract;
+- Security alone performs Clerk Backend user creation/email verification/credential authentication;
+- `/security/v1/auth/login` is the canonical active human login path for all human classifications;
+- Security issues the active Verigence human access JWT/session after successful Clerk-backed authentication;
+- downstream protected human resource servers validate Security human JWTs, not Clerk JWTs;
+- synchronous Security human authorization enforces the target role/admin/test model and does not trust embedded human permission claims as the source of truth;
 - one operating role/User/Tenant and one PM/Tenant are enforced;
 - role-aligned Groups are non-additive;
 - exact SuperAdmin identity is active and has every ACTIVE registered permission;
@@ -1617,4 +1683,5 @@ Security v2 Phase-1 is implementation-complete only when:
 - administrative endpoints reject `SERVICE_INTEGRATION`;
 - unregistered/external systems cannot obtain or use a valid target machine token;
 - Device/Geo/Schedule/VPN capabilities remain available but are not mandatory Phase-1 authorization gates;
-- legacy Tenant role/Group/human-token state no longer contributes to the target runtime authorization result.
+- legacy Tenant role/Group state no longer contributes to the target runtime authorization result;
+- duplicate/incorrect human authentication paths no longer participate in runtime, while the canonical Security human login/token boundary remains active.
