@@ -79,6 +79,10 @@ Phase 1:
 - Audit Core, DI and the Web BFF do **not** call Clerk or validate Clerk session tokens;
 - human signup, email verification and login requests reach Security through Verigence APIs;
 - Security calls the Clerk Backend API for human user creation and credential/email verification;
+- the canonical human login request requires only `identifier` and `password`; `tenantId` is not part of login because login establishes the global USER identity rather than a Tenant authorization context;
+- the canonical employee signup request captures `firstName`, `lastName`, email, mobile number and password, while the user-facing **Verigence Identifier** is carried through the existing platform-global onboarding-key contract (`X-Onboarding-Key`);
+- a client may send optional Device ID and Geo request-context headers on signup/login, but Phase 1 does not require them, persist them, bind them to onboarding/login, or use them as authentication/authorization gates;
+- Phase 1 does not require TOTP/MFA as part of the canonical login contract;
 - passwords, email OTP values and future authentication secrets are transient request secrets and are never persisted, audited, traced, cached or logged by Verigence;
 - after successful Clerk-backed authentication, Security resolves the Clerk subject to the global Verigence USER and issues the Verigence human access token/session used by Verigence clients and resource servers;
 - Security does not make Clerk authoritative for Verigence roles or permissions.
@@ -543,7 +547,8 @@ Conceptually:
 ```text
 Web/Mobile
    |
-   | identifier + password/(approved future factor)
+   | identifier + password
+   | optional Device/Geo request-context headers may also be present
    v
 Security
    |
@@ -554,10 +559,15 @@ Clerk credential verification
    v
 Security resolves Clerk subject -> global Verigence USER
    |
-   +-- USER/session policy checks
+   +-- USER must be ACTIVE
+   +-- no Tenant, Device, Geo, Schedule or VPN gate in Phase-1 login
    v
 Security issues Verigence human access JWT
 ```
+
+`tenantId` is not accepted as part of the canonical login contract. Tenant context is supplied later to the relevant protected operation and is evaluated through live Security authorization.
+
+Optional Device ID and Geo request-context headers are allowed to arrive from the client, but Phase 1 does not persist them, link them to login, or use them to decide authentication. Their absence does not block login.
 
 Human credentials are transient request secrets. Security may pass them to Clerk Backend APIs over TLS for verification but must not persist, hash, audit, trace, cache or log them.
 
@@ -592,6 +602,8 @@ Security's own human-facing/admin APIs validate the Security-issued human access
 Clerk authenticates human credentials only behind Security's backend integration.
 
 Security issues the human access JWT used inside Verigence after successful Clerk-backed authentication and USER/session policy checks.
+
+The canonical human JWT identifies the global USER and is not bound to a `tenantId` at login. Tenant authorization is evaluated later from current Security state.
 
 The target does not retain separate login/token models for ordinary USER versus PlatformAdmin; authentication is one human Security boundary and role/classification is an authorization concern.
 
@@ -636,6 +648,8 @@ It does not assign:
 
 The existing platform-global onboarding-key concept is compatible with global USER onboarding and can remain the Phase-1 submission gate unless separately changed.
 
+The user-facing name is **Verigence Identifier**. The existing Security API carries this value through `X-Onboarding-Key`; this is an implementation/API name and does not change the user-facing label.
+
 Possession of the onboarding key grants no application role, Tenant authorization or business access.
 
 ### 9.3 Target onboarding sequence
@@ -643,7 +657,11 @@ Possession of the onboarding key grants no application role, Tenant authorizatio
 ```text
 1. Employee enters the global onboarding journey through Web/Mobile.
 
-2. Web/Mobile submits identity/onboarding data to Security through the Verigence API.
+2. Web/Mobile submits first name, last name, email ID, mobile number and
+   password to Security through the Verigence API, with the Verigence
+   Identifier supplied through the existing X-Onboarding-Key contract.
+   Optional Device ID / Geo request-context headers may also be present,
+   but they are not required or persisted in Phase 1.
 
 3. Security validates the permitted platform-global onboarding gate
    and duplicate global identity constraints.
@@ -677,7 +695,9 @@ The target must preserve these invariants:
 
 - Web/Mobile never calls Clerk directly;
 - only Security holds Clerk backend integration secrets;
-- password/OTP/TOTP values are transient and never persisted, audited, traced, cached or logged;
+- password/OTP values are transient and never persisted, audited, traced, cached or logged;
+- TOTP/MFA is not required by the Phase-1 signup/login contract;
+- optional Device ID / Geo request context does not become an onboarding/login persistence or access gate in Phase 1;
 - Clerk verification success does not itself activate the Verigence USER;
 - Security records the Clerk subject-to-USER mapping and keeps the USER `PENDING` until approval.
 
@@ -2511,6 +2531,8 @@ security.platform_user_onboarding_requests
 
 Retain the global-not-Tenant onboarding concept.
 
+No new Device/Geo persistence is added for onboarding/login in Phase 1. Existing Device/Geo schema remains available for future controls but is not repurposed to tag the global signup/login records.
+
 ### 33.3 Role definitions
 
 ```text
@@ -2740,6 +2762,38 @@ POST /security/v1/auth/login
 POST /security/v1/auth/precheck                       # optional existing UX gate
 ```
 
+Canonical signup input:
+
+```text
+Body:
+  firstName
+  lastName
+  email
+  mobile
+  password
+
+Header:
+  X-Onboarding-Key = user-facing Verigence Identifier
+
+Optional request context:
+  Device ID / Geo headers may be sent, but are not required, persisted or enforced in Phase 1.
+```
+
+Canonical login input:
+
+```text
+Body:
+  identifier
+  password
+
+Not part of login:
+  tenantId
+  TOTP/MFA
+
+Optional request context:
+  Device ID / Geo headers may be sent, but are not required, persisted or enforced in Phase 1.
+```
+
 All human credential/email-verification interactions are Verigence-to-Security calls. Security alone brokers the required Clerk Backend API operations.
 
 There is no direct Web/Mobile Clerk integration and no client-driven Clerk `/bind` operation in the target flow.
@@ -2836,7 +2890,9 @@ Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-w
 | Clerk external identity mapping | Exists. | Clerk subject maps to one global USER. | **EXISTING AND RETAIN** |
 | Global onboarding gate | Platform-global onboarding key exists. | Global gate remains; no Tenant/role/Dealer-Outlet during onboarding. | **EXISTING AND RETAIN** |
 | Credential handling in Security | Current onboarding/login APIs accept password/TOTP/OTP and broker Clerk Backend APIs. | Retain Security-only Clerk Backend facade; keep secrets transient and never persisted/logged; no direct Web/Mobile Clerk integration. | **EXISTING AND RETAIN WITH MODIFICATION** |
+| Canonical login request | Current `/auth/login` requires Tenant/Device/Geo and optionally TOTP because it is coupled to the legacy Tenant access-session path. | `identifier + password` only; no `tenantId`; optional Device/Geo request headers may arrive but are not persisted or gating. | **MODIFY ACTIVE LOGIN CONTRACT** |
 | MFA | Current code/design includes TOTP/MFA concepts. | No Phase-1 MFA requirement. | **DEFERRED** |
+| Device/Geo persistence at signup/login | Existing Device/Geo schema is Tenant/access-session oriented. | Do not tag onboarding/login with Device/Geo in Phase 1; no schema change is required for the global signup/login correction. | **DEFERRED FROM ACTIVE LOGIN/ONBOARDING** |
 | USER statuses | Current status surface includes ACTIVE/SUSPENDED/DISABLED/EXITED; PENDING exists in onboarding. | PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED; hard DELETE separate. | **EXISTING BUT MODIFY** |
 | REJECTED lifecycle | Not part of current global status request. | Required; SuperAdmin-only reactivation after rejection. | **NEW/MODIFY** |
 | Hard USER deletion | No confirmed target maker/checker global hard-delete API in current global USER surface. | Global Tenant-independent DISABLED maker state + SuperAdmin-only final DELETE; same-person maker/checker allowed for SuperAdmin in Phase 1. | **NEW/MODIFY** |
@@ -3009,13 +3065,15 @@ No Audit Core or DI file is modified as part of this Security design document.
 HUMAN USER
    |
    | signup/login credentials through Verigence API
+   | login = identifier + password; no tenantId
+   | optional Device/Geo headers do not gate or persist in Phase 1
    v
 SECURITY
    |
    +-- only Verigence module integrated with Clerk
    +-- Clerk Backend API creates/verifies human identity and credentials
    +-- Clerk subject -> global Verigence USER
-   +-- USER/session policy checks
+   +-- USER must be ACTIVE for login/protected access
    |
    v
 SECURITY-ISSUED HUMAN ACCESS JWT
@@ -3076,4 +3134,4 @@ ALLOW / DENY
 
 The governing separation is:
 
-> **Clerk stores and verifies human credentials, but Verigence Security is the only Verigence module integrated with Clerk. Web/Mobile authenticates through Security, not directly with Clerk. Security maps the Clerk subject to the global Verigence USER and issues the Verigence human access token. Security remains the live functional authorization authority; the human token proves authenticated USER identity but does not replace current role/permission evaluation. Security also authenticates registered machine identities and issues short-lived ServiceIntegration JWTs for module-to-module calls. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. The single Phase-1 SuperAdmin has every ACTIVE registered permission. TenantAdmin administers one Tenant across modules for normal administration; global USER deletion is Tenant-independent. ModuleAdmin administers one module across Tenants. TestUser is isolated to TestTenant and follows the TestTenant PC functional bundle. Audit Core decides the single Phase-1 Dealer/Outlet business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding and has no Clerk integration. The Web BFF is part of the Web module, owns no Security authority and has no Clerk integration.**
+> **Clerk stores and verifies human credentials, but Verigence Security is the only Verigence module integrated with Clerk. Web/Mobile authenticates through Security, not directly with Clerk. Security maps the Clerk subject to the global Verigence USER and issues the Verigence human access token. Human login is global: it requires identifier and password, not Tenant context. Optional Device/Geo request context may be sent by clients but is not persisted or used as a Phase-1 login/onboarding gate. Security remains the live functional authorization authority; the human token proves authenticated USER identity but does not replace current role/permission evaluation. Security also authenticates registered machine identities and issues short-lived ServiceIntegration JWTs for module-to-module calls. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. The single Phase-1 SuperAdmin has every ACTIVE registered permission. TenantAdmin administers one Tenant across modules for normal administration; global USER deletion is Tenant-independent. ModuleAdmin administers one module across Tenants. TestUser is isolated to TestTenant and follows the TestTenant PC functional bundle. Audit Core decides the single Phase-1 Dealer/Outlet business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding and has no Clerk integration. The Web BFF is part of the Web module, owns no Security authority and has no Clerk integration.**
