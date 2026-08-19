@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
 from uuid import uuid4
 
@@ -22,16 +22,19 @@ from verigence_security.api.dependencies import (
 from verigence_security.api.schemas import (
     AccessSessionRequest,
     AccessTokenResponse,
-    CredentialAccessSessionRequest,
+    HumanLoginRequest,
+    HumanLoginResponse,
 )
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import SecurityError, security_error
+from verigence_security.core.types import ActorType
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.geo import GeoSample
 from verigence_security.services.permissions import effective_user_permissions
-from verigence_security.services.token_service import TokenService
+from verigence_security.services.token_service import HumanTokenClaims, TokenService
+from verigence_security.services.v2_human_actor import HumanActorAuthenticationService
 
 router = APIRouter(prefix="/security/v1", tags=["Runtime Access"])
 oauth_router = APIRouter(tags=["OAuth"])
@@ -141,39 +144,41 @@ def _geo(body: AccessSessionRequest) -> GeoSample:
     )
 
 
-@router.post("/auth/login", response_model=AccessTokenResponse)
+@router.post("/auth/login", response_model=HumanLoginResponse)
 def credential_login(
-    body: CredentialAccessSessionRequest,
-    request: Request,
-    idempotency_key: str = Header(..., alias="Idempotency-Key", max_length=200),
+    body: HumanLoginRequest,
     settings: Settings = Depends(get_settings),
     repo: SecurityRepository = Depends(repository),
-    network: NetworkRiskAdapter = Depends(network_adapter),
     tokens: TokenService = Depends(token_service),
-    ip: str = Depends(source_ip),
 ) -> dict[str, object]:
-    """Authenticate human credentials through Clerk Backend API and issue Verigence access."""
+    """Authenticate a global human USER through Security -> Clerk Backend API."""
 
-    _ = idempotency_key
     authenticated = ClerkCredentialService(settings).authenticate(
         identifier=body.identifier,
         password=body.password.get_secret_value(),
-        totp_code=body.totpCode.get_secret_value() if body.totpCode is not None else None,
     )
     identity = AuthenticatedIdentity(
         provider="CLERK",
         provider_subject=authenticated.clerk_user.user_id,
         session_id=f"clerk-backend-{uuid4()}",
     )
-    runtime_repo = GroupAwareSecurityRepository(repo.s)
-    return UserAccessService(runtime_repo, network, tokens).create_or_reuse(
-        identity=identity,
-        tenant_id=str(body.tenantId),
-        device_id=str(body.deviceId),
-        geo=_geo(body),
-        source_ip=ip,
-        correlation_id=request.state.correlation_id,
+    actor = HumanActorAuthenticationService(repo.s).authenticate(identity)
+
+    ttl = settings.platform_admin_token_ttl_minutes
+    if ttl is None:
+        raise RuntimeError("Configured Security human access-token lifetime is unavailable")
+    expires_at = datetime.now(UTC) + timedelta(minutes=ttl)
+    token = tokens.issue_human_token(
+        HumanTokenClaims(
+            user_id=actor.user_id,
+            expires_at=expires_at,
+        )
     )
+    return {
+        "accessToken": token,
+        "expiresAtUtc": expires_at,
+        "actorType": ActorType.USER.value,
+    }
 
 
 @router.post("/access-sessions", response_model=AccessTokenResponse, deprecated=True)

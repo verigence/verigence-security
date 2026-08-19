@@ -9,6 +9,7 @@ from verigence_security.core.errors import SecurityError
 from verigence_security.core.types import ActorType
 from verigence_security.services.token_service import (
     AccessTokenClaims,
+    HumanTokenClaims,
     ServiceTokenClaims,
     TokenService,
 )
@@ -69,6 +70,32 @@ def test_token_issue_and_verify_preserves_security_asserted_actor_and_permission
     assert claims["permissions"] == ["di.document.read", "di.document.upload"]
     assert claims["device_id"] == "44444444-4444-4444-4444-444444444444"
     assert claims["location_id"] == "55555555-5555-5555-5555-555555555555"
+
+
+def test_phase1_human_token_contains_global_identity_only():
+    private_pem, public_pem = _pem_pair()
+    service = TokenService(_settings(private_pem, public_pem))
+    user_id = "11111111-1111-1111-1111-111111111111"
+
+    token = service.issue_human_token(
+        HumanTokenClaims(
+            user_id=user_id,
+            expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        )
+    )
+    claims = service.verify_human_token(token)
+
+    assert claims["sub"] == user_id
+    assert claims["actor_type"] == "USER"
+    assert {
+        "tenant_id",
+        "access_session_id",
+        "permissions",
+        "roles",
+        "device_id",
+        "location_id",
+        "act",
+    }.isdisjoint(claims)
 
 
 def test_human_verifier_trusts_security_user_identity_not_embedded_authorization():

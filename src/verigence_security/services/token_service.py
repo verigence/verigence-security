@@ -37,6 +37,12 @@ class AccessTokenClaims:
 
 
 @dataclass(frozen=True, slots=True)
+class HumanTokenClaims:
+    user_id: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceTokenClaims:
     subject: str
     audience: str
@@ -94,6 +100,38 @@ class TokenService:
             payload["location_id"] = claims.location_id
         if claims.delegated_actor_id:
             payload["act"] = {"sub": claims.delegated_actor_id}
+        try:
+            return jwt.encode(
+                payload,
+                self.settings.security_private_key_pem,
+                algorithm="RS256",
+                headers={"kid": self.settings.security_key_id},
+            )
+        except (ValueError, TypeError, jwt.PyJWTError) as exc:
+            raise security_error("SIGNING_KEY_UNAVAILABLE") from exc
+
+    def issue_human_token(self, claims: HumanTokenClaims) -> str:
+        """Issue the active Phase-1 global USER authentication token.
+
+        This token deliberately carries no Tenant, role, permission, device, location or legacy
+        access-session authority. Those decisions remain live Security state.
+        """
+
+        if not self.settings.security_private_key_pem or not self.settings.security_key_id:
+            raise security_error("SIGNING_KEY_UNAVAILABLE")
+        if not claims.user_id.strip():
+            raise ValueError("Human token USER id is required")
+
+        now = datetime.now(UTC)
+        payload: dict[str, Any] = {
+            "iss": self.settings.security_token_issuer,
+            "sub": claims.user_id,
+            "aud": self.settings.security_token_audience,
+            "iat": now,
+            "exp": claims.expires_at,
+            "jti": str(uuid4()),
+            "actor_type": ActorType.USER.value,
+        }
         try:
             return jwt.encode(
                 payload,

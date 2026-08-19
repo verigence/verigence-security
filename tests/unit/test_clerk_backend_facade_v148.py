@@ -123,6 +123,7 @@ class FakeClerk:
     password_ok: bool = True
     totp_ok: bool = True
     fail: ClerkBackendError | None = None
+    totp_calls: int = 0
 
     def find_user(self, identifier: str) -> ClerkBackendUser | None:
         _ = identifier
@@ -136,6 +137,7 @@ class FakeClerk:
 
     def verify_totp(self, *, clerk_user_id: str, code: str) -> bool:
         _ = clerk_user_id, code
+        self.totp_calls += 1
         return self.totp_ok
 
 
@@ -156,6 +158,17 @@ def test_backend_credential_service_accepts_active_user() -> None:
         clerk=FakeClerk(_user()),  # type: ignore[arg-type]
     ).authenticate(identifier="amit@example.com", password="safe-password-123")
     assert result.clerk_user.user_id == "user_active"
+
+
+def test_backend_credential_service_does_not_require_totp_in_phase1() -> None:
+    clerk = FakeClerk(_user(totp_enabled=True), totp_ok=False)
+    result = ClerkCredentialService(
+        _settings(),
+        clerk=clerk,  # type: ignore[arg-type]
+    ).authenticate(identifier="amit@example.com", password="safe-password-123")
+
+    assert result.clerk_user.user_id == "user_active"
+    assert clerk.totp_calls == 0
 
 
 @pytest.mark.parametrize("user", [_user(banned=True), _user(locked=True), None])

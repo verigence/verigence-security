@@ -25,9 +25,24 @@ class AccessSessionRequest(BaseModel):
 
 
 class CredentialAccessSessionRequest(AccessSessionRequest):
+    """Legacy Tenant/device/Geo login-session shape retained for compatibility code/tests."""
+
     identifier: str = Field(min_length=1, max_length=320)
     password: SecretStr
     totpCode: SecretStr | None = None
+
+
+class HumanLoginRequest(BaseModel):
+    """Canonical Phase-1 global human login request."""
+
+    identifier: str = Field(min_length=1, max_length=320)
+    password: SecretStr
+
+
+class HumanLoginResponse(BaseModel):
+    accessToken: str
+    expiresAtUtc: datetime
+    actorType: ActorType
 
 
 class RefreshAccessSessionRequest(BaseModel):
