@@ -50,6 +50,11 @@ jobs:
           done
           [ -n "$run_id" ] || { echo 'Could not resolve dispatched exact-head CI/CD run'; exit 1; }
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=pending -f context=security-v2-cicd \
+            -f description="Canonical deploy run $run_id is in progress" \
+            -f target_url="$run_url" >/dev/null
 
       - name: Wait for canonical CI/CD result
         shell: bash
@@ -58,13 +63,25 @@ jobs:
       - name: Mark deployment success
         if: success()
         run: |
+          run_id='${{ steps.resolve.outputs.run_id }}'
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
             -f state=success -f context=security-v2-cicd \
-            -f description='Security v2 CI, migrations 0011-0015 and Railway DEV deployment passed' >/dev/null
+            -f description="Security v2 Railway DEV deploy passed in run $run_id" \
+            -f target_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id" >/dev/null
 
       - name: Mark deployment failure
         if: failure()
         run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -f state=failure -f context=security-v2-cicd \
-            -f description='Security v2 canonical CI/CD deploy-dev operation failed' >/dev/null
+          run_id='${{ steps.resolve.outputs.run_id }}'
+          target=''
+          [ -n "$run_id" ] && target="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          if [ -n "$target" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state=failure -f context=security-v2-cicd \
+              -f description="Security v2 canonical deploy failed in run $run_id" \
+              -f target_url="$target" >/dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state=failure -f context=security-v2-cicd \
+              -f description='Security v2 deploy dispatch/resolve failed before a run id was available' >/dev/null
+          fi
