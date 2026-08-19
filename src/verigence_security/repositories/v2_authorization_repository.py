@@ -32,23 +32,23 @@ class V2AuthorizationRepository:
             is not None
         )
 
-    def human_for_clerk_subject(self, clerk_subject: str) -> dict[str, Any] | None:
+    def human_for_user_id(self, user_id: str) -> dict[str, Any] | None:
         row = self.s.execute(
             text(
                 """
-                SELECT e.user_id,
+                SELECT u.user_id,
                        e.status AS identity_status,
                        u.status AS user_status,
                        p.actor_type AS principal_actor_type,
                        p.status AS principal_status
-                FROM security.external_identities e
-                JOIN security.users u ON u.user_id=e.user_id
+                FROM security.users u
                 JOIN security.security_principals p ON p.principal_id=u.user_id
-                WHERE e.provider='CLERK'
-                  AND e.provider_subject=:clerk_subject
+                JOIN security.external_identities e
+                  ON e.user_id=u.user_id AND e.provider='CLERK'
+                WHERE u.user_id=:user_id
                 """
             ),
-            {"clerk_subject": clerk_subject},
+            {"user_id": user_id},
         ).mappings().first()
         return dict(row) if row is not None else None
 
