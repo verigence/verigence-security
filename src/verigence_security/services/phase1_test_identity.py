@@ -157,33 +157,39 @@ class Phase1TestIdentityProvisioningService:
         return user_id, True
 
     def _reject_test_user_role_conflicts(self, user_id: str) -> None:
-        operating = self.s.execute(
-            text(
+        checks = (
+            (
                 """
-                SELECT 1
-                FROM security.user_tenant_operating_roles
-                WHERE user_id=:user_id AND status='ACTIVE'
-                LIMIT 1
-                """
+                SELECT 1 FROM security.user_tenant_operating_roles
+                WHERE user_id=:user_id AND status='ACTIVE' LIMIT 1
+                """,
+                "TestUser must not have an ACTIVE operating-role assignment",
             ),
-            {"user_id": user_id},
-        ).first()
-        if operating is not None:
-            raise RuntimeError("TestUser must not have an ACTIVE operating-role assignment")
-
-        admin = self.s.execute(
-            text(
+            (
                 """
-                SELECT 1
-                FROM security.user_admin_role_assignments
-                WHERE user_id=:user_id AND status='ACTIVE'
-                LIMIT 1
-                """
+                SELECT 1 FROM security.user_admin_role_assignments
+                WHERE user_id=:user_id AND status='ACTIVE' LIMIT 1
+                """,
+                "TestUser must not have an ACTIVE administrative-role assignment",
             ),
-            {"user_id": user_id},
-        ).first()
-        if admin is not None:
-            raise RuntimeError("TestUser must not have an ACTIVE administrative-role assignment")
+            (
+                """
+                SELECT 1 FROM security.user_role_assignments
+                WHERE user_id=:user_id AND status='ACTIVE' LIMIT 1
+                """,
+                "TestUser must not have an ACTIVE legacy Tenant-role assignment",
+            ),
+            (
+                """
+                SELECT 1 FROM security.platform_user_role_assignments
+                WHERE user_id=:user_id AND status='ACTIVE' LIMIT 1
+                """,
+                "TestUser must not have an ACTIVE legacy platform-role assignment",
+            ),
+        )
+        for statement, message in checks:
+            if self.s.execute(text(statement), {"user_id": user_id}).first() is not None:
+                raise RuntimeError(message)
 
     def _ensure_test_tenant(self, actor_user_id: str) -> tuple[str, bool]:
         row = self.s.execute(
