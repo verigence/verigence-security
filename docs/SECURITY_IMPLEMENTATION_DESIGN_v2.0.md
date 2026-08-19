@@ -30,12 +30,18 @@ Implementation rules:
 9. Device/Geo/Schedule/VPN capabilities are retained but deferred from the active Phase-1 human authorization path.
 10. Administrative endpoints are human-admin-only and explicitly reject `SERVICE_INTEGRATION` callers.
 11. Permission classification into `FUNCTIONAL` versus `ADMIN` is deferred to Phase 2; Phase 1 keeps the current permission catalogue structure unchanged.
+12. Canonical login is global and requires `identifier + password`; `tenantId` is not part of login. Client Device ID / Geo request-context headers may be present but are optional, not persisted and not access gates in Phase 1.
+13. Canonical signup uses first name, last name, email, mobile and password in the Security request body; the user-facing Verigence Identifier continues through `X-Onboarding-Key`. Optional Device ID / Geo request-context headers are not persisted or bound to onboarding.
+14. Phase 1 does not require TOTP/MFA in the canonical signup/login contract.
 
 ### 1.1 Confirmed implementation decisions
 
 The following decisions are binding for Phase 1:
 
 - Device / Geo / Schedule / VPN controls remain in the repository/database but are not active Phase-1 human authorization gates.
+- Optional Device ID / Geo headers may be sent by the client on signup/login, but Security does not require, persist or evaluate them in the Phase-1 authentication/onboarding path; no database migration is required for that request context.
+- `/security/v1/auth/login` request body is `identifier + password` only; it has no `tenantId`, mandatory `deviceId`, mandatory Geo or TOTP/MFA field.
+- `/security/v1/onboarding/users` keeps `firstName`, `lastName`, `email`, `mobile`, `password`; the Verigence Identifier remains the existing `X-Onboarding-Key` header.
 - `PENDING -> ACTIVE` and `PENDING -> REJECTED` are SuperAdmin-only actions.
 - `ACTIVE -> SUSPENDED` may be initiated by `Executive` and `TenantAdmin` within their applicable Tenant scope. The USER status is global, therefore suspension denies access across all Tenants. SuperAdmin also retains the capability through its all-permissions authority.
 - `ServiceIntegration` principals are platform-global, not Tenant-scoped.
@@ -75,8 +81,8 @@ They must be treated as immutable identity inputs. Do not substitute the previou
 | `security.external_identities` | Clerk/DEV_MOCK subject mapping | Keep one Clerk subject -> one global USER | **REUSE AS-IS / MINOR MODIFICATION** |
 | `adapters/identity.py::ClerkJwtIdentityProvider` | Local Clerk JWT verification | Not part of target Verigence client/resource-server human authentication; retain only if needed historically/provider-internally and remove from active human route dependency | **RETIRE FROM ACTIVE HUMAN FLOW / KEEP HISTORICALLY** |
 | `api/dependencies.py::identity_from_token` | Select Clerk/DEV mock identity verifier | Rewire protected human routes to validate the Security-issued human access JWT and resolve the global USER; DEV mock remains environment-limited | **REUSE WITH MODIFICATION** |
-| `services/clerk_credentials.py` human password brokerage | Security receives human password/TOTP and calls Clerk Backend API | Retain as the Security-only Clerk credential-verification boundary; keep secrets transient/redacted and align Phase-1 no-MFA behavior | **REUSE WITH MODIFICATION** |
-| `api/routes/access.py::POST /security/v1/auth/login` | Clerk backend credential auth + Security human token issuance | Retain as the canonical human login facade; align returned human token/session to the target identity-only/live-AuthZ model | **REUSE WITH MODIFICATION** |
+| `services/clerk_credentials.py` human password brokerage | Security receives the human identifier/password and calls Clerk Backend API; current code also contains TOTP logic | Retain as the Security-only Clerk password-verification boundary; keep secrets transient/redacted and remove TOTP as an active Phase-1 login requirement | **REUSE WITH MODIFICATION** |
+| `api/routes/access.py::POST /security/v1/auth/login` | Clerk backend credential auth + Tenant/device/Geo access-session issuance | Retain as the canonical human login facade, but remove Tenant/device/Geo/TOTP coupling and issue the global identity-oriented Security human token | **REUSE WITH MODIFICATION** |
 | `services/platform_admin_token.py` | Separate Security-issued human Platform Admin JWT model | Do not keep a separate PlatformAdmin authentication/token model; admins use the canonical Security human login/token boundary | **RETIRE DUPLICATE HUMAN AUTH MODEL** |
 | `api/routes/platform_admin.py::/auth/login` | Separate Clerk credential auth + Platform Admin JWT | Retire as duplicate authentication surface; use canonical `/security/v1/auth/login` plus Security authorization classification | **RETIRE ACTIVE DUPLICATE ROUTE** |
 
@@ -84,10 +90,10 @@ They must be treated as immutable identity inputs. Do not substitute the previou
 
 | Current component | Current purpose | Target disposition | Classification |
 |---|---|---|---|
-| `platform_user_onboarding_settings` | Platform-global onboarding key | Retain | **REUSE** |
+| `platform_user_onboarding_settings` | Platform-global onboarding key | Retain; user-facing label is Verigence Identifier | **REUSE** |
 | `platform_user_onboarding_requests` | Global onboarding workflow | Retain; align status transitions while preserving Security-mediated Clerk creation/email verification | **REUSE WITH MODIFICATION** |
 | `GlobalUserOnboardingService` | Global USER lifecycle/onboarding | Strong base; modify REJECTED, deletion, transition authority while retaining Security-owned Clerk integration | **REUSE WITH MODIFICATION** |
-| Current password/OTP self-onboarding facade | Security-mediated Clerk signup/email verification | Retain as target integration shape; remove only behavior that conflicts with the v2 lifecycle, not the Security-only Clerk boundary | **REUSE WITH MODIFICATION** |
+| Current password/OTP self-onboarding facade | Security-mediated Clerk signup/email verification | Retain as target integration shape; keep first/last/email/mobile/password body + `X-Onboarding-Key`; do not add persisted Device/Geo onboarding fields | **REUSE WITH MODIFICATION** |
 | `GET /platform/users` | Global USER listing | Retain and extend filtering/search/pagination/detail | **REUSE WITH MODIFICATION** |
 | Current USER status route | ACTIVE/SUSPENDED/DISABLED/EXITED style lifecycle | Replace with approved PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED transition policy | **REUSE WITH MODIFICATION** |
 | Current `EXITED` state | Legacy terminal state | Not part of target Phase-1 canonical statuses | **RETAIN HISTORICALLY; RETIRE FROM NEW FLOW** |
@@ -150,6 +156,8 @@ Keep existing tables, code, administration surfaces and tests where they validat
 
 Do not invoke these as mandatory checks in the Phase-1 Security-human-JWT + synchronous Security authorization path.
 
+For canonical signup/login, optional Device ID / Geo request-context headers may be present. The Phase-1 implementation does not persist them, does not bind them to the global USER/login, and does not use them for an allow/deny decision. Existing Tenant-scoped device/location tables are therefore left unchanged and no new migration is added for this correction.
+
 Classification: **DEFER FROM ACTIVE PHASE-1 HUMAN AUTHORIZATION; DO NOT DELETE**.
 
 ---
@@ -161,13 +169,17 @@ Classification: **DEFER FROM ACTIVE PHASE-1 HUMAN AUTHORIZATION; DO NOT DELETE**
 ```text
 Web/Mobile
    |
-   | login credentials to /security/v1/auth/login
+   | POST /security/v1/auth/login
+   | body: identifier + password
+   | no tenantId
+   | optional Device/Geo request-context headers may be present
    v
 Security
    |
    +-- authenticate credentials through Clerk Backend API
    +-- Clerk subject -> global USER
-   +-- USER/session policy checks
+   +-- require active USER/principal/identity mapping
+   +-- do not require Device/Geo/Schedule/VPN in Phase-1 login
    +-- issue Security human access JWT
    |
    | later protected Security request with Security human JWT
@@ -182,6 +194,8 @@ Security API
 ```
 
 Security does not call its own `/authorization/check` endpoint for Security-owned human/admin operations.
+
+Tenant context is introduced by the later protected operation/authorization request, not by the login request or human token identity establishment.
 
 ### 3.2 Human request to Audit Core or DI
 
@@ -290,6 +304,8 @@ Retain:
 - `security.security_events`
 - `security.service_integrations`
 - `security.principal_credentials`
+
+The targeted global signup/login correction does **not** add Device/Geo columns or a new global device/location table. Existing Device/Geo schema is retained unchanged for future/deferred controls.
 
 ### 4.2 USER statuses
 
@@ -648,7 +664,11 @@ For ordinary operating USER:
 Target sequence:
 
 ```text
-1. Client submits approved global onboarding gate/key + identity data to Security.
+1. Client submits:
+     body = firstName + lastName + email + mobile + password
+     X-Onboarding-Key = Verigence Identifier
+   Optional Device/Geo request-context headers may also be present but are ignored for
+   persistence/access decisions in Phase 1.
 2. Security validates the onboarding gate and duplicate identity constraints.
 3. Security creates/co-ordinates the Clerk human identity using Clerk Backend APIs.
 4. Security initiates the approved email-code verification flow through Clerk.
@@ -662,7 +682,7 @@ Target sequence:
 
 Reuse the existing global onboarding and Security-mediated Clerk email-OTP implementation where compatible. Do **not** replace it with direct client Clerk signup/session JWT or a client-driven authenticated bind flow.
 
-Password/OTP/TOTP values are transient request secrets and must never be persisted, audited, traced, cached or logged.
+Password/OTP values are transient request secrets and must never be persisted, audited, traced, cached or logged. TOTP/MFA is deferred from the Phase-1 canonical signup/login contract.
 
 ### 6.2 Status-transition authority matrix
 
@@ -1052,7 +1072,29 @@ Canonical human login:
 POST /security/v1/auth/login
 ```
 
-Security receives the login credential request, verifies credentials through Clerk Backend APIs, resolves the Clerk subject to the global USER, applies the approved USER/session checks and returns the Security-issued human access token/session response.
+Request body:
+
+```json
+{
+  "identifier": "employee@example.com",
+  "password": "<transient secret>"
+}
+```
+
+Not part of the canonical login request:
+
+```text
+tenantId
+deviceId body field
+geo body field
+totpCode
+```
+
+Optional Device ID / Geo request-context headers may be sent by clients. The active Phase-1 login route does not require, persist or evaluate them. Their exact future interpretation is intentionally deferred.
+
+Security verifies credentials through Clerk Backend APIs, resolves the Clerk subject to the global USER, requires an ACTIVE Security USER/principal/identity mapping, and returns a Security-issued human access token response. The human token is global identity/session evidence and does not embed Tenant authorization as authority.
+
+The targeted correction reuses the currently configured Security human/admin access-token lifetime setting rather than inventing a new TTL value. If the required configured lifetime is unavailable, token issuance fails closed. Configuration renaming/cleanup is separate from the Phase-1 contract correction.
 
 Protected human Security APIs then use:
 
@@ -1203,6 +1245,14 @@ POST /security/v1/onboarding/users/{signupAttemptId}/resend-email-code
 POST /security/v1/auth/precheck    # optional existing UX gate
 ```
 
+Canonical signup request:
+
+```text
+body: firstName + lastName + email + mobile + password
+header: X-Onboarding-Key = user-facing Verigence Identifier
+optional Device ID / Geo request-context headers: accepted by the HTTP boundary but not persisted/evaluated in Phase 1
+```
+
 There is no target client-driven Clerk session bind endpoint.
 
 ---
@@ -1250,10 +1300,12 @@ Historical migrations remain unchanged.
 12. reconcile existing machine principals/credentials as platform-global ServiceIntegration identities;
 13. implement new `/security/v1/service/token` using reused credential/signing internals;
 14. implement synchronous `/authorization/check` using global USER identity derived from validated Security human tokens;
-15. retain/align the canonical `/security/v1/auth/login` Security-only Clerk Backend authentication facade and Security human token issuance;
+15. retain/align the canonical `/security/v1/auth/login` Security-only Clerk Backend authentication facade and Security human token issuance without Tenant/device/Geo/TOTP coupling;
 16. cut target RBAC reads to the new role model;
 17. deprecate `/oauth/token` and retire duplicate/legacy human authentication/token routes such as separate PlatformAdmin token/login/bootstrap paths after dependent callers migrate; do not retire canonical `/security/v1/auth/login`;
 18. leave historical/deferred tables intact.
+
+The global login/onboarding correction does not require a Device/Geo schema migration.
 
 ### 14.2 Mandatory reconciliation report
 
@@ -1287,9 +1339,12 @@ Keep:
 Do not require these controls in:
 
 - canonical Security human login/token issuance;
+- Security-mediated employee signup/email verification;
 - Security in-process human authorization;
 - `/authorization/check`;
 - operating/admin/test permission resolution.
+
+Client Device ID / Geo request-context headers may still be sent on signup/login. Phase 1 does not persist or evaluate them. Do not create a new schema merely to retain unused request context.
 
 Future Phase 2 can reintroduce selected controls without redesigning global identity/RBAC.
 
@@ -1304,19 +1359,23 @@ No code is authorized by this blueprint yet.
 **Reuse:** migration framework/current schema.  
 **Add:** role definitions, bundles, scoped admin roles, deletion/tombstone, test identity relation.  
 **Do not add:** service permission/audience grant tables for Phase 1.  
+**Do not add for login/onboarding correction:** Device/Geo persistence.  
 **Tests:** constraints, indexes, migration-up fixtures.
 
 ### Step 2 — Security-only Clerk human authentication + Security human token
 
-**Reuse:** `services/clerk_credentials.py`, existing `/security/v1/auth/login` flow, Security token signing/JWKS/session primitives, external identity mapping.  
-**Modify:** keep credentials transient/redacted; align one canonical human login path for all human classifications; human token identifies the global USER while authorization remains live in Security.  
+**Reuse:** `services/clerk_credentials.py`, existing `/security/v1/auth/login` flow, Security token signing/JWKS primitives, external identity mapping.  
+**Modify request:** `identifier + password` only; remove `tenantId`, mandatory body `deviceId`, mandatory body Geo and `totpCode`.  
+**Modify runtime:** resolve Clerk subject -> global Security USER, require ACTIVE USER/principal/identity, issue an identity-oriented Security human JWT without invoking Tenant/device/Geo/schedule/VPN authorization.  
+**Optional request context:** Device ID / Geo headers may be present but are not persisted or evaluated.  
 **Retire active use:** direct Clerk-session-JWT route dependencies and separate PlatformAdmin login/token path.  
-**Tests:** successful/failed Clerk-backed credential verification, no secret persistence/logging, correct global USER binding, non-ACTIVE USER denial, valid/invalid Security human JWT validation.
+**Tests:** successful/failed Clerk-backed password verification, TOTP not required, no secret persistence/logging, no Tenant input, no Device/Geo requirement, correct global USER binding, non-ACTIVE USER denial, valid/invalid Security human JWT validation.
 
 ### Step 3 — USER lifecycle and onboarding
 
 **Reuse:** global onboarding/user service and existing Security-mediated Clerk email OTP integration.  
-**Modify:** PENDING/REJECTED, transition authority and lifecycle policy; do not introduce direct client Clerk signup/bind.  
+**Retain request:** firstName/lastName/email/mobile/password + `X-Onboarding-Key` (Verigence Identifier).  
+**Modify:** PENDING/REJECTED, transition authority and lifecycle policy; do not introduce direct client Clerk signup/bind or Device/Geo persistence.  
 **Tests:** onboarding gate, duplicate handling, Clerk creation/verification failures, resend/verify flow, PENDING after verification, all allowed/denied lifecycle transitions.
 
 ### Step 4 — Deletion coordinator
@@ -1404,9 +1463,12 @@ Keep historical code/migrations until cleanup is separately approved.
 ### 17.1 Human authentication
 
 - Web/Mobile/Audit Core/DI contain no direct Clerk authentication dependency in the Security contract;
-- Security successfully authenticates valid human credentials through Clerk Backend API;
+- Security successfully authenticates valid human identifier/password through Clerk Backend API;
 - invalid human credentials are denied;
-- password/OTP/TOTP values are not persisted, audited, traced, cached or logged;
+- `/security/v1/auth/login` accepts no `tenantId` requirement;
+- Device ID / Geo are not mandatory inputs and optional request-context headers do not change the authentication result;
+- TOTP/MFA is not required in Phase 1;
+- password/OTP values are not persisted, audited, traced, cached or logged;
 - successful login resolves the correct Clerk subject -> global USER mapping;
 - non-ACTIVE USER cannot obtain/use protected Verigence access merely because Clerk credential verification succeeded;
 - valid Security-issued human JWT is accepted by protected Security/resource-server validation;
@@ -1499,7 +1561,7 @@ Keep historical code/migrations until cleanup is separately approved.
 
 ### 17.10 Deferred controls
 
-Regression tests prove Device/Geo/Schedule/VPN code remains available while target authorization does not require those inputs.
+Regression tests prove Device/Geo/Schedule/VPN code remains available while target authorization does not require those inputs and global signup/login does not persist them.
 
 ---
 
@@ -1516,6 +1578,8 @@ Regression tests prove Device/Geo/Schedule/VPN code remains available while targ
 9. DI remains outside onboarding and has no Clerk integration.
 10. No plaintext human credential, OTP, service credential or JWT is logged.
 11. TestTenant uses one canonical generated Security Tenant ID across modules.
+12. Missing Device/Geo request context must not cause signup/login denial in Phase 1.
+13. Missing configured Security human-token lifetime/signing material fails token issuance closed rather than inventing a value.
 
 ---
 
@@ -1542,6 +1606,8 @@ Regression tests prove Device/Geo/Schedule/VPN code remains available while targ
 - Geo/geofence mandatory gate;
 - Schedule mandatory gate;
 - VPN/network-risk mandatory gate;
+- Device/Geo persistence or binding to the global signup/login transaction;
+- MFA/TOTP;
 - any new human-token authorization cache/projection design beyond the retained Security session/token primitives;
 - mTLS;
 - distributed authorization projection/cache;
@@ -1569,8 +1635,18 @@ TestTenant tenant_id
 Human Clerk integration boundary
 = Security only; no direct Web/Mobile/Web BFF/Audit Core/DI Clerk integration
 
+Canonical signup input
+= firstName + lastName + email + mobile + password
+  X-Onboarding-Key carries the user-facing Verigence Identifier
+
 Canonical human login endpoint
 = POST /security/v1/auth/login
+
+Canonical human login request
+= identifier + password; no tenantId; no mandatory Device/Geo; no TOTP/MFA
+
+Device/Geo signup/login context
+= optional client request headers only; not persisted/evaluated in Phase 1; no DB migration
 
 Human token issuer
 = Verigence Security after Clerk-backed authentication
@@ -1603,7 +1679,7 @@ Still implementation-level but not a business/design input from the user:
 2. service credential rotation/expiry operations should reuse existing credential lifecycle capability and can be finalized as an operational setting without altering the architecture;
 3. concrete Executive default permission list must be generated from the already registered Audit Core/DI keys and reviewed before the seed migration is committed;
 4. current `dev` data must be reconciled before deterministic role migration;
-5. the concrete configured human access-token/session lifetime and revocation/version behavior must be read from the retained implementation and confirmed during implementation correction rather than invented here.
+5. the concrete configured human access-token/session lifetime and revocation/version behavior must be taken from retained Security configuration/capability and must not be replaced with an invented new TTL during this targeted login correction.
 
 No implementation should invent new business permissions or authentication semantics to resolve these items.
 
@@ -1654,6 +1730,10 @@ The following no longer block implementation planning:
 - TestUser identity;
 - TestTenant UUID selection;
 - Security-only Clerk integration boundary;
+- canonical signup and login request fields;
+- no-Tenant login semantics;
+- optional/non-persisted Device/Geo request context;
+- Phase-1 no-MFA/TOTP login rule;
 - canonical human login endpoint and Security human-token ownership;
 - ServiceIntegration TTL;
 - service-token endpoint naming;
@@ -1665,7 +1745,10 @@ Security v2 Phase-1 is implementation-complete only when:
 
 - Web/Mobile, Web BFF, Audit Core and DI have no direct Clerk authentication dependency in the Security contract;
 - Security alone performs Clerk Backend user creation/email verification/credential authentication;
-- `/security/v1/auth/login` is the canonical active human login path for all human classifications;
+- `/security/v1/onboarding/users` keeps the approved firstName/lastName/email/mobile/password + `X-Onboarding-Key` contract;
+- `/security/v1/auth/login` is the canonical active human login path for all human classifications and requires only identifier/password;
+- login has no Tenant requirement and no mandatory Device/Geo/TOTP input;
+- optional Device/Geo request context does not get persisted or affect Phase-1 signup/login allow/deny;
 - Security issues the active Verigence human access JWT/session after successful Clerk-backed authentication;
 - downstream protected human resource servers validate Security human JWTs, not Clerk JWTs;
 - synchronous Security human authorization enforces the target role/admin/test model and does not trust embedded human permission claims as the source of truth;
