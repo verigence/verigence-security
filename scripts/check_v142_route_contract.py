@@ -26,17 +26,17 @@ missing = sorted(required - paths)
 if missing:
     raise SystemExit(f"Missing Phase-1 Security target routes: {missing}")
 
+# PlatformAdmin JWT control-plane endpoints no longer have a dependent caller and must
+# remain retired. The older access/OAuth router is different: Audit Core dev still consumes
+# it, so it stays as explicit temporary compatibility until that repo is migrated.
 retired_exact = {
-    "/oauth/token",
-    "/security/v1/auth/login",
-    "/security/v1/access-sessions",
     "/security/v1/platform/bootstrap/claim",
     "/security/v1/platform/auth/login",
     "/security/v1/platform/me",
 }
 active_retired = sorted(retired_exact & paths)
 if active_retired:
-    raise SystemExit(f"Retired human/OAuth token routes are still active: {active_retired}")
+    raise SystemExit(f"Retired PlatformAdmin JWT routes are still active: {active_retired}")
 
 retired_prefixes = (
     "/security/v1/admin/tenants/",
@@ -47,10 +47,15 @@ active_legacy_admin = sorted(
 if active_legacy_admin:
     raise SystemExit(f"Retired arbitrary Tenant RBAC routes are still active: {active_legacy_admin}")
 
-# Temporary compatibility until the Clerk-first-party authenticated bind URL/contract is
-# explicitly fixed. These are intentionally deprecated and must not be mistaken for the
-# target onboarding model.
 compatibility = {
+    # Required by current Audit Core dev until it migrates to /security/v1/service/token
+    # and Clerk-subject /authorization/check.
+    "/oauth/token",
+    # Older Security human token/session surface remains in the same compatibility router;
+    # it is not part of the target Phase-1 model and must not be used by new code.
+    "/security/v1/auth/login",
+    "/security/v1/access-sessions",
+    # Employee signup compatibility until the Clerk-first-party bind contract is fixed.
     "/security/v1/onboarding/users",
     "/security/v1/onboarding/users/{signupAttemptId}/verify-email",
     "/security/v1/onboarding/users/{signupAttemptId}/resend-email-code",
@@ -58,8 +63,8 @@ compatibility = {
 missing_compatibility = sorted(compatibility - paths)
 if missing_compatibility:
     raise SystemExit(
-        "Temporary onboarding compatibility routes disappeared before bind replacement: "
+        "Temporary compatibility routes disappeared before dependent callers migrated: "
         f"{missing_compatibility}"
     )
 
-print("Phase-1 Security target route contract PASSED")
+print("Phase-1 Security target + compatibility route contract PASSED")
