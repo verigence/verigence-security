@@ -65,6 +65,7 @@ class _FakeSession:
 
     def execute(self, statement: object, params: dict[str, Any] | None = None) -> _FakeResult:
         sql = str(statement)
+        params = params or {}
         if "pg_advisory_xact_lock" in sql:
             return _FakeResult()
         if "FROM security.external_identities e" in sql:
@@ -79,24 +80,24 @@ class _FakeSession:
             return _FakeResult(row=row)
         if (
             "FROM security.platform_user_role_assignments" in sql
-            and "user_id=:user_id" not in sql
+            and "approved_user_id" in sql
         ):
-            value = (
-                (self.legacy_super_admin_user_id,)
-                if self.legacy_super_admin_user_id
-                else None
+            approved = params.get("approved_user_id")
+            conflict = (
+                self.legacy_super_admin_user_id is not None
+                and self.legacy_super_admin_user_id != approved
             )
-            return _FakeResult(first_value=value)
+            return _FakeResult(first_value=(1,) if conflict else None)
         if (
             "FROM security.user_admin_role_assignments" in sql
-            and "user_id=:user_id" not in sql
+            and "approved_user_id" in sql
         ):
-            value = (
-                (self.v2_super_admin_user_id,)
-                if self.v2_super_admin_user_id
-                else None
+            approved = params.get("approved_user_id")
+            conflict = (
+                self.v2_super_admin_user_id is not None
+                and self.v2_super_admin_user_id != approved
             )
-            return _FakeResult(first_value=value)
+            return _FakeResult(first_value=(1,) if conflict else None)
         if "FROM security.user_tenant_operating_roles" in sql:
             return _FakeResult(first_value=(1,) if self.has_operating_role else None)
         if (
