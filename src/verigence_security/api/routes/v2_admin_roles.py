@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_admin_role_schemas import AdminRoleMutationResponse
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
 from verigence_security.services.v2_admin_role_mutations import (
     AuditedAdminRoleAssignmentService,
@@ -50,7 +50,7 @@ def assign_tenant_admin(
     tenantId: str,
     userId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
@@ -81,7 +81,7 @@ def remove_tenant_admin(
     tenantId: str,
     userId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
@@ -112,7 +112,7 @@ def assign_module_admin(
     moduleKey: str,
     userId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
@@ -143,7 +143,7 @@ def remove_module_admin(
     moduleKey: str,
     userId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AdminRoleMutationResponse:
     _require_super_admin(actor)
