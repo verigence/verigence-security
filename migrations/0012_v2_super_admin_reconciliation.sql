@@ -119,7 +119,7 @@ BEGIN
     'PLATFORM',
     NULL,
     approved_user_id,
-    'platform.super_admin.v2_reconcile',
+    'platform.super_admin.system_provision',
     'platform_user',
     approved_user_id::text,
     'SUCCESS',
@@ -129,7 +129,8 @@ BEGIN
       'providerSubject',approved_subject,
       'legacyPlatformRole','platform.super_admin',
       'v2AdminRole','SuperAdmin',
-      'scopeType','PLATFORM'
+      'scopeType','PLATFORM',
+      'provisioningMode','MIGRATION_RECONCILIATION'
     ),
     CURRENT_TIMESTAMP
   )
