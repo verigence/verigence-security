@@ -53,7 +53,10 @@ class InitialSuperAdminProvisioningService:
                 user_id = str(existing["user_id"])
                 if existing["identity_status"] != "ACTIVE":
                     raise RuntimeError("Approved SuperAdmin Clerk identity is not ACTIVE")
-                if existing["user_status"] != "ACTIVE" or existing["principal_status"] != "ACTIVE":
+                if (
+                    existing["user_status"] != "ACTIVE"
+                    or existing["principal_status"] != "ACTIVE"
+                ):
                     raise RuntimeError("Approved SuperAdmin USER/principal must be ACTIVE")
                 if self._has_active_operating_role(user_id):
                     raise RuntimeError(
@@ -143,32 +146,45 @@ class InitialSuperAdminProvisioningService:
         return dict(row) if row else None
 
     def _reject_conflicting_super_admin(self, approved_user_id: str | None) -> None:
-        legacy = self.s.execute(
+        params = {"approved_user_id": approved_user_id}
+        legacy_conflict = self.s.execute(
             text(
                 """
-                SELECT user_id
+                SELECT 1
                 FROM security.platform_user_role_assignments
-                WHERE role_key='platform.super_admin' AND status='ACTIVE'
+                WHERE role_key='platform.super_admin'
+                  AND status='ACTIVE'
+                  AND (
+                    :approved_user_id IS NULL
+                    OR user_id<>CAST(:approved_user_id AS uuid)
+                  )
                 LIMIT 1
                 """
-            )
+            ),
+            params,
         ).first()
-        if legacy is not None and (approved_user_id is None or str(legacy[0]) != approved_user_id):
+        if legacy_conflict is not None:
             raise RuntimeError(
                 "A different active Platform Super Admin already exists; provisioning will not replace it"
             )
 
-        v2 = self.s.execute(
+        v2_conflict = self.s.execute(
             text(
                 """
-                SELECT user_id
+                SELECT 1
                 FROM security.user_admin_role_assignments
-                WHERE role_key='SuperAdmin' AND status='ACTIVE'
+                WHERE role_key='SuperAdmin'
+                  AND status='ACTIVE'
+                  AND (
+                    :approved_user_id IS NULL
+                    OR user_id<>CAST(:approved_user_id AS uuid)
+                  )
                 LIMIT 1
                 """
-            )
+            ),
+            params,
         ).first()
-        if v2 is not None and (approved_user_id is None or str(v2[0]) != approved_user_id):
+        if v2_conflict is not None:
             raise RuntimeError(
                 "A different active v2 SuperAdmin already exists; provisioning will not replace it"
             )
