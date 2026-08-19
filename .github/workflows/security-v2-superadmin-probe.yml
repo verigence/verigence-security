@@ -30,9 +30,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           context='security-v2-superadmin-probe'
+          target="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           post() {
             gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-              -f state="$1" -f context="$context" -f description="$2" >/dev/null
+              -f state="$1" -f context="$context" -f description="$2" -f target_url="$target" >/dev/null
           }
           trap 'post failure "SuperAdmin DEV probe failed"' ERR
           raw="${MIGRATION_DATABASE_URL:-}"
@@ -76,5 +77,6 @@ jobs:
               ',V=' || v.approved || '/' || v.test || '/' || v.other
             FROM ids i CROSS JOIN legacy l CROSS JOIN v2 v;
           ")"
+          echo "SANITIZED_SUPERADMIN_STATE=$result"
           post success "$result (approved/test/other)"
           trap - ERR
