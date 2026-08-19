@@ -11,6 +11,7 @@ from verigence_security.api.routes import (
     jwks,
     platform_admin,
     platform_modules,
+    service_tokens,
     tenant_groups,
     tenant_privileged_access,
     tenant_roles,
@@ -39,6 +40,7 @@ app.include_router(health.router)
 app.include_router(jwks.router)
 app.include_router(access.oauth_router)
 app.include_router(access.router)
+app.include_router(service_tokens.router)
 app.include_router(tenant_groups.router)
 app.include_router(tenant_roles.router)
 app.include_router(tenant_privileged_access.router)
