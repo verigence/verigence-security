@@ -48,7 +48,7 @@ MODULE_ADMIN_PERMISSIONS: dict[str, frozenset[str]] = {
 class AuthorizationRepository(Protocol):
     def active_service_integration(self, integration_key: str) -> bool: ...
 
-    def human_for_clerk_subject(self, clerk_subject: str) -> dict[str, Any] | None: ...
+    def human_for_user_id(self, user_id: str) -> dict[str, Any] | None: ...
 
     def active_permission(self, permission_key: str) -> dict[str, Any] | None: ...
 
@@ -90,43 +90,44 @@ class HumanAuthorizationResolver:
     def check(
         self,
         *,
-        clerk_subject: str,
+        user_id: str,
         tenant_id: str | None,
         permission_key: str,
     ) -> AuthorizationDecision:
-        subject = clerk_subject.strip()
+        trusted_user_id = user_id.strip()
         required_permission = permission_key.strip()
         tenant = tenant_id.strip() if tenant_id is not None else None
         if tenant == "":
             tenant = None
 
-        human = self.repository.human_for_clerk_subject(subject)
+        human = self.repository.human_for_user_id(trusted_user_id)
         if human is None or human.get("identity_status") != "ACTIVE":
             return self._deny(
                 "USER_NOT_ONBOARDED",
+                user_id=trusted_user_id or None,
                 tenant_id=tenant,
                 permission_key=required_permission,
             )
 
-        user_id = str(human["user_id"])
+        resolved_user_id = str(human["user_id"])
         if human.get("principal_actor_type") != "USER":
             return self._deny(
                 "ACTOR_TYPE_NOT_ALLOWED",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
             )
         if human.get("principal_status") != "ACTIVE":
             return self._deny(
                 "PRINCIPAL_NOT_ACTIVE",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
             )
         if human.get("user_status") != "ACTIVE":
             return self._deny(
                 "USER_NOT_ACTIVE",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
             )
@@ -135,7 +136,7 @@ class HumanAuthorizationResolver:
         if permission is None:
             return self._deny(
                 "PERMISSION_NOT_ACTIVE",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
             )
@@ -144,29 +145,29 @@ class HumanAuthorizationResolver:
         if tenant is not None and self.repository.tenant_status(tenant) != "ACTIVE":
             return self._deny(
                 "TENANT_NOT_ACTIVE",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
                 module_key=module_key,
             )
 
-        admin_assignments = self.repository.active_admin_assignments(user_id)
+        admin_assignments = self.repository.active_admin_assignments(resolved_user_id)
         if self._is_super_admin(admin_assignments):
             return self._allow(
                 "ALLOW_SUPER_ADMIN",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
                 module_key=module_key,
                 classification="SuperAdmin",
             )
 
-        test_tenant_id = self.repository.active_test_identity_for_user(user_id)
+        test_tenant_id = self.repository.active_test_identity_for_user(resolved_user_id)
         if test_tenant_id is not None:
             if tenant != test_tenant_id:
                 return self._deny(
                     "TEST_TENANT_REQUIRED",
-                    user_id=user_id,
+                    user_id=resolved_user_id,
                     tenant_id=tenant,
                     permission_key=required_permission,
                     module_key=module_key,
@@ -179,7 +180,7 @@ class HumanAuthorizationResolver:
             ):
                 return self._allow(
                     "ALLOW_TEST_USER_PC",
-                    user_id=user_id,
+                    user_id=resolved_user_id,
                     tenant_id=tenant,
                     permission_key=required_permission,
                     module_key=module_key,
@@ -188,7 +189,7 @@ class HumanAuthorizationResolver:
                 )
             return self._deny(
                 "ROLE_PERMISSION_DENIED",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
                 module_key=module_key,
@@ -202,7 +203,7 @@ class HumanAuthorizationResolver:
                 if tenant is not None and self._is_tenant_admin(admin_assignments, tenant):
                     return self._allow(
                         "ALLOW_TENANT_ADMIN",
-                        user_id=user_id,
+                        user_id=resolved_user_id,
                         tenant_id=tenant,
                         permission_key=required_permission,
                         module_key=module_key,
@@ -211,7 +212,7 @@ class HumanAuthorizationResolver:
                 if self._is_module_admin(admin_assignments, module_key):
                     return self._allow(
                         "ALLOW_MODULE_ADMIN",
-                        user_id=user_id,
+                        user_id=resolved_user_id,
                         tenant_id=tenant,
                         permission_key=required_permission,
                         module_key=module_key,
@@ -219,7 +220,7 @@ class HumanAuthorizationResolver:
                     )
             return self._deny(
                 "ADMIN_SCOPE_OR_PERMISSION_DENIED",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
                 module_key=module_key,
@@ -229,17 +230,20 @@ class HumanAuthorizationResolver:
         if tenant is None:
             return self._deny(
                 "TENANT_CONTEXT_REQUIRED",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=None,
                 permission_key=required_permission,
                 module_key=module_key,
             )
 
-        role_key = self.repository.active_operating_role(user_id=user_id, tenant_id=tenant)
+        role_key = self.repository.active_operating_role(
+            user_id=resolved_user_id,
+            tenant_id=tenant,
+        )
         if role_key is None:
             return self._deny(
                 "OPERATING_ROLE_NOT_ASSIGNED",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
                 module_key=module_key,
@@ -251,7 +255,7 @@ class HumanAuthorizationResolver:
         ):
             return self._allow(
                 "ALLOW_OPERATING_ROLE",
-                user_id=user_id,
+                user_id=resolved_user_id,
                 tenant_id=tenant,
                 permission_key=required_permission,
                 module_key=module_key,
@@ -260,7 +264,7 @@ class HumanAuthorizationResolver:
             )
         return self._deny(
             "ROLE_PERMISSION_DENIED",
-            user_id=user_id,
+            user_id=resolved_user_id,
             tenant_id=tenant,
             permission_key=required_permission,
             module_key=module_key,
@@ -352,7 +356,7 @@ class AuthorizationCheckService:
         self,
         *,
         service_token: str,
-        clerk_subject: str,
+        user_id: str,
         tenant_id: str | None,
         permission_key: str,
     ) -> AuthorizationDecision:
@@ -363,7 +367,7 @@ class AuthorizationCheckService:
         if not self.repository.active_service_integration(subject):
             raise security_error("AUTH_TOKEN_INVALID")
         return self.humans.check(
-            clerk_subject=clerk_subject,
+            user_id=user_id,
             tenant_id=tenant_id,
             permission_key=permission_key,
         )
