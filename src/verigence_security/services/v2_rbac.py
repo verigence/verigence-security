@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Iterable
@@ -26,6 +27,46 @@ class RoleMutationResult:
     role_key: str | None
 
 
+def _audit_tenant_change(
+    repository: V2RbacRepository,
+    *,
+    tenant_id: str,
+    actor_user_id: str,
+    correlation_id: str | None,
+    operation_key: str,
+    resource_type: str,
+    resource_id: str,
+    before_state: dict[str, object] | None,
+    after_state: dict[str, object] | None,
+    now: datetime,
+) -> None:
+    repository.s.execute(
+        text(
+            """
+            INSERT INTO security.admin_change_records
+            (admin_change_id,correlation_id,scope_type,tenant_id,actor_user_id,
+             operation_key,resource_type,resource_id,outcome,before_state_json,
+             after_state_json,occurred_at_utc)
+            VALUES (:change_id,:correlation_id,'TENANT',:tenant_id,:actor_user_id,
+                    :operation_key,:resource_type,:resource_id,'SUCCESS',
+                    CAST(:before_state AS jsonb),CAST(:after_state AS jsonb),:now)
+            """
+        ),
+        {
+            "change_id": str(uuid4()),
+            "correlation_id": correlation_id or str(uuid4()),
+            "tenant_id": tenant_id,
+            "actor_user_id": actor_user_id,
+            "operation_key": operation_key,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "before_state": json.dumps(before_state) if before_state is not None else None,
+            "after_state": json.dumps(after_state) if after_state is not None else None,
+            "now": now,
+        },
+    )
+
+
 class RoleDefinitionService:
     def __init__(self, session: Session) -> None:
         self.repository = V2RbacRepository(session)
@@ -38,11 +79,7 @@ class RoleDefinitionService:
 
 
 class TenantRoleBundleService:
-    """Read/write the v2 operating-role permission bundles.
-
-    Authorization for who may call mutation methods is intentionally left to the
-    later human-admin/API batch. This service only enforces v2 data invariants.
-    """
+    """Read/write the v2 operating-role permission bundles."""
 
     def __init__(self, session: Session) -> None:
         self.repository = V2RbacRepository(session)
@@ -62,6 +99,7 @@ class TenantRoleBundleService:
         role_key: str,
         permission_keys: Iterable[str],
         actor_user_id: str,
+        correlation_id: str | None = None,
     ) -> list[str]:
         self._require_operating_role(role_key)
         requested = set(permission_keys)
@@ -77,11 +115,28 @@ class TenantRoleBundleService:
                 raise ValueError(
                     "Permissions must exist and be ACTIVE: " + ", ".join(missing)
                 )
+            before = self.repository.tenant_role_permissions(tenant_id, role_key)
+            if set(before) == requested:
+                self.repository.rollback()
+                return before
             self.repository.replace_tenant_role_permissions(
                 tenant_id=tenant_id,
                 role_key=role_key,
                 permission_keys=requested,
                 actor_user_id=actor_user_id,
+                now=now,
+            )
+            after = sorted(requested)
+            _audit_tenant_change(
+                self.repository,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                correlation_id=correlation_id,
+                operation_key="security.role.update",
+                resource_type="ROLE_BUNDLE",
+                resource_id=role_key,
+                before_state={"roleKey": role_key, "permissions": before},
+                after_state={"roleKey": role_key, "permissions": after},
                 now=now,
             )
             self.repository.commit()
@@ -115,6 +170,7 @@ class OperatingRoleAssignmentService:
         user_id: str,
         role_key: str,
         actor_user_id: str,
+        correlation_id: str | None = None,
     ) -> RoleMutationResult:
         self._require_operating_role(role_key)
         now = datetime.now(UTC)
@@ -132,6 +188,12 @@ class OperatingRoleAssignmentService:
                 raise ValueError("USER must be ACTIVE for an operating-role assignment")
             if not self.repository.lock_tenant(tenant_id):
                 raise ValueError("Tenant not found")
+            tenant_status = self.repository.s.execute(
+                text("SELECT status FROM security.tenants WHERE tenant_id=:tenant_id"),
+                {"tenant_id": tenant_id},
+            ).scalar_one()
+            if str(tenant_status) != "ACTIVE":
+                raise ValueError("Tenant must be ACTIVE for an operating-role assignment")
             if not self.repository.lock_user(actor_user_id):
                 raise ValueError("Actor USER not found")
 
@@ -161,6 +223,7 @@ class OperatingRoleAssignmentService:
                 if existing_pm is not None:
                     raise ValueError("Tenant already has an ACTIVE PM")
 
+            before_role = str(current["role_key"]) if current is not None else None
             if current is not None:
                 self.repository.end_active_operating_role(
                     user_id=user_id,
@@ -174,6 +237,18 @@ class OperatingRoleAssignmentService:
                 tenant_id=tenant_id,
                 role_key=role_key,
                 actor_user_id=actor_user_id,
+                now=now,
+            )
+            _audit_tenant_change(
+                self.repository,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                correlation_id=correlation_id,
+                operation_key="security.role.assign",
+                resource_type="USER_OPERATING_ROLE",
+                resource_id=user_id,
+                before_state={"roleKey": before_role},
+                after_state={"roleKey": role_key},
                 now=now,
             )
             self.repository.commit()
@@ -192,13 +267,22 @@ class OperatingRoleAssignmentService:
             role_key=role_key,
         )
 
-    def remove_role(self, *, tenant_id: str, user_id: str) -> RoleMutationResult:
+    def remove_role(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        actor_user_id: str,
+        correlation_id: str | None = None,
+    ) -> RoleMutationResult:
         now = datetime.now(UTC)
         try:
             if not self.repository.lock_user(user_id):
                 raise ValueError("USER not found")
             if not self.repository.lock_tenant(tenant_id):
                 raise ValueError("Tenant not found")
+            if not self.repository.lock_user(actor_user_id):
+                raise ValueError("Actor USER not found")
             current = self.repository.active_operating_role(
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -207,9 +291,22 @@ class OperatingRoleAssignmentService:
             if current is None:
                 self.repository.rollback()
                 return RoleMutationResult(False, None, None)
+            current_role = str(current["role_key"])
             self.repository.end_active_operating_role(
                 user_id=user_id,
                 tenant_id=tenant_id,
+                now=now,
+            )
+            _audit_tenant_change(
+                self.repository,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                correlation_id=correlation_id,
+                operation_key="security.role.assign",
+                resource_type="USER_OPERATING_ROLE",
+                resource_id=user_id,
+                before_state={"roleKey": current_role},
+                after_state={"roleKey": None},
                 now=now,
             )
             self.repository.commit()
@@ -219,7 +316,7 @@ class OperatingRoleAssignmentService:
         return RoleMutationResult(
             changed=True,
             assignment_id=str(current["assignment_id"]),
-            role_key=str(current["role_key"]),
+            role_key=current_role,
         )
 
     def _require_operating_role(self, role_key: str) -> None:
