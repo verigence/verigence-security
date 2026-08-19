@@ -85,3 +85,5 @@ jobs:
               -f state=failure -f context=security-v2-cicd \
               -f description='Security v2 deploy dispatch/resolve failed before a run id was available' >/dev/null
           fi
+
+# Retrigger after the guarded Phase-1 SuperAdmin DEV handover completed successfully.
