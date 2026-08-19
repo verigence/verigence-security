@@ -125,3 +125,5 @@ jobs:
 
           post_status success 'Reconciliation report ran; guarded migration 0016 dry-run is clean'
           trap - ERR
+
+# Retriggered after the 19-Aug-2026 quality-gate correction so DEV database state is verified against the deployable Security v2 head.
