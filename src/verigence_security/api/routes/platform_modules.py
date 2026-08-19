@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from verigence_security.api.module_catalog_schemas import (
     ModuleCatalogPutRequest,
     ModuleCatalogResponse,
+    ModulePermissionResponse,
     ModuleSummaryResponse,
 )
 from verigence_security.api.platform_dependencies import platform_session
@@ -27,6 +28,11 @@ router = APIRouter(prefix="/security/v1/platform/modules", tags=["Platform Modul
 
 def _require_super_admin(actor: HumanActorContext) -> None:
     if not actor.is_super_admin:
+        raise security_error("PERMISSION_DENIED")
+
+
+def _require_admin(actor: HumanActorContext) -> None:
+    if not actor.has_admin_classification:
         raise security_error("PERMISSION_DENIED")
 
 
@@ -52,6 +58,20 @@ def get_module(
     if catalog is None:
         raise HTTPException(status_code=404, detail="Module not found")
     return catalog
+
+
+@router.get("/{moduleKey}/permissions", response_model=list[ModulePermissionResponse])
+def list_module_permissions(
+    moduleKey: str,
+    actor: HumanActorContext = Depends(clerk_human_actor),
+    session: Session = Depends(platform_session),
+) -> list[dict[str, object]]:
+    # Permission discovery is an administrative view used by SuperAdmin/TenantAdmin/ModuleAdmin.
+    _require_admin(actor)
+    catalog = ModuleCatalogService(ModuleCatalogRepository(session)).get_catalog(moduleKey.lower())
+    if catalog is None:
+        raise HTTPException(status_code=404, detail="Module not found")
+    return list(catalog["permissions"])  # type: ignore[arg-type]
 
 
 @router.put("/{moduleKey}/catalog", response_model=ModuleCatalogResponse)
