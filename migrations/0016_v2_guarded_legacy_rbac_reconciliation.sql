@@ -238,11 +238,12 @@ BEGIN
   ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING;
 END $$;
 
--- Copy clean direct fixed-role assignments. Existing agreeing v2 rows are left untouched.
+-- Copy clean direct fixed-role assignments. Reusing the legacy assignment UUID is safe because
+-- the legacy and v2 assignment tables have independent primary-key namespaces.
 INSERT INTO security.user_tenant_operating_roles
 (assignment_id,user_id,tenant_id,role_key,status,valid_from_utc,valid_to_utc,
  assigned_by_user_id,assigned_at_utc,ended_at_utc)
-SELECT gen_random_uuid(),ura.user_id,ura.tenant_id,r.role_key,'ACTIVE',
+SELECT ura.assignment_id,ura.user_id,ura.tenant_id,r.role_key,'ACTIVE',
        ura.valid_from_utc,ura.valid_to_utc,ura.assigned_by_user_id,ura.assigned_at_utc,NULL
 FROM security.user_role_assignments ura
 JOIN security.roles r
