@@ -52,8 +52,8 @@ class FakeAuthorizationRepository:
     def active_service_integration(self, integration_key: str) -> bool:
         return self.service_active and integration_key == "audit-core"
 
-    def human_for_clerk_subject(self, clerk_subject: str) -> dict[str, Any] | None:
-        if clerk_subject != "clerk-user":
+    def human_for_user_id(self, user_id: str) -> dict[str, Any] | None:
+        if user_id != USER_ID:
             return None
         return self.human
 
@@ -122,12 +122,12 @@ def test_operating_role_uses_only_tenant_bundle() -> None:
     resolver = HumanAuthorizationResolver(repo)
 
     allowed = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.project.read",
     )
     denied = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.journey.update",
     )
@@ -146,12 +146,12 @@ def test_test_user_is_pc_only_in_canonical_test_tenant() -> None:
     resolver = HumanAuthorizationResolver(repo)
 
     allowed = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TEST_TENANT,
         permission_key="di.document.read",
     )
     production = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="di.document.read",
     )
@@ -171,12 +171,12 @@ def test_super_admin_gets_every_active_registered_permission() -> None:
     resolver = HumanAuthorizationResolver(repo)
 
     decision = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="di.document.read",
     )
     inactive_permission = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="di.nonexistent.write",
     )
@@ -195,22 +195,22 @@ def test_tenant_admin_is_all_approved_modules_for_one_tenant() -> None:
     resolver = HumanAuthorizationResolver(repo)
 
     audit = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.master.publish",
     )
     di = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="di.tenant_config.write",
     )
     wrong_tenant = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_B,
         permission_key="audit.master.publish",
     )
     operating_permission = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.journey.update",
     )
@@ -230,22 +230,22 @@ def test_module_admin_is_one_module_across_tenants() -> None:
     resolver = HumanAuthorizationResolver(repo)
 
     tenant_a = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.master.publish",
     )
     tenant_b = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_B,
         permission_key="audit.master.publish",
     )
     di = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="di.tenant_config.write",
     )
     audit_operating = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.journey.update",
     )
@@ -263,7 +263,7 @@ def test_inactive_user_and_inactive_tenant_fail_closed() -> None:
     repo.human["user_status"] = "SUSPENDED"
 
     inactive_user = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.project.read",
     )
@@ -273,7 +273,7 @@ def test_inactive_user_and_inactive_tenant_fail_closed() -> None:
     repo.human["user_status"] = "ACTIVE"
     repo.tenants[TENANT_A] = "OFFBOARDED"
     inactive_tenant = resolver.check(
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.project.read",
     )
@@ -297,7 +297,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
     )
     decision = service.check(
         service_token=security_token,
-        clerk_subject="clerk-user",
+        user_id=USER_ID,
         tenant_id=TENANT_A,
         permission_key="audit.project.read",
     )
@@ -313,7 +313,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
     with pytest.raises(SecurityError) as wrong_audience:
         service.check(
             service_token=wrong_audience_token,
-            clerk_subject="clerk-user",
+            user_id=USER_ID,
             tenant_id=TENANT_A,
             permission_key="audit.project.read",
         )
@@ -335,7 +335,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
     with pytest.raises(SecurityError) as browser_denied:
         service.check(
             service_token=browser_like_token,
-            clerk_subject="clerk-user",
+            user_id=USER_ID,
             tenant_id=TENANT_A,
             permission_key="audit.project.read",
         )
@@ -345,7 +345,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
     with pytest.raises(SecurityError) as unregistered:
         service.check(
             service_token=security_token,
-            clerk_subject="clerk-user",
+            user_id=USER_ID,
             tenant_id=TENANT_A,
             permission_key="audit.project.read",
         )
