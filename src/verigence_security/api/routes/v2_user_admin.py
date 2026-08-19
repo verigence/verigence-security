@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from verigence_security.api.platform_dependencies import platform_session
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.api.v2_user_directory_schemas import GlobalUserDirectoryResponse
 from verigence_security.core.errors import security_error
 from verigence_security.services.v2_human_actor import HumanActorContext
@@ -40,7 +40,7 @@ def list_global_users(
     search: str | None = Query(default=None, max_length=320),
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[GlobalUserDirectoryResponse]:
     _require_super_admin(actor)
@@ -59,7 +59,7 @@ def list_global_users(
 @router.get("/users/{userId}", response_model=GlobalUserDirectoryResponse)
 def get_global_user(
     userId: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> GlobalUserDirectoryResponse:
     _require_super_admin(actor)
