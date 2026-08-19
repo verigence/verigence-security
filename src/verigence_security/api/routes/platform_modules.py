@@ -10,7 +10,7 @@ from verigence_security.api.module_catalog_schemas import (
     ModuleSummaryResponse,
 )
 from verigence_security.api.platform_dependencies import platform_session
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
 from verigence_security.repositories.v2_module_catalog_repository import (
     V2AwareModuleCatalogRepository,
@@ -40,7 +40,7 @@ def _require_admin(actor: HumanActorContext) -> None:
 
 @router.get("", response_model=list[ModuleSummaryResponse])
 def list_modules(
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
     _ = actor
@@ -50,7 +50,7 @@ def list_modules(
 @router.get("/{moduleKey}", response_model=ModuleCatalogResponse)
 def get_module(
     moduleKey: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _ = actor
@@ -65,7 +65,7 @@ def get_module(
 @router.get("/{moduleKey}/permissions", response_model=list[ModulePermissionResponse])
 def list_module_permissions(
     moduleKey: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
     _require_admin(actor)
@@ -82,7 +82,7 @@ def put_module_catalog(
     moduleKey: str,
     body: ModuleCatalogPutRequest,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _require_super_admin(actor)
