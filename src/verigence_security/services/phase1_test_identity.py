@@ -41,6 +41,10 @@ class Phase1TestIdentityProvisioningService:
             user_id, user_created = self._ensure_test_user()
             self._reject_test_user_role_conflicts(user_id)
             tenant_id, tenant_created = self._ensure_test_tenant(actor_user_id)
+            self._ensure_test_tenant_defaults(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+            )
             self._ensure_singleton_binding(user_id=user_id, tenant_id=tenant_id)
             self.s.commit()
             return Phase1TestIdentityProvisioningResult(
@@ -231,6 +235,49 @@ class Phase1TestIdentityProvisioningService:
         elif status != "ACTIVE":
             raise RuntimeError(f"TestTenant must be CONFIGURING or ACTIVE, found {status}")
         return tenant_id, created
+
+    def _ensure_test_tenant_defaults(self, *, tenant_id: str, actor_user_id: str) -> None:
+        platform_rows = {
+            (str(row["role_key"]), str(row["permission_key"]))
+            for row in self.s.execute(
+                text(
+                    """
+                    SELECT d.role_key,d.permission_key
+                    FROM security.platform_role_permission_defaults d
+                    JOIN security.permissions p
+                      ON p.permission_key=d.permission_key AND p.status='ACTIVE'
+                    WHERE d.status='ACTIVE'
+                      AND d.role_key IN ('PC','TL','PM','CRM','Executive')
+                    """
+                )
+            ).mappings()
+        }
+        if {role_key for role_key, _ in platform_rows} != {"PC", "TL", "PM", "CRM", "Executive"}:
+            raise RuntimeError("Approved v2 operating-role platform defaults are not ready")
+
+        tenant_rows = {
+            (str(row["role_key"]), str(row["permission_key"]))
+            for row in self.s.execute(
+                text(
+                    """
+                    SELECT role_key,permission_key
+                    FROM security.tenant_role_permissions
+                    WHERE tenant_id=:tenant_id
+                      AND role_key IN ('PC','TL','PM','CRM','Executive')
+                    """
+                ),
+                {"tenant_id": tenant_id},
+            ).mappings()
+        }
+        if not tenant_rows:
+            PlatformTenantService(self.s)._seed_v2_tenant_role_defaults(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                now=datetime.now(UTC),
+            )
+            return
+        if tenant_rows != platform_rows:
+            raise RuntimeError("Existing TestTenant role bundles differ from current platform defaults")
 
     def _ensure_singleton_binding(self, *, user_id: str, tenant_id: str) -> None:
         existing = self.s.execute(
