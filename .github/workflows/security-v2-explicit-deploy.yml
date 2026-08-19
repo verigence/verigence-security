@@ -1,0 +1,70 @@
+name: Security v2 Explicit DEV Deploy
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/security-v2-explicit-deploy.yml
+
+permissions:
+  contents: read
+  actions: write
+  statuses: write
+
+jobs:
+  dispatch-and-wait:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Mark deployment pending
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=pending -f context=security-v2-cicd \
+            -f description='Running exact-head Security v2 CI, DB migrations and Railway DEV deploy' >/dev/null
+
+      - name: Dispatch canonical Security CI/CD deploy-dev operation
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref dev \
+            -f operation=deploy-dev \
+            -f tenant_code=test-project \
+            -f tenant_name=TestProject \
+            -f tenant_id=9de3af49-260f-4b15-8263-07c93dcc04d2 \
+            -f activate_after_create=true
+
+      - name: Resolve dispatched exact-head run
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=''
+          for attempt in $(seq 1 30); do
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch dev --event workflow_dispatch --limit 20 \
+              --json databaseId,headSha,createdAt \
+              --jq '.[] | select(.headSha == env.GITHUB_SHA) | .databaseId' | head -n1)"
+            [ -n "$run_id" ] && break
+            sleep 2
+          done
+          [ -n "$run_id" ] || { echo 'Could not resolve dispatched exact-head CI/CD run'; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for canonical CI/CD result
+        shell: bash
+        run: gh run watch "${{ steps.resolve.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --exit-status
+
+      - name: Mark deployment success
+        if: success()
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=success -f context=security-v2-cicd \
+            -f description='Security v2 CI, migrations 0011-0015 and Railway DEV deployment passed' >/dev/null
+
+      - name: Mark deployment failure
+        if: failure()
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=failure -f context=security-v2-cicd \
+            -f description='Security v2 canonical CI/CD deploy-dev operation failed' >/dev/null
