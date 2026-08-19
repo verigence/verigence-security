@@ -12,8 +12,10 @@ from verigence_security.api.v2_rbac_schemas import (
     OperatingRoleKey,
     OperatingRoleMutationResponse,
     OperatingRolePutRequest,
+    RoleClass,
     RoleDefinitionResponse,
     RolePermissionBundleResponse,
+    RoleStatus,
     TenantRolePermissionBundlePutRequest,
     TenantRolePermissionBundleResponse,
 )
@@ -50,9 +52,9 @@ def _require_tenant_exists(session: Session, tenant_id: str) -> None:
 def _role_response(row: dict[str, object]) -> RoleDefinitionResponse:
     return RoleDefinitionResponse(
         roleKey=str(row["role_key"]),
-        roleClass=cast(str, row["role_class"]),
+        roleClass=cast(RoleClass, row["role_class"]),
         displayName=str(row["display_name"]),
-        status=cast(str, row["status"]),
+        status=cast(RoleStatus, row["status"]),
     )
 
 
