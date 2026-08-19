@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -74,7 +76,7 @@ def list_module_permissions(
     )
     if catalog is None:
         raise HTTPException(status_code=404, detail="Module not found")
-    return list(catalog["permissions"])  # type: ignore[arg-type]
+    return cast(list[dict[str, object]], catalog["permissions"])
 
 
 @router.put("/{moduleKey}/catalog", response_model=ModuleCatalogResponse)

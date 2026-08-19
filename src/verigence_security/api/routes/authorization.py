@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
@@ -58,8 +60,8 @@ def authorization_check(
         allowed=decision.allowed,
         decision="ALLOW" if decision.allowed else "DENY",
         reasonCode=decision.reason_code,
-        userId=decision.user_id,
-        tenantId=decision.tenant_id,
+        userId=UUID(decision.user_id) if decision.user_id is not None else None,
+        tenantId=UUID(decision.tenant_id) if decision.tenant_id is not None else None,
         permissionKey=decision.permission_key,
         moduleKey=decision.module_key,
         classification=decision.classification,

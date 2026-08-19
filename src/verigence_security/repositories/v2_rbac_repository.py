@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 
@@ -239,7 +240,7 @@ class V2RbacRepository:
             ),
             {"user_id": user_id, "tenant_id": tenant_id, "now": now},
         )
-        return bool(result.rowcount)
+        return bool(cast(CursorResult[Any], result).rowcount)
 
     def insert_operating_role(
         self,
@@ -386,7 +387,7 @@ class V2RbacRepository:
                 "now": now,
             },
         )
-        return bool(result.rowcount)
+        return bool(cast(CursorResult[Any], result).rowcount)
 
     def commit(self) -> None:
         self.s.commit()
