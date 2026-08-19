@@ -50,7 +50,7 @@ def authorization_check(
         TokenService(settings),
     ).check(
         service_token=service_token,
-        clerk_subject=body.clerkSubject,
+        user_id=str(body.userId),
         tenant_id=str(body.tenantId) if body.tenantId is not None else None,
         permission_key=body.permissionKey,
     )
