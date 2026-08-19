@@ -48,9 +48,12 @@ jobs:
           result="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "
             WITH ids AS (
               SELECT
-                max(user_id) FILTER (WHERE provider='CLERK' AND provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud') AS approved_id,
-                max(user_id) FILTER (WHERE provider='CLERK' AND provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN') AS test_id
-              FROM security.external_identities
+                (SELECT user_id FROM security.external_identities
+                 WHERE provider='CLERK' AND provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+                 LIMIT 1) AS approved_id,
+                (SELECT user_id FROM security.external_identities
+                 WHERE provider='CLERK' AND provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
+                 LIMIT 1) AS test_id
             ), legacy AS (
               SELECT
                 count(*) FILTER (WHERE p.user_id=i.approved_id) AS approved,
