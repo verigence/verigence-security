@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI
 from verigence_security.api.dependencies import correlation_header_parameter
 from verigence_security.api.routes import (
     access,
+    authorization,
     dev_mock,
     global_users,
     health,
@@ -41,6 +42,7 @@ app.include_router(jwks.router)
 app.include_router(access.oauth_router)
 app.include_router(access.router)
 app.include_router(service_tokens.router)
+app.include_router(authorization.router)
 app.include_router(tenant_groups.router)
 app.include_router(tenant_roles.router)
 app.include_router(tenant_privileged_access.router)
