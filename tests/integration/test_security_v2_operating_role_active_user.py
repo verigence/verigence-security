@@ -97,17 +97,16 @@ def test_pending_user_cannot_receive_new_v2_operating_role() -> None:
                 },
             )
 
-        with Session(engine) as session:
-            with pytest.raises(
-                ValueError,
-                match="USER must be ACTIVE for an operating-role assignment",
-            ):
-                OperatingRoleAssignmentService(session).set_role(
-                    tenant_id=tenant_id,
-                    user_id=pending_user_id,
-                    role_key="PC",
-                    actor_user_id=actor_id,
-                )
+        with Session(engine) as session, pytest.raises(
+            ValueError,
+            match="USER must be ACTIVE for an operating-role assignment",
+        ):
+            OperatingRoleAssignmentService(session).set_role(
+                tenant_id=tenant_id,
+                user_id=pending_user_id,
+                role_key="PC",
+                actor_user_id=actor_id,
+            )
 
         with engine.connect() as conn:
             count = conn.execute(

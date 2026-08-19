@@ -132,8 +132,8 @@ def test_v2_role_foundation_tables_and_fixed_role_catalogue_exist() -> None:
                     )
                 ).scalars()
             )
-            assert V2_TABLES <= tables
-            assert LEGACY_TABLES_THAT_MUST_REMAIN <= tables
+            assert tables >= V2_TABLES
+            assert tables >= LEGACY_TABLES_THAT_MUST_REMAIN
 
             roles = {
                 str(row["role_key"]): str(row["role_class"])
@@ -190,25 +190,24 @@ def test_v2_operating_role_cardinality_and_one_pm_per_tenant() -> None:
                 },
             )
 
-            with pytest.raises(IntegrityError):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            """
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                conn.execute(
+                    text(
+                        """
                             INSERT INTO security.user_tenant_operating_roles
                             (assignment_id,user_id,tenant_id,role_key,status,
                              assigned_by_user_id,assigned_at_utc)
                             VALUES (:id,:user_id,:tenant_id,'TL','ACTIVE',:actor_id,:now)
                             """
-                        ),
-                        {
-                            "id": str(uuid4()),
-                            "user_id": user_a,
-                            "tenant_id": tenant_a,
-                            "actor_id": user_a,
-                            "now": now,
-                        },
-                    )
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "user_id": user_a,
+                        "tenant_id": tenant_a,
+                        "actor_id": user_a,
+                        "now": now,
+                    },
+                )
 
             conn.execute(
                 text(
@@ -246,25 +245,24 @@ def test_v2_operating_role_cardinality_and_one_pm_per_tenant() -> None:
                 },
             )
 
-            with pytest.raises(IntegrityError):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            """
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                conn.execute(
+                    text(
+                        """
                             INSERT INTO security.user_tenant_operating_roles
                             (assignment_id,user_id,tenant_id,role_key,status,
                              assigned_by_user_id,assigned_at_utc)
                             VALUES (:id,:user_id,:tenant_id,'PM','ACTIVE',:actor_id,:now)
                             """
-                        ),
-                        {
-                            "id": str(uuid4()),
-                            "user_id": user_c,
-                            "tenant_id": tenant_a,
-                            "actor_id": user_a,
-                            "now": now,
-                        },
-                    )
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "user_id": user_c,
+                        "tenant_id": tenant_a,
+                        "actor_id": user_a,
+                        "now": now,
+                    },
+                )
     finally:
         with engine.begin() as conn:
             conn.execute(
@@ -304,19 +302,18 @@ def test_v2_admin_scope_shapes_and_single_super_admin() -> None:
                 {"id": str(uuid4()), "user_id": user_a, "now": now},
             )
 
-            with pytest.raises(IntegrityError):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            """
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                conn.execute(
+                    text(
+                        """
                             INSERT INTO security.user_admin_role_assignments
                             (assignment_id,user_id,role_key,scope_type,scope_id,status,
                              assigned_by_user_id,assigned_at_utc)
                             VALUES (:id,:user_id,'SuperAdmin','PLATFORM',NULL,'ACTIVE',NULL,:now)
                             """
-                        ),
-                        {"id": str(uuid4()), "user_id": user_b, "now": now},
-                    )
+                    ),
+                    {"id": str(uuid4()), "user_id": user_b, "now": now},
+                )
 
             conn.execute(
                 text(
@@ -353,24 +350,23 @@ def test_v2_admin_scope_shapes_and_single_super_admin() -> None:
                 },
             )
 
-            with pytest.raises(IntegrityError):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            """
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                conn.execute(
+                    text(
+                        """
                             INSERT INTO security.user_admin_role_assignments
                             (assignment_id,user_id,role_key,scope_type,scope_id,status,
                              assigned_by_user_id,assigned_at_utc)
                             VALUES (:id,:user_id,'TenantAdmin','MODULE','di','ACTIVE',:actor_id,:now)
                             """
-                        ),
-                        {
-                            "id": str(uuid4()),
-                            "user_id": user_b,
-                            "actor_id": user_a,
-                            "now": now,
-                        },
-                    )
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "user_id": user_b,
+                        "actor_id": user_a,
+                        "now": now,
+                    },
+                )
     finally:
         with engine.begin() as conn:
             conn.execute(

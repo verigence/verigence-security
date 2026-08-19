@@ -29,8 +29,8 @@ class _FakeHumanActorService:
         _ = session
 
     def authenticate(self, identity: object) -> object:
-        assert getattr(identity, "provider") == "CLERK"
-        assert getattr(identity, "provider_subject") == "user_clerk_active"
+        assert identity.provider == "CLERK"
+        assert identity.provider_subject == "user_clerk_active"
         return SimpleNamespace(user_id="11111111-1111-1111-1111-111111111111")
 
 
@@ -90,7 +90,7 @@ def test_phase1_login_requires_no_tenant_device_geo_or_idempotency_header(
     assert response.status_code == 200
     assert response.json()["accessToken"] == "security-human-token"
     assert response.json()["actorType"] == "USER"
-    assert getattr(_dependencies.claims, "user_id") == "11111111-1111-1111-1111-111111111111"
+    assert _dependencies.claims.user_id == "11111111-1111-1111-1111-111111111111"
 
 
 def test_optional_device_geo_headers_do_not_change_phase1_login(
@@ -110,7 +110,7 @@ def test_optional_device_geo_headers_do_not_change_phase1_login(
 
     assert response.status_code == 200
     assert response.json()["accessToken"] == "security-human-token"
-    assert getattr(_dependencies.claims, "user_id") == "11111111-1111-1111-1111-111111111111"
+    assert _dependencies.claims.user_id == "11111111-1111-1111-1111-111111111111"
 
 
 def test_non_active_security_user_cannot_receive_human_token(
