@@ -1,14 +1,22 @@
 -- Verigence Security v2 — canonical Phase-1 SuperAdmin reconciliation
--- Bridges the approved Clerk SuperAdmin identity into both the retained legacy
--- platform role and the canonical v2 admin-role assignment. This migration is
--- intentionally narrow and does not migrate any other USER/role data.
+-- Reconciles the approved Clerk SuperAdmin identity into both the retained legacy
+-- compatibility role and the canonical v2 admin-role assignment.
+--
+-- The Clerk identity below previously used as SuperAdmin is the approved Phase-1
+-- TestUser identity. Because the environment has no meaningful activity yet, any
+-- mistaken SuperAdmin assignment for that exact TestUser is removed here. The
+-- global USER / Clerk identity itself is preserved for later TestTenant bootstrap.
+--
+-- This migration is intentionally narrow and does not migrate any other USER/role data.
 
 BEGIN;
 
 DO $$
 DECLARE
   approved_subject constant text := 'user_3I7HFuZZiFC9K2muiweXFRoeoud';
+  obsolete_super_admin_subject constant text := 'user_3I7FdD5Pkmydsp23OfjH9hBMxpN';
   approved_user_id uuid;
+  obsolete_user_id uuid;
   identity_status text;
   user_status text;
   principal_status text;
@@ -20,7 +28,32 @@ BEGIN
     AND ei.provider_subject=approved_subject
   LIMIT 1;
 
-  -- Never silently accept a different active SuperAdmin under either model.
+  SELECT ei.user_id
+    INTO obsolete_user_id
+  FROM security.external_identities ei
+  WHERE ei.provider='CLERK'
+    AND ei.provider_subject=obsolete_super_admin_subject
+  LIMIT 1;
+
+  IF approved_user_id IS NOT NULL
+     AND obsolete_user_id IS NOT NULL
+     AND approved_user_id=obsolete_user_id THEN
+    RAISE EXCEPTION 'Approved SuperAdmin and TestUser Clerk identities resolve to the same Security USER';
+  END IF;
+
+  -- Remove only the known mistaken SuperAdmin classification from the exact
+  -- TestUser identity. Preserve the USER/external identity for later TestTenant use.
+  IF obsolete_user_id IS NOT NULL THEN
+    DELETE FROM security.user_admin_role_assignments
+    WHERE user_id=obsolete_user_id
+      AND role_key='SuperAdmin';
+
+    DELETE FROM security.platform_user_role_assignments
+    WHERE user_id=obsolete_user_id
+      AND role_key='platform.super_admin';
+  END IF;
+
+  -- Never silently accept any other different active SuperAdmin under either model.
   IF EXISTS (
     SELECT 1
     FROM security.platform_user_role_assignments pura
@@ -41,8 +74,9 @@ BEGIN
     RAISE EXCEPTION 'Conflicting v2 SuperAdmin exists; approved Clerk identity is %', approved_subject;
   END IF;
 
-  -- Fresh environments may not have provisioned the Clerk USER yet. The
-  -- operator-controlled provisioning service will create it later.
+  -- Fresh environments may not have provisioned the approved Clerk USER yet.
+  -- The operator-controlled provisioning service creates it with an application
+  -- generated UUID and then creates the canonical assignments.
   IF approved_user_id IS NULL THEN
     RETURN;
   END IF;
@@ -72,6 +106,8 @@ BEGIN
     RAISE EXCEPTION 'Approved SuperAdmin USER has an ACTIVE operating role';
   END IF;
 
+  -- Retain the legacy assignment only as temporary compatibility for existing
+  -- DEV operational workflows that have not yet moved to the v2 admin table.
   INSERT INTO security.platform_user_role_assignments
   (assignment_id,user_id,role_key,status,assignment_source,assigned_at_utc)
   SELECT
