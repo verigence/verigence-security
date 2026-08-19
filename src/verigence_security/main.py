@@ -13,9 +13,9 @@ from verigence_security.api.routes import (
     platform_admin,
     platform_modules,
     service_tokens,
-    tenant_groups,
     tenant_privileged_access,
-    tenant_roles,
+    v2_admin_roles,
+    v2_groups,
     v2_rbac,
 )
 from verigence_security.config import get_settings
@@ -43,12 +43,12 @@ app.include_router(access.oauth_router)
 app.include_router(access.router)
 app.include_router(service_tokens.router)
 app.include_router(authorization.router)
-app.include_router(tenant_groups.router)
-app.include_router(tenant_roles.router)
 app.include_router(tenant_privileged_access.router)
 app.include_router(platform_admin.router)
 app.include_router(platform_modules.router)
 app.include_router(global_users.router)
 app.include_router(v2_rbac.router)
+app.include_router(v2_groups.router)
+app.include_router(v2_admin_roles.router)
 if settings.dev_mock_auth_enabled:
     app.include_router(dev_mock.router)
