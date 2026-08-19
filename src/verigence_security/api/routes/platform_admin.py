@@ -10,7 +10,7 @@ from verigence_security.api.platform_schemas import (
     PlatformTenantResponse,
     PlatformTenantUpdateRequest,
 )
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
 from verigence_security.services.platform_admin import PlatformTenantService
 from verigence_security.services.v2_human_actor import HumanActorContext
@@ -57,7 +57,7 @@ def _require_tenant_update_access(actor: HumanActorContext, tenant_id: str) -> N
 def create_tenant(
     body: PlatformTenantCreateRequest,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _require_super_admin(actor)
@@ -75,7 +75,7 @@ def create_tenant(
 
 @router.get("/tenants", response_model=list[PlatformTenantResponse])
 def list_tenants(
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
     rows = PlatformTenantService(session).list_tenants()
@@ -94,7 +94,7 @@ def list_tenants(
 @router.get("/tenants/{tenantId}", response_model=PlatformTenantResponse)
 def get_tenant(
     tenantId: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _require_tenant_metadata_access(actor, tenantId)
@@ -109,7 +109,7 @@ def update_tenant(
     tenantId: str,
     body: PlatformTenantUpdateRequest,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _require_tenant_update_access(actor, tenantId)
@@ -128,7 +128,7 @@ def update_tenant(
 def activate_tenant(
     tenantId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _require_super_admin(actor)
