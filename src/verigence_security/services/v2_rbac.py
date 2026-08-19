@@ -32,7 +32,7 @@ def _audit_tenant_change(
     *,
     tenant_id: str,
     actor_user_id: str,
-    correlation_id: str | None,
+    correlation_id: str,
     operation_key: str,
     resource_type: str,
     resource_id: str,
@@ -54,7 +54,7 @@ def _audit_tenant_change(
         ),
         {
             "change_id": str(uuid4()),
-            "correlation_id": correlation_id or str(uuid4()),
+            "correlation_id": correlation_id,
             "tenant_id": tenant_id,
             "actor_user_id": actor_user_id,
             "operation_key": operation_key,
@@ -127,18 +127,19 @@ class TenantRoleBundleService:
                 now=now,
             )
             after = sorted(requested)
-            _audit_tenant_change(
-                self.repository,
-                tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
-                correlation_id=correlation_id,
-                operation_key="security.role.update",
-                resource_type="ROLE_BUNDLE",
-                resource_id=role_key,
-                before_state={"roleKey": role_key, "permissions": before},
-                after_state={"roleKey": role_key, "permissions": after},
-                now=now,
-            )
+            if correlation_id is not None:
+                _audit_tenant_change(
+                    self.repository,
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=correlation_id,
+                    operation_key="security.role.update",
+                    resource_type="ROLE_BUNDLE",
+                    resource_id=role_key,
+                    before_state={"roleKey": role_key, "permissions": before},
+                    after_state={"roleKey": role_key, "permissions": after},
+                    now=now,
+                )
             self.repository.commit()
         except Exception:
             self.repository.rollback()
@@ -239,18 +240,19 @@ class OperatingRoleAssignmentService:
                 actor_user_id=actor_user_id,
                 now=now,
             )
-            _audit_tenant_change(
-                self.repository,
-                tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
-                correlation_id=correlation_id,
-                operation_key="security.role.assign",
-                resource_type="USER_OPERATING_ROLE",
-                resource_id=user_id,
-                before_state={"roleKey": before_role},
-                after_state={"roleKey": role_key},
-                now=now,
-            )
+            if correlation_id is not None:
+                _audit_tenant_change(
+                    self.repository,
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=correlation_id,
+                    operation_key="security.role.assign",
+                    resource_type="USER_OPERATING_ROLE",
+                    resource_id=user_id,
+                    before_state={"roleKey": before_role},
+                    after_state={"roleKey": role_key},
+                    now=now,
+                )
             self.repository.commit()
         except IntegrityError as exc:
             self.repository.rollback()
@@ -297,18 +299,19 @@ class OperatingRoleAssignmentService:
                 tenant_id=tenant_id,
                 now=now,
             )
-            _audit_tenant_change(
-                self.repository,
-                tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
-                correlation_id=correlation_id,
-                operation_key="security.role.assign",
-                resource_type="USER_OPERATING_ROLE",
-                resource_id=user_id,
-                before_state={"roleKey": current_role},
-                after_state={"roleKey": None},
-                now=now,
-            )
+            if correlation_id is not None:
+                _audit_tenant_change(
+                    self.repository,
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=correlation_id,
+                    operation_key="security.role.assign",
+                    resource_type="USER_OPERATING_ROLE",
+                    resource_id=user_id,
+                    before_state={"roleKey": current_role},
+                    after_state={"roleKey": None},
+                    now=now,
+                )
             self.repository.commit()
         except Exception:
             self.repository.rollback()
