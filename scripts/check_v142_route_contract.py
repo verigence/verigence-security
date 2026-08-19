@@ -4,6 +4,10 @@ schema = app.openapi()
 paths = set(schema.get("paths", {}))
 
 required = {
+    "/security/v1/auth/login",
+    "/security/v1/onboarding/users",
+    "/security/v1/onboarding/users/{signupAttemptId}/verify-email",
+    "/security/v1/onboarding/users/{signupAttemptId}/resend-email-code",
     "/security/v1/service/token",
     "/security/v1/authorization/check",
     "/security/v1/roles",
@@ -26,9 +30,8 @@ missing = sorted(required - paths)
 if missing:
     raise SystemExit(f"Missing Phase-1 Security target routes: {missing}")
 
-# PlatformAdmin JWT control-plane endpoints no longer have a dependent caller and must
-# remain retired. The older access/OAuth router is different: Audit Core dev still consumes
-# it, so it stays as explicit temporary compatibility until that repo is migrated.
+# Separate PlatformAdmin authentication/token endpoints are not part of the target. Human admins
+# authenticate through the same canonical /security/v1/auth/login boundary as every other human.
 retired_exact = {
     "/security/v1/platform/bootstrap/claim",
     "/security/v1/platform/auth/login",
@@ -47,18 +50,11 @@ active_legacy_admin = sorted(
 if active_legacy_admin:
     raise SystemExit(f"Retired arbitrary Tenant RBAC routes are still active: {active_legacy_admin}")
 
+# Current Audit Core dev still calls /oauth/token. The access-session bridge remains deprecated
+# compatibility in the same access module. Neither route is the Phase-1 target contract.
 compatibility = {
-    # Required by current Audit Core dev until it migrates to /security/v1/service/token
-    # and Clerk-subject /authorization/check.
     "/oauth/token",
-    # Older Security human token/session surface remains in the same compatibility router;
-    # it is not part of the target Phase-1 model and must not be used by new code.
-    "/security/v1/auth/login",
     "/security/v1/access-sessions",
-    # Employee signup compatibility until the Clerk-first-party bind contract is fixed.
-    "/security/v1/onboarding/users",
-    "/security/v1/onboarding/users/{signupAttemptId}/verify-email",
-    "/security/v1/onboarding/users/{signupAttemptId}/resend-email-code",
 }
 missing_compatibility = sorted(compatibility - paths)
 if missing_compatibility:
@@ -67,4 +63,4 @@ if missing_compatibility:
         f"{missing_compatibility}"
     )
 
-print("Phase-1 Security target + compatibility route contract PASSED")
+print("Phase-1 Security target + bounded compatibility route contract PASSED")
