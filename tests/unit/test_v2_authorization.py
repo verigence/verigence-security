@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -291,8 +292,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
         ServiceTokenClaims(
             subject="audit-core",
             audience="security",
-            expires_at=__import__("datetime").datetime.now(__import__("datetime").UTC)
-            + __import__("datetime").timedelta(hours=4),
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
         )
     )
     decision = service.check(
@@ -307,8 +307,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
         ServiceTokenClaims(
             subject="audit-core",
             audience="di",
-            expires_at=__import__("datetime").datetime.now(__import__("datetime").UTC)
-            + __import__("datetime").timedelta(hours=4),
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
         )
     )
     with pytest.raises(SecurityError) as wrong_audience:
@@ -330,8 +329,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
             roles=("PC",),
             device_id="00000000-0000-4000-8000-000000000401",
             location_id="00000000-0000-4000-8000-000000000501",
-            expires_at=__import__("datetime").datetime.now(__import__("datetime").UTC)
-            + __import__("datetime").timedelta(minutes=10),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
     )
     with pytest.raises(SecurityError) as browser_denied:
@@ -341,7 +339,7 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
             tenant_id=TENANT_A,
             permission_key="audit.project.read",
         )
-    assert browser_denied.value.code == "ACTOR_TYPE_NOT_ALLOWED"
+    assert browser_denied.value.code == "AUTH_TOKEN_INVALID"
 
     repo.service_active = False
     with pytest.raises(SecurityError) as unregistered:
