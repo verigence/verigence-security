@@ -17,7 +17,7 @@ This document is the proposed consolidated Security design for the Verigence pla
 It covers:
 
 - global human USER identity;
-- Clerk-based human authentication;
+- Clerk-based human authentication through Security only;
 - the Phase-1 human token model;
 - USER onboarding and approval;
 - USER lifecycle, suspension and hard deletion;
@@ -70,17 +70,20 @@ One person has one global Verigence USER identity. The same USER may later recei
 
 ### 2.2 Authentication — CONFIRMED
 
-Clerk owns human authentication.
+Clerk owns human credential storage and credential verification. **Verigence Security is the only Verigence module that integrates with Clerk.**
 
 Phase 1:
 
-- uses Clerk first-party session JWTs for Web/Mobile authentication;
-- has no MFA requirement;
-- does not make Verigence Security a second **human** JWT issuer;
-- does not store or validate human passwords in Verigence Security;
-- does not make Clerk authoritative for Verigence roles or permissions.
+- Web/Mobile does **not** call Clerk directly;
+- Web/Mobile does **not** include a Clerk SDK or Clerk publishable/secret key;
+- Audit Core, DI and the Web BFF do **not** call Clerk or validate Clerk session tokens;
+- human signup, email verification and login requests reach Security through Verigence APIs;
+- Security calls the Clerk Backend API for human user creation and credential/email verification;
+- passwords, email OTP values and future authentication secrets are transient request secrets and are never persisted, audited, traced, cached or logged by Verigence;
+- after successful Clerk-backed authentication, Security resolves the Clerk subject to the global Verigence USER and issues the Verigence human access token/session used by Verigence clients and resource servers;
+- Security does not make Clerk authoritative for Verigence roles or permissions.
 
-Security may issue short-lived JWTs for registered **machine/service identities** under the `ServiceIntegration` model defined in this document. That machine-token capability is separate from the human token model.
+Security also issues short-lived JWTs for registered **machine/service identities** under the `ServiceIntegration` model defined in this document. Machine tokens are a separate actor/token model from the Security-issued human access token.
 
 ### 2.3 Human authorization — CONFIRMED
 
@@ -88,16 +91,17 @@ Verigence Security is the sole source of truth for functional authorization.
 
 For Phase 1, every protected backend business request requiring Verigence human authorization uses Security's authorization service.
 
-The authorization request is **not OAuth token introspection**. The Clerk JWT proves authenticated identity at the resource server; Security independently decides whether that USER may perform the requested Verigence function.
+The Security-issued human access JWT proves the authenticated Verigence USER identity at the resource server. It is **not** the authorization database: authoritative roles and permissions remain in Security and are evaluated synchronously.
 
 Phase 1 therefore has:
 
-- no custom Verigence human JWT;
-- no human permission claims copied into Clerk JWT;
+- one Verigence human authentication facade in Security backed by Clerk Backend APIs;
+- no direct Clerk trust boundary in Web/Mobile, Audit Core or DI;
+- no authoritative human permission claims copied into the human JWT as a substitute for live Security authorization;
 - no distributed Security authorization projection in Audit Core/DI;
 - no authorization event replication for normal runtime authorization;
 - no opaque-token introspection design;
-- no permission-epoch/revocation design for a Verigence-issued human token.
+- live Security USER status and authorization checked synchronously for protected operations.
 
 Authorization fails closed when Security cannot make the required decision.
 
@@ -292,7 +296,8 @@ The Web BFF must not own:
 - permissions;
 - Tenant authorization;
 - Dealer/Outlet assignments;
-- authorization decisions as source of truth.
+- authorization decisions as source of truth;
+- Clerk credentials, Clerk SDK/configuration or direct Clerk integration.
 
 The exact Mobile access path is not changed by this observation and must not be inferred from the Web BFF decision.
 
@@ -321,41 +326,43 @@ Phase 1 includes a machine-only `ServiceIntegration` classification for module-t
               Web application      Mobile client
               + Web BFF/API             |
                     |                    |
-             Clerk authentication / session JWT
-                    |                    |
                     +---------+----------+
                               |
-             +----------------+----------------+
-             |                |                |
-             v                v                v
-        +-----------+    +-------------+   +-----------+
-        | SECURITY  |    | AUDIT CORE  |   |    DI     |
-        |           |    |             |   |           |
-        | USER SoT  |    | Dealer/     |   | generic   |
-        | AuthZ SoT |    | Outlet      |   | document  |
-        | roles     |    | scope       |   | intel.    |
-        | perms     |    | journeys    |   |           |
-        +-----+-----+    +------+------+   +-----------+
-              |                 |
-              |                 | module-to-module call
-              |                 | using Security-issued
-              |                 | ServiceIntegration JWT
-              |                 +---------------------------->
-              |
-              +-- machine/service registry + service token issuer
+                              | Verigence onboarding/login APIs
+                              v
+                        +-----------+
+                        | SECURITY  |
+                        |           |
+                        | USER SoT  |
+                        | AuthN     |
+                        | AuthZ SoT |
+                        | roles     |
+                        | perms     |
+                        +-----+-----+
+                              |
+                              | Clerk Backend API only
+                              v
+                           +-------+
+                           | Clerk |
+                           +-------+
+
+After successful login Security issues the Verigence human access JWT.
+That token is presented to Security / Audit Core / DI as applicable.
+Protected Audit Core / DI operations still obtain a synchronous
+Security authorization decision using their ServiceIntegration identity.
 ```
 
-Human access to DI is allowed when DI exposes a human-facing protected capability. DI remains outside human onboarding.
+Human access to DI is allowed when DI exposes a human-facing protected capability. DI remains outside human onboarding and has no Clerk integration.
 
 ### 3.1 Core ownership rule
 
 ```text
-Clerk              = authenticate the human
-Security           = identify the Verigence USER and decide functional authorization
+Clerk              = store/verify human credentials behind the Security-only backend integration
+Security           = expose Verigence human signup/login, map Clerk identity to the global USER, issue human access JWTs and decide functional authorization
 Security           = register machine identities and issue ServiceIntegration machine JWTs
-Audit Core         = decide Dealer/Outlet business scope and execute Audit business logic
-DI                 = generic document-intelligence service; may serve authorized humans directly but owns no human onboarding
-Web BFF            = client-facing composition/orchestration inside the Web module only
+Audit Core         = validate Security human JWTs, obtain Security functional authorization and decide Dealer/Outlet business scope
+DI                 = validate Security human JWTs, obtain Security functional authorization and provide generic document intelligence; owns no human onboarding
+Web BFF            = client-facing composition/orchestration inside the Web module only; no Clerk integration
 ServiceIntegration = machine-only module-to-module identity/authorization classification
 ```
 
@@ -367,12 +374,20 @@ ServiceIntegration = machine-only module-to-module identity/authorization classi
 
 Clerk owns:
 
-- credential verification;
+- human credential storage and verification;
 - email/sign-up authentication functions provided by Clerk;
-- Clerk session lifecycle;
-- Clerk session JWT signing and public-key/JWKS publication.
+- Clerk account lifecycle functions used by Security.
 
-Verigence Security owns the mapping from authenticated Clerk subject to global Verigence USER.
+Only Security may hold Clerk integration configuration/secrets and call Clerk Backend APIs.
+
+Web/Mobile, Web BFF, Audit Core and DI must not:
+
+- call Clerk Frontend or Backend APIs;
+- include a Clerk SDK;
+- hold Clerk publishable/secret keys;
+- receive or persist Clerk session tokens as the Verigence human session model.
+
+Verigence Security owns the mapping from Clerk subject to global Verigence USER and owns the Verigence-facing human authentication/session boundary.
 
 Clerk Organizations, Clerk roles and Clerk custom permission claims must not become the Verigence authorization source of truth.
 
@@ -380,8 +395,10 @@ Clerk Organizations, Clerk roles and Clerk custom permission claims must not bec
 
 Security owns:
 
+- the only Verigence-to-Clerk integration;
 - global USER record and status;
 - Clerk-to-Verigence identity mapping;
+- Verigence human authentication endpoints and Security-issued human access tokens;
 - Tenant entity and Tenant lifecycle capability;
 - global role classifications;
 - USER role assignments;
@@ -417,16 +434,16 @@ SuperAdmin's all-permission rule concerns functional permissions. Audit Core bus
 
 Human users **may call DI directly** for approved DI capabilities.
 
-DI has no role in human onboarding or human role assignment.
+DI has no role in human onboarding or human role assignment and has no direct Clerk integration.
 
 For a protected direct human DI request:
 
 ```text
-Human -> DI with Clerk session JWT
-DI validates Clerk JWT locally
-DI extracts authenticated Clerk subject
+Human -> DI with Security-issued human access JWT
+DI validates Security JWT locally using Security trusted signing keys/JWKS
+DI extracts authenticated global Verigence USER identity
 DI -> Security authorization service using DI's ServiceIntegration identity
-Security evaluates Clerk subject + Tenant + required DI permission
+Security evaluates USER + Tenant + required DI permission
 Security -> ALLOW / DENY
 DI executes only if allowed
 ```
@@ -463,8 +480,10 @@ Typical Web BFF functions include:
 - approval/rejection actions;
 - role-assignment screens;
 - Tenant/Dealer-Outlet assignment orchestration;
-- forwarding Clerk authentication context to backend APIs;
+- forwarding the Security-issued human authentication context to backend APIs;
 - response composition where one UI view needs Security and Audit Core data.
+
+The Web BFF does not call Clerk. Human signup/login credential operations are sent to Security's Verigence APIs.
 
 ### 5.2 Non-responsibilities — CONFIRMED
 
@@ -515,68 +534,86 @@ Historical `tenant_memberships` data may remain for migration/audit compatibilit
 
 ## 7. Clerk authentication architecture
 
-### 7.1 Human sign-in — CONFIRMED
+### 7.1 Security-only human sign-in — CONFIRMED
 
-Web/Mobile uses Clerk's first-party authentication/session model.
+Web/Mobile authenticates through Verigence Security APIs. There is no direct Web/Mobile-to-Clerk authentication path.
 
-After successful Clerk authentication, the client obtains a Clerk session JWT.
+Conceptually:
 
-The Clerk JWT proves authenticated identity. It does not by itself prove that:
+```text
+Web/Mobile
+   |
+   | identifier + password/(approved future factor)
+   v
+Security
+   |
+   | Clerk Backend API
+   v
+Clerk credential verification
+   |
+   v
+Security resolves Clerk subject -> global Verigence USER
+   |
+   +-- USER/session policy checks
+   v
+Security issues Verigence human access JWT
+```
 
-- the Verigence USER is ACTIVE;
-- the USER has authorization in a Tenant;
-- the USER has a required Verigence permission;
-- the USER has Dealer/Outlet business scope.
+Human credentials are transient request secrets. Security may pass them to Clerk Backend APIs over TLS for verification but must not persist, hash, audit, trace, cache or log them.
 
-### 7.2 Local JWT validation — CONFIRMED
+### 7.2 Security human-token validation — CONFIRMED
 
-Backend boundaries receiving the Clerk session JWT validate it locally using Clerk public keys/JWKS.
+Backend boundaries receiving the Security-issued human access JWT validate it locally using Security's trusted signing keys/JWKS and the applicable human-token checks, including signature, issuer and expiry.
 
-Validation must include the applicable standard token checks, including signature, issuer and expiry, plus the configured audience/authorized-party checks supported by the selected Clerk first-party token configuration.
+The human token identifies the authenticated global Verigence USER. It does not replace live Security authorization.
 
-No network call to Clerk is required for ordinary JWT signature validation.
+Audit Core and DI do not validate Clerk JWTs and require no Clerk keys.
 
 ### 7.3 Backend authorization hand-off — CONFIRMED
 
 For human requests reaching Audit Core or DI:
 
-1. the resource server validates the Clerk JWT locally;
-2. it extracts the authenticated Clerk subject;
+1. the resource server validates the Security-issued human access JWT locally;
+2. it extracts the trusted global Verigence USER identity from that token;
 3. it calls Security's authorization service using its own registered `ServiceIntegration` machine identity/token;
-4. it supplies the validated Clerk subject plus Tenant and required permission as authorization context;
-5. Security trusts that Clerk-subject context only because it arrives from an authenticated registered service caller.
+4. it supplies the validated USER identity plus Tenant and required permission as authorization context;
+5. Security trusts that USER context because it arrived from an authenticated registered service caller after local validation of a Security-signed human token.
 
-A browser/client must never be allowed to supply an arbitrary `clerkSubject` directly to the internal authorization endpoint as proof of identity.
+A browser/client must never be allowed to supply an arbitrary `userId` directly to the internal authorization endpoint as proof of identity.
 
-Security's own human-facing/admin APIs validate the Clerk session JWT directly because Security itself is the resource server for those calls.
+Security's own human-facing/admin APIs validate the Security-issued human access JWT and apply the same authorization logic in-process.
 
 ---
 
 ## 8. Phase-1 human token model
 
-### 8.1 One human token issuer — CONFIRMED
+### 8.1 Security is the Verigence human token issuer — CONFIRMED
 
-Clerk is the human session-token issuer.
+Clerk authenticates human credentials only behind Security's backend integration.
 
-Security does not issue a second human access JWT in Phase 1.
+Security issues the human access JWT used inside Verigence after successful Clerk-backed authentication and USER/session policy checks.
 
-### 8.2 Authorization claims are not copied into Clerk — CONFIRMED
+The target does not retain separate login/token models for ordinary USER versus PlatformAdmin; authentication is one human Security boundary and role/classification is an authorization concern.
 
-Do not place the authoritative Verigence role/permission model inside Clerk simply to make backend authorization local.
+### 8.2 Authorization claims are not the authority — CONFIRMED
 
-The Clerk session JWT should remain authentication evidence rather than a replicated Security authorization database.
+Do not copy the authoritative Verigence role/permission database into the human token simply to make backend authorization local.
 
-### 8.3 No human-token introspection — CONFIRMED
+The Security-issued human access JWT is authentication/session evidence. Protected operations still use current Security authorization state.
 
-Phase-1 protected backend calls do not introspect the Clerk JWT with Clerk.
+### 8.3 No Clerk token introspection in Verigence modules — CONFIRMED
 
-The JWT is validated locally by the receiving resource server. Security is then called for the independent Verigence authorization decision through an authenticated ServiceIntegration backend call where applicable.
+Web/Mobile, Web BFF, Audit Core and DI do not receive Clerk session tokens and do not introspect Clerk.
 
-### 8.4 Existing Security-issued human tokens — RETIRE
+Security uses Clerk Backend APIs only for the credential/account operations that require Clerk. Ordinary downstream validation of an already-issued Verigence human access JWT uses Security signing/JWKS.
 
-Current Security runtime contains human login/access-session paths that authenticate through Clerk Backend APIs and issue a Verigence access token. Those human-token issuance paths conflict with this Phase-1 target and must be retired from the active human flow after replacement is implemented.
+### 8.4 Existing Security human-token capability — EXISTING BUT MODIFY
 
-Security signing/JWKS capability is retained for approved machine/service authentication under `ServiceIntegration`. This is explicitly separate from the human token model.
+Current Security runtime already contains Clerk-backend human login/access-session patterns and Security token signing capability.
+
+The target retains one Security human authentication/token path, removes duplicate/legacy human login/token contracts, and keeps authoritative authorization live in Security rather than treating token permission claims as the source of truth.
+
+Security signing/JWKS capability is also retained for approved machine/service authentication under `ServiceIntegration`; human and machine actor/token semantics remain distinct.
 
 ---
 
@@ -606,42 +643,53 @@ Possession of the onboarding key grants no application role, Tenant authorizatio
 ```text
 1. Employee enters the global onboarding journey through Web/Mobile.
 
-2. Security validates the permitted platform-global onboarding gate
+2. Web/Mobile submits identity/onboarding data to Security through the Verigence API.
+
+3. Security validates the permitted platform-global onboarding gate
    and duplicate global identity constraints.
 
-3. A global Verigence onboarding request / USER candidate is created
-   without Tenant, role or Dealer/Outlet assignment.
+4. Security creates/coordinates the Clerk human identity through the
+   Clerk Backend API and initiates the approved email verification flow.
+   Password/OTP values are transient and are never persisted or logged.
 
-4. Clerk owns the credential/sign-up/email-authentication interaction.
-   Verigence does not store or validate the employee password.
+5. Employee submits the email verification value to Security through
+   the Verigence API; Security verifies it with Clerk Backend APIs.
 
-5. After successful Clerk authentication, the Clerk subject is bound
-   to exactly one global Verigence USER after Security validates the
-   expected identity/email relationship.
+6. Security records/binds the resulting Clerk subject to exactly one
+   global Verigence USER after validating the expected identity/email relationship.
 
-6. USER remains PENDING.
+7. USER remains PENDING.
 
-7. Authorized administration can list PENDING users.
+8. Authorized administration can list PENDING users.
 
-8. Administrator changes the USER to ACTIVE or REJECTED according to
+9. Administrator changes the USER to ACTIVE or REJECTED according to
    the approved lifecycle permission model.
 
-9. Tenant/role/Dealer-Outlet configuration is performed separately after
-   identity onboarding.
+10. Tenant/role/Dealer-Outlet configuration is performed separately after
+    identity onboarding.
 ```
 
-### 9.4 Existing Security password/OTP façade — EXISTING BUT MODIFY
+### 9.4 Existing Security password/OTP façade — EXISTING AND RETAIN WITH MODIFICATION
 
-Current Phase-1 self-onboarding routes receive password/OTP inputs and broker Clerk operations from Security. This is not required by the new first-party Clerk session model and should not be treated as the target merely because it already exists.
+The existing Security-mediated Clerk signup/email-OTP approach matches the confirmed Security-only Clerk integration boundary and remains the implementation base where it already satisfies the approved global USER lifecycle.
 
-The target onboarding UI/API contract must keep authentication credentials within Clerk-owned flows.
+The target must preserve these invariants:
+
+- Web/Mobile never calls Clerk directly;
+- only Security holds Clerk backend integration secrets;
+- password/OTP/TOTP values are transient and never persisted, audited, traced, cached or logged;
+- Clerk verification success does not itself activate the Verigence USER;
+- Security records the Clerk subject-to-USER mapping and keeps the USER `PENDING` until approval.
+
+Provider-specific creation/verification safeguards already proven in the current backend integration should be reused rather than replaced without a separate approved reason.
 
 ### 9.5 Onboarding failure rules
 
 - wrong/disabled onboarding gate -> no active USER access;
 - duplicate global email -> do not create another USER;
 - Clerk identity mismatch -> do not bind;
-- Clerk authentication success -> USER still remains PENDING until Verigence approval;
+- Clerk creation/verification failure -> do not report onboarding verification success;
+- successful Clerk verification -> USER still remains PENDING until Verigence approval;
 - PENDING/REJECTED USER -> authorization service denies protected application access.
 
 ---
@@ -702,7 +750,7 @@ Security must expose a filterable global USER list capable of returning PENDING 
 
 ### 11.2 Activation — CONFIRMED
 
-Clerk authentication alone never activates a Verigence USER.
+Successful Clerk credential/email verification alone never activates a Verigence USER.
 
 Activation is an explicit Security lifecycle decision.
 
@@ -724,7 +772,7 @@ Once an employee USER has entered `REJECTED`, `SUSPENDED` or `DISABLED`, only Su
 
 Every authorization decision first requires USER status `ACTIVE`.
 
-A valid Clerk JWT presented by a `SUSPENDED`, `DISABLED`, `PENDING` or `REJECTED` USER is insufficient for Verigence access.
+A cryptographically valid Security-issued human access JWT presented by a `SUSPENDED`, `DISABLED`, `PENDING` or `REJECTED` USER is insufficient for Verigence access.
 
 ### 12.2 Clerk lifecycle synchronization — EXISTING AND RETAIN WITH MODIFICATION
 
@@ -1563,26 +1611,25 @@ Normal Audit Core/DI human request flow:
 ```text
 Human Client
   |
-  | Clerk JWT
+  | Security-issued human access JWT
   v
 Resource Server (Audit Core / DI)
   |
-  +-- validate Clerk JWT locally
+  +-- validate Security human JWT locally using Security signing/JWKS
   |
-  +-- extract validated Clerk subject
+  +-- extract validated global Verigence USER identity
   |
   +-- determine required canonical permission
   |
   +-- call Security authorization service
   |      Authorization: Bearer <caller ServiceIntegration JWT>
-  |      clerkSubject + tenantId + required permission
+  |      userId + tenantId + required permission
   |
   |      Security:
   |        validate caller ServiceIntegration JWT
   |        verify caller is registered/ACTIVE and allowed to use AuthZ API
-  |        trust clerkSubject only from this authenticated service caller
-  |        Clerk subject -> global USER
-  |        USER status == ACTIVE
+  |        trust userId only from this authenticated service caller
+  |        USER must exist and status == ACTIVE
   |        Tenant active where applicable
   |        resolve USER operating/admin/test context
   |        resolve applicable permission bundle
@@ -1609,7 +1656,7 @@ Conceptual request:
 
 ```json
 {
-  "clerkSubject": "<validated-clerk-subject>",
+  "userId": "<global-verigence-user-id extracted from a validated Security human JWT>",
   "tenantId": "<tenant-id-or-null-for-platform-scope>",
   "permissionKey": "<canonical-permission-key>"
 }
@@ -1632,11 +1679,11 @@ For admin/test identities the response context may identify the applicable class
 
 ### 22.3 No arbitrary user identity trust — CONFIRMED
 
-The authorization endpoint accepts `clerkSubject` only from an authenticated registered ServiceIntegration caller.
+The authorization endpoint accepts `userId` only from an authenticated registered ServiceIntegration caller that derived it from a locally validated Security-issued human access JWT.
 
-A client/browser cannot call the internal authorization endpoint and establish identity merely by sending a `clerkSubject` value.
+A client/browser cannot call the internal authorization endpoint and establish identity merely by sending a `userId` value.
 
-Resource servers must strip/ignore client-provided internal identity-context headers and construct the authorization request from the Clerk token they themselves validated.
+Resource servers must strip/ignore client-provided internal identity-context headers and construct the authorization request from the Security human token they themselves validated.
 
 ### 22.4 Internal caller protection — CONFIRMED
 
@@ -1653,7 +1700,7 @@ The calling service principal must be:
 
 Security administration endpoints do not make a network call back into Security.
 
-Security validates the Clerk JWT directly and applies the same authorization logic in-process.
+Security validates its own human access JWT and applies the same authorization logic in-process.
 
 ### 22.6 Failure rule — CONFIRMED
 
@@ -2026,7 +2073,8 @@ Backends remain fail-safe because Security functional role alone does not satisf
 Security records authoritative audit evidence for at least:
 
 - onboarding request;
-- Clerk identity binding;
+- Clerk identity creation/binding outcome without credential/OTP material;
+- human login/authentication security events without credential material;
 - USER approval;
 - USER rejection;
 - USER activation/reactivation;
@@ -2059,7 +2107,7 @@ At minimum where applicable:
 - UTC timestamp;
 - reason where supplied.
 
-Never store credentials, Clerk session JWTs, service client secrets, service JWTs, passwords, OTP values or other secrets in audit records.
+Never store credentials, Clerk session tokens, Security human JWTs, service client secrets, service JWTs, passwords, OTP values or other secrets in audit records.
 
 ### 28.3 Hard-delete audit — CONFIRMED
 
@@ -2081,19 +2129,19 @@ The retained audit reference must not depend on the deleted live USER row contin
 
 ### 29.1 Every human authorization request checks live USER status — CONFIRMED
 
-Because Security is called synchronously for each protected human request, status changes take effect on the next authorization decision without waiting for a Verigence-issued human token to expire.
+Because Security is called synchronously for each protected human request, status changes take effect on the next authorization decision even if an already-issued Security human access JWT has not yet expired.
 
 ### 29.2 Role and permission changes — CONFIRMED TARGET EFFECT
 
-Because permissions are resolved by Security at authorization time, changing a USER's role or a Tenant role bundle affects subsequent protected requests without reissuing a Verigence human token.
+Because permissions are resolved by Security at authorization time, changing a USER's role or a Tenant role bundle affects subsequent protected requests without reissuing the Security human access JWT.
 
 Role-aligned Group membership follows the role assignment and has no independent authorization cache.
 
-### 29.3 Clerk session still valid after Security suspension
+### 29.3 Human token still valid after Security suspension
 
-Even if a Clerk session JWT remains cryptographically valid, Security denies the USER because status is no longer ACTIVE.
+Even if a Security-issued human access JWT remains cryptographically valid, Security denies the USER because status is no longer ACTIVE.
 
-Clerk lifecycle termination/ban remains defense in depth.
+Clerk lifecycle termination/ban remains defense in depth and remaining live Security sessions/tokens should be revoked/invalidated according to the retained session capability where available.
 
 ### 29.4 Reactivation — CONFIRMED
 
@@ -2105,15 +2153,15 @@ Only SuperAdmin can return an employee from REJECTED/SUSPENDED/DISABLED to ACTIV
 
 ### 30.1 Human authentication and authorization contract — TARGET
 
-Audit Core must migrate away from trusting Security-issued **human** JWTs.
+Audit Core must trust the Security-issued **human** access JWT for authenticated Verigence USER identity, not integrate with Clerk.
 
 Target human request contract:
 
 ```text
-Client/Web BFF -> Audit Core: Clerk session JWT
-Audit Core: validate Clerk JWT locally
-Audit Core: extract validated Clerk subject
-Audit Core -> Security: ServiceIntegration JWT + Clerk subject + Tenant + required permission
+Client/Web BFF -> Audit Core: Security-issued human access JWT
+Audit Core: validate Security human JWT locally using Security trusted signing/JWKS
+Audit Core: extract validated global Verigence USER identity
+Audit Core -> Security: ServiceIntegration JWT + USER identity + Tenant + required permission
 Security: synchronous human authorization decision
 Audit Core: evaluate Dealer/Outlet business scope locally
 ```
@@ -2132,13 +2180,13 @@ Audit Core already contains an approved `PC/TL/PM/CRM` default cross-module bund
 
 This does not transfer permission ownership to Audit Core; Audit Core owns its permission catalogue while Security owns the default/Tenant role mapping used for authorization.
 
-### 30.5 Existing Audit Core design conflict
+### 30.5 Existing Audit Core design alignment requirement
 
 Current Audit Core design states that it verifies Security-issued JWTs through Security JWKS and authorizes human users from `permissions[]` claims.
 
-That human-token assumption conflicts with this target and will require a later Audit Core design update after this Security design is approved.
+The Security-issued human JWT/JWKS trust direction remains valid, but authoritative permission evaluation must move to synchronous Security authorization instead of trusting embedded `permissions[]` as the authorization source of truth.
 
-Security-issued machine JWTs remain valid for approved ServiceIntegration module-to-module calls.
+No Clerk integration is introduced into Audit Core.
 
 No Audit Core file is changed by this Security design work.
 
@@ -2150,20 +2198,20 @@ No Audit Core file is changed by this Security design work.
 
 Human users may call DI directly for approved DI capabilities.
 
-DI does **not** perform human onboarding, role assignment or USER lifecycle management.
+DI does **not** perform human onboarding, role assignment or USER lifecycle management and does not integrate with Clerk.
 
 For direct protected human access:
 
 ```text
-Human -> DI with Clerk session JWT
-DI validates Clerk JWT locally
-DI extracts validated Clerk subject
+Human -> DI with Security-issued human access JWT
+DI validates Security human JWT locally using Security trusted signing/JWKS
+DI extracts validated global Verigence USER identity
 DI -> Security authorization/check using DI ServiceIntegration JWT
 Security evaluates ACTIVE USER + Tenant/role/permission
 DI executes only after ALLOW
 ```
 
-The human Clerk JWT is authentication evidence at DI; DI does not derive Verigence permission merely from the existence of a valid Clerk session.
+The Security human JWT is authentication evidence at DI; DI does not derive Verigence permission merely from the existence of a valid human token.
 
 ### 31.2 Machine token issuer — CONFIRMED
 
@@ -2322,7 +2370,7 @@ Minimum internal target flow:
 
 ```text
 Human -> Audit Core
-   Clerk JWT + Security human authorization
+   Security human JWT + Security human authorization
         |
         v
 Audit Core needs DI capability
@@ -2339,7 +2387,7 @@ Audit Core -> DI
 DI locally validates service JWT + required service permission
 ```
 
-DI does not need the human Clerk token in order to authenticate Audit Core as a machine caller.
+DI does not need the human token in order to authenticate Audit Core as a machine caller.
 
 ### 31.9 Human provenance — CONFIRMED
 
@@ -2351,11 +2399,13 @@ DI trusts such provenance context only from an authenticated ServiceIntegration 
 
 No sophisticated user-on-behalf-of token exchange is required in Phase 1.
 
-### 31.11 Existing DI design conflict
+### 31.11 Existing DI design alignment requirement
 
 Current DI Security-alignment design expects Security-issued USER JWTs for human authorization.
 
-The target human DI contract is instead Clerk session JWT authentication plus synchronous Security authorization. The existing machine/service portion remains useful and is retained/refined through the ServiceIntegration design above.
+The Security-issued human JWT/JWKS trust direction remains valid. DI must use the token for authenticated USER identity and obtain the authoritative permission decision synchronously from Security rather than treating embedded human permission claims as the source of truth.
+
+No Clerk integration is introduced into DI.
 
 No DI file is changed by this Security design work.
 
@@ -2363,11 +2413,13 @@ No DI file is changed by this Security design work.
 
 ## 32. Failure handling and fail-closed rules
 
-### 32.1 Clerk JWT invalid
+### 32.1 Human login/Verigence token invalid
 
-Backend denies human authentication before business processing.
+Security denies login when Clerk-backed credential verification fails.
 
-### 32.2 Clerk JWT valid but no Verigence USER mapping
+Resource servers deny a protected request when the Security-issued human JWT is missing, invalid, expired or signed by an untrusted key.
+
+### 32.2 Security human JWT valid but no live/ACTIVE Verigence USER
 
 Security human authorization denies.
 
@@ -2666,8 +2718,7 @@ The deleted-user actor tombstone/snapshot and deletion audit reference are retai
 - `tenant_memberships`
 - current arbitrary Group-to-role additive grants
 - current Group-derived permission union
-- Security-issued human access sessions/tokens
-- per-user human token authorization versions for token invalidation
+- per-user human token permission/authorization snapshots as an alternative to live Security authorization
 
 Existing Group data/API implementation may be reused only after it is constrained to the role-aligned Group semantics above; the current arbitrary additive RBAC behaviour is not retained.
 
@@ -2682,12 +2733,18 @@ Exact OpenAPI definitions follow design approval. Target semantic surface:
 ### Authentication / onboarding
 
 ```text
-POST /security/v1/onboarding/users                    # global onboarding gate/request
-POST /security/v1/onboarding/users/{id}/bind          # bind authenticated Clerk identity if retained in final UI flow
+POST /security/v1/onboarding/users
+POST /security/v1/onboarding/users/{signupAttemptId}/verify-email
+POST /security/v1/onboarding/users/{signupAttemptId}/resend-email-code
+POST /security/v1/auth/login
 POST /security/v1/auth/precheck                       # optional existing UX gate
 ```
 
-Human credential entry/sign-in itself is Clerk-owned rather than a Security-issued-token login API.
+All human credential/email-verification interactions are Verigence-to-Security calls. Security alone brokers the required Clerk Backend API operations.
+
+There is no direct Web/Mobile Clerk integration and no client-driven Clerk `/bind` operation in the target flow.
+
+The same human login endpoint applies to ordinary USER, TestUser and human administrative classifications; authorization classification does not create a second authentication mechanism.
 
 ### USER administration
 
@@ -2745,6 +2802,7 @@ PUT /security/v1/tenants/{tenantId}/role-bundles/{roleKey}
 ```text
 POST /security/v1/authorization/check
 # backend caller authenticates with ServiceIntegration JWT
+# userId is derived from a validated Security-issued human access JWT
 ```
 
 ### ServiceIntegration / machine authentication
@@ -2777,7 +2835,7 @@ Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-w
 | Global USER | v1.4.2 global USER/onboarding exists. | One global USER, no per-Tenant re-onboarding. | **EXISTING AND RETAIN** |
 | Clerk external identity mapping | Exists. | Clerk subject maps to one global USER. | **EXISTING AND RETAIN** |
 | Global onboarding gate | Platform-global onboarding key exists. | Global gate remains; no Tenant/role/Dealer-Outlet during onboarding. | **EXISTING AND RETAIN** |
-| Credential handling in Security | Current onboarding/login APIs accept password/TOTP/OTP and broker Clerk Backend APIs. | First-party Clerk authentication/session flow; Security does not own human credential flow. | **EXISTING BUT MODIFY** |
+| Credential handling in Security | Current onboarding/login APIs accept password/TOTP/OTP and broker Clerk Backend APIs. | Retain Security-only Clerk Backend facade; keep secrets transient and never persisted/logged; no direct Web/Mobile Clerk integration. | **EXISTING AND RETAIN WITH MODIFICATION** |
 | MFA | Current code/design includes TOTP/MFA concepts. | No Phase-1 MFA requirement. | **DEFERRED** |
 | USER statuses | Current status surface includes ACTIVE/SUSPENDED/DISABLED/EXITED; PENDING exists in onboarding. | PENDING/REJECTED/ACTIVE/SUSPENDED/DISABLED; hard DELETE separate. | **EXISTING BUT MODIFY** |
 | REJECTED lifecycle | Not part of current global status request. | Required; SuperAdmin-only reactivation after rejection. | **NEW/MODIFY** |
@@ -2795,24 +2853,24 @@ Existing Tenant entity/lifecycle APIs remain valuable. SuperAdmin has platform-w
 | Executive default bundle | Previously open. | Tenant-wide; Audit Core read + normal non-destructive update/write; DI read-only by default. | **CLOSED / ADD TO TARGET** |
 | TestUser | Previously exact permission/scope was open. | Existing Clerk TestUser mapped to TestTenant; effective functional bundle equals TestTenant PC bundle. | **CLOSED / ADD TO TARGET** |
 | TestTenant | Not previously fixed as a cross-module canonical test tenant. | One canonical Security Tenant ID represented consistently in Security, Audit Core and DI. | **NEW TARGET** |
-| Platform/admin roles | Current platform roles exist. | Admin personas retained with fixed Phase-1 scope semantics. | **EXISTING BUT MODIFY** |
+| Platform/admin roles | Current platform roles exist. | Admin personas retained with fixed Phase-1 scope semantics and authenticate through the same Security human login boundary. | **EXISTING BUT MODIFY** |
 | TenantAdmin | Current model does not match the final scope definition. | One Tenant across modules for normal administration; deletion request is global USER operation. | **REDESIGN** |
 | ModuleAdmin | Current model does not match the final scope definition. | One module across Tenants, with module-admin/configuration permissions. | **REDESIGN** |
 | SuperAdmin | Existing migration grants `platform.super_admin` every active Security permission. | Exactly one Phase-1 SuperAdmin; all ACTIVE permissions across all registered modules automatically. | **EXISTING AND EXTEND** |
 | Module permission catalogue | Existing module catalogue, permissions and role templates. | Modules publish permissions; Security exposes module permission discovery; Security remains registry/authority. | **EXISTING AND RETAIN / EXTEND CONTRACT** |
 | Role templates | Current templates seed Tenant role objects. | Approved templates/defaults seed Tenant permission bundles for global role classifications. | **EXISTING BUT MODIFY** |
 | Tenant role permissions | Current permissions bind to Tenant role IDs. | Bind Tenant + global role_key + permission_key. | **EXISTING BUT MODIFY** |
-| Human runtime token | Current `/auth/login` and access session flows issue Verigence access tokens. | Clerk session JWT only for human authentication. | **RETIRE HUMAN TOKEN ISSUANCE** |
-| Security JWKS for human USER token | Current downstream modules trust Security JWT/JWKS. | Not used for human Phase-1 access. | **RETIRE FOR HUMAN FLOW** |
+| Human runtime token | Current `/auth/login` and access-session flows issue Verigence access tokens. | Retain one canonical Security-issued human access JWT after Clerk-backed authentication; remove duplicate/legacy human token paths and keep authorization live in Security. | **EXISTING AND RETAIN WITH MODIFICATION** |
+| Security JWKS for human USER token | Current downstream modules trust Security JWT/JWKS. | Retain for human token authentication; downstream permissions are decided synchronously by Security rather than trusted from embedded claims. | **EXISTING AND RETAIN/MODIFY** |
 | Security machine/service token | Existing machine/SYSTEM/SERVICE_INTEGRATION token capability exists. | Security is the machine-token issuer; retain/refine into registered ServiceIntegration clients with audience + permission restriction. | **EXISTING AND RETAIN/MODIFY** |
 | ServiceIntegration role/model | Existing service actor concepts are present but not yet expressed as the final simple target contract. | Machine-only ServiceIntegration classification, short-lived Security JWT, service-specific audiences/permissions. | **RETAIN/REFINE** |
-| Authorization version | Current `user_tenant_authorization_state` supports human token invalidation. | Not required for Phase-1 human-token authorization because Security is called live. Can remain for compatibility/future use. | **DEFER FROM ACTIVE HUMAN DESIGN** |
-| Runtime human authorization | Current modules receive permissions embedded in Security human JWT. | Resource server validates Clerk JWT; authenticated ServiceIntegration backend calls Security with validated Clerk subject + Tenant + permission. | **REDESIGN** |
+| Authorization version | Current `user_tenant_authorization_state` supports human token invalidation. | May remain useful for Security-issued human-session revocation/versioning; live authorization remains authoritative. | **RETAIN/REVIEW; NOT AUTHZ SOURCE** |
+| Runtime human authorization | Current modules receive permissions embedded in Security human JWT. | Resource server validates Security human JWT; authenticated ServiceIntegration backend calls Security with validated USER identity + Tenant + permission. | **REDESIGN AUTHZ; RETAIN SECURITY HUMAN TOKEN TRUST** |
 | Security authorization API | Internal gate logic exists, but not the final ServiceIntegration-authenticated PDP contract. | Add explicit synchronous authorization-check contract. | **NEW/MODIFY** |
 | Dealer/Outlet business scope | Audit Core design separates business scope but previously treated Dealer/Outlet terminology separately. | Phase 1 uses one Dealer/Outlet business assignment concept; Security stores none of it. | **RETAIN BOUNDARY / CLARIFY TARGET** |
-| Web BFF | No consolidated Web BFF boundary in current Security runtime. | BFF capability is part of Web module; no separate BFF module. | **NEW DESIGN BOUNDARY** |
-| Audit Core human trust | Current design expects Security-issued JWT + permissions. | Clerk JWT + ServiceIntegration-authenticated Security AuthZ call + Audit Core business scope. | **DEPENDENT DESIGN CHANGE** |
-| DI human trust | Current DI expects Security-issued USER JWT. | Human may call DI directly using Clerk JWT authentication + ServiceIntegration-authenticated synchronous Security authorization; DI performs no onboarding. | **DEPENDENT DESIGN CHANGE** |
+| Web BFF | No consolidated Web BFF boundary in current Security runtime. | BFF capability is part of Web module; no separate BFF module and no Clerk integration. | **NEW DESIGN BOUNDARY** |
+| Audit Core human trust | Current design expects Security-issued JWT + permissions. | Retain Security JWT authentication; replace embedded-permission authority with ServiceIntegration-authenticated synchronous Security AuthZ + Audit Core business scope. | **DEPENDENT DESIGN CHANGE** |
+| DI human trust | Current DI expects Security-issued USER JWT. | Retain Security JWT authentication; use ServiceIntegration-authenticated synchronous Security authorization; DI performs no onboarding and has no Clerk integration. | **DEPENDENT DESIGN CHANGE** |
 | DI service trust | DI already supports Security service/system identities. | Reuse/refine as ServiceIntegration for Audit Core -> DI. | **EXISTING AND RETAIN/MODIFY** |
 | Security audit records | Existing admin/security change/audit structures exist. | Extend to redesigned lifecycle, hard delete, 21-day deletion reference retention, role defaults, role-aligned Groups and ServiceIntegration. | **EXISTING AND RETAIN/MODIFY** |
 
@@ -2834,14 +2892,14 @@ Recommended sequence:
 6. implement TenantAdmin and ModuleAdmin scope semantics/default module-admin bundles;
 7. register/refine ServiceIntegration service clients, audience/permission grants and machine-token issuance;
 8. add the new ServiceIntegration-authenticated authorization-check service contract;
-9. move first-party human authentication to Clerk session JWT validation;
+9. retain/align the Security-only Clerk Backend human authentication facade and one canonical Security human access-token path;
 10. migrate active operating-role assignments into one-role-per-USER/Tenant representation after conflict analysis;
 11. load the approved PC/TL/PM/CRM platform default bundles from the current approved Audit Core cross-module baseline;
 12. add the Executive default rule and seed Tenant-specific permission bundles;
 13. simplify Groups to role-aligned collections and remove current additive Group-derived permission behaviour from Phase-1 authorization;
-14. retire human Security token issuance routes after all clients/modules are migrated;
+14. retire only duplicate/legacy human token/login contracts after the canonical Security human login/token path is proven; retain `/security/v1/auth/login` as the human authentication facade;
 15. keep historical tables/routes disabled or compatibility-only until explicit retention cleanup is approved;
-16. align Audit Core and DI designs/contracts after Security behaviour is proven.
+16. align Audit Core and DI designs/contracts after Security behaviour is proven, without introducing Clerk integration into those modules.
 
 ### Migration safety checks
 
@@ -2867,25 +2925,26 @@ These require explicit remediation rather than automatic guessing.
 3. **Implement/configure the single SuperAdmin mapping and all-ACTIVE-permission invariant across registered modules.**
 4. **Implement/create canonical TestTenant representation in Security and define the cross-module TestTenant ID contract.**
 5. **Bind/configure TestUser to TestTenant and TestTenant PC permissions.**
-6. **Implement Clerk session JWT verification for human requests.**
-7. **Implement/align global USER onboarding and PENDING/REJECTED/ACTIVE lifecycle.**
-8. **Implement status change + global DISABLED deletion-request flow + SuperAdmin-only hard-delete + SuperAdmin-only reactivation + 21-day retained deletion-reference policy.**
-9. **Implement global role definitions and one operating-role-per-USER/Tenant assignment model.**
-10. **Implement Phase-1 role-aligned Groups as the PC/TL/PM/CRM/Executive user collections tied 1:1 to operating roles.**
-11. **Enforce one PM per Tenant and admin/operating exclusivity.**
-12. **Implement TenantAdmin one-Tenant/all-modules scope and ModuleAdmin one-module/all-Tenants scope.**
-13. **Expose module permission discovery.**
-14. **Seed approved PC/TL/PM/CRM defaults and the approved Executive default behavior into Tenant role bundles.**
-15. **Implement SuperAdmin Tenant role-bundle review/update flow.**
-16. **Implement/refine registered ServiceIntegration service identities, short-lived Security machine-token issuance, audience checks and service-specific permissions.**
-17. **Implement synchronous Security authorization-check API authenticated by ServiceIntegration callers.**
-18. **Implement Web BFF user-administration flows inside the Web module without moving authority into Web.**
-19. **Implement/align Audit Core Dealer/Outlet assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
-20. **Migrate Audit Core human auth contract to Clerk JWT + ServiceIntegration-authenticated synchronous Security AuthZ.**
-21. **Align DI direct-human protected access to Clerk JWT + ServiceIntegration-authenticated synchronous Security AuthZ; DI remains outside onboarding.**
-22. **Use ServiceIntegration machine JWTs for Audit Core -> DI.**
-23. **Retire Security-issued human access-token flows and downstream USER-JWT assumptions.**
-24. **Run migration reconciliation and end-to-end human/machine authorization, lifecycle and cross-module tests before production use.**
+6. **Retain/align Security-only Clerk Backend user creation, email verification and human credential authentication; ensure no direct Web/Mobile/Audit Core/DI Clerk integration.**
+7. **Retain/align one canonical Security-issued human access-token path for all human classifications.**
+8. **Implement/align global USER onboarding and PENDING/REJECTED/ACTIVE lifecycle.**
+9. **Implement status change + global DISABLED deletion-request flow + SuperAdmin-only hard-delete + SuperAdmin-only reactivation + 21-day retained deletion-reference policy.**
+10. **Implement global role definitions and one operating-role-per-USER/Tenant assignment model.**
+11. **Implement Phase-1 role-aligned Groups as the PC/TL/PM/CRM/Executive user collections tied 1:1 to operating roles.**
+12. **Enforce one PM per Tenant and admin/operating exclusivity.**
+13. **Implement TenantAdmin one-Tenant/all-modules scope and ModuleAdmin one-module/all-Tenants scope.**
+14. **Expose module permission discovery.**
+15. **Seed approved PC/TL/PM/CRM defaults and the approved Executive default behavior into Tenant role bundles.**
+16. **Implement SuperAdmin Tenant role-bundle review/update flow.**
+17. **Implement/refine registered ServiceIntegration service identities, short-lived Security machine-token issuance, audience checks and service-specific permissions.**
+18. **Implement synchronous Security authorization-check API authenticated by ServiceIntegration callers using USER identity derived from validated Security human JWTs.**
+19. **Implement Web BFF user-administration flows inside the Web module without moving authority or Clerk integration into Web.**
+20. **Implement/align Audit Core Dealer/Outlet assignment APIs for PC/TL/PM/CRM associations without Phase-2 cardinality rules.**
+21. **Align Audit Core human auth contract to Security human JWT + ServiceIntegration-authenticated synchronous Security AuthZ.**
+22. **Align DI direct-human protected access to Security human JWT + ServiceIntegration-authenticated synchronous Security AuthZ; DI remains outside onboarding and Clerk.**
+23. **Use ServiceIntegration machine JWTs for Audit Core -> DI.**
+24. **Retire duplicate/legacy Security human token/login assumptions while retaining the canonical Security human login/access-token boundary.**
+25. **Run migration reconciliation and end-to-end human/machine authorization, lifecycle and cross-module tests before production use.**
 
 ---
 
@@ -2899,9 +2958,7 @@ The following are deliberately not implemented or overdesigned in Phase 1:
 - exact Dealer/Outlet coverage ratios;
 - a separate Dealer-versus-Outlet hierarchy/restriction model;
 - distributed human authorization projections;
-- Verigence-issued human JWT;
-- custom human OAuth authorization-server implementation;
-- authorization permission-epoch/revocation cache design for a Verigence human token;
+- custom human OAuth authorization-server implementation beyond the retained Security human authentication/token boundary;
 - delegated user-on-behalf-of token exchange;
 - arbitrary/custom Groups and Group-specific permission inheritance beyond the Phase-1 role-aligned Groups;
 - additional SuperAdmins beyond the single Phase-1 SuperAdmin;
@@ -2919,7 +2976,8 @@ There are **no remaining Phase-1 design decisions open from the items tracked in
 - the complete exact Clerk subject for the one Phase-1 SuperAdmin if `user_3I7F…jH9hBMxpN` is redacted;
 - the complete exact Clerk subject for TestUser if `user_3I7H…eXFRoeoud` is redacted;
 - the canonical TestTenant ID generated/selected during implementation/bootstrap;
-- the exact short-lived ServiceIntegration token TTL and credential-rotation interval within the approved machine-token model.
+- the exact short-lived ServiceIntegration token TTL and credential-rotation interval within the approved machine-token model;
+- the concrete configured Security human access-token/session lifetime and revocation behavior must be confirmed from the retained existing implementation rather than invented by this design.
 
 ---
 
@@ -2931,12 +2989,13 @@ Where existing Security documents/code conflict with this target, the conflict m
 
 Known dependent conflicts requiring later alignment include:
 
-- Audit Core's current assumption that human authorization arrives in a Security-issued JWT containing `permissions[]`;
-- DI's current assumption that Security-issued USER JWTs are the canonical human authorization contract;
-- Security's current human login/token issuance flow;
+- any Security code or today's implementation changes that removed the canonical human `/security/v1/auth/login` facade on the assumption of direct client Clerk authentication;
+- any Web/Mobile/Audit Core/DI design that introduces Clerk SDK/JWT validation outside Security;
+- Audit Core's current assumption that human authorization is final from `permissions[]` embedded in the Security-issued JWT rather than a live Security decision;
+- DI's current assumption that embedded Security USER JWT permissions are the canonical human authorization contract rather than authenticated identity plus live Security authorization;
 - Tenant-owned role objects and additive/group-derived effective-role resolution.
 
-Existing Security-issued machine/service token capability is not retired; it is retained/refined for the `ServiceIntegration` model.
+Existing Security-issued human-token capability is retained as the Verigence authentication/session boundary and must be aligned to the single canonical login flow. Existing Security-issued machine/service token capability is separately retained/refined for the `ServiceIntegration` model.
 
 No Audit Core or DI file is modified as part of this Security design document.
 
@@ -2947,38 +3006,47 @@ No Audit Core or DI file is modified as part of this Security design document.
 ### 41.1 Human path
 
 ```text
-HUMAN IDENTITY
-  Clerk authenticates
-       |
-       v
-  Clerk session JWT
-       |
-       v
-PROTECTED RESOURCE SERVER
-  Security / Audit Core / DI as applicable
-  validate Clerk JWT locally
-       |
-       +-- Security resource itself -> authorize in-process
-       |
-       +-- Audit Core / DI
-              |
-              | validated Clerk subject
-              | + caller ServiceIntegration JWT
-              v
-         SECURITY AUTHORIZATION
-           caller service authenticated
-           Clerk subject -> global USER
-           USER must be ACTIVE
-           Tenant context where applicable
-           operating/admin/test classification
-           Tenant role bundle seeded from approved default and optionally customized
-           required permission must be present
-              |
-              v
-           ALLOW / DENY
-              |
-              +--> Audit Core additionally checks Dealer/Outlet business scope where applicable
+HUMAN USER
+   |
+   | signup/login credentials through Verigence API
+   v
+SECURITY
+   |
+   +-- only Verigence module integrated with Clerk
+   +-- Clerk Backend API creates/verifies human identity and credentials
+   +-- Clerk subject -> global Verigence USER
+   +-- USER/session policy checks
+   |
+   v
+SECURITY-ISSUED HUMAN ACCESS JWT
+   |
+   +---------------------------+---------------------------+
+   |                           |                           |
+   v                           v                           v
+SECURITY                  AUDIT CORE                     DI
+validate Security JWT     validate Security JWT          validate Security JWT
+and authorize in-process  extract global USER            extract global USER
+   |                           |                           |
+   |                           | ServiceIntegration JWT    | ServiceIntegration JWT
+   |                           | + USER + Tenant + perm    | + USER + Tenant + perm
+   |                           +-------------+-------------+
+   |                                         |
+   |                                         v
+   +-------------------------------> SECURITY AUTHORIZATION
+                                      caller service authenticated
+                                      USER must be ACTIVE
+                                      Tenant context where applicable
+                                      operating/admin/test classification
+                                      Tenant role bundle seeded from approved default and optionally customized
+                                      required permission must be present
+                                         |
+                                         v
+                                      ALLOW / DENY
+                                         |
+                                         +--> Audit Core additionally checks Dealer/Outlet business scope where applicable
 ```
+
+Web/Mobile, Web BFF, Audit Core and DI do not call Clerk and do not hold Clerk keys/session tokens.
 
 ### 41.2 Machine path
 
@@ -3008,4 +3076,4 @@ ALLOW / DENY
 
 The governing separation is:
 
-> **Clerk proves who the human is. Security decides what that global Verigence USER is functionally allowed to do. Security also authenticates registered machine identities and issues short-lived ServiceIntegration JWTs for module-to-module calls. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. The single Phase-1 SuperAdmin has every ACTIVE registered permission. TenantAdmin administers one Tenant across modules for normal administration; global USER deletion is Tenant-independent. ModuleAdmin administers one module across Tenants. TestUser is isolated to TestTenant and follows the TestTenant PC functional bundle. Audit Core decides the single Phase-1 Dealer/Outlet business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding. The Web BFF is part of the Web module and owns no Security authority.**
+> **Clerk stores and verifies human credentials, but Verigence Security is the only Verigence module integrated with Clerk. Web/Mobile authenticates through Security, not directly with Clerk. Security maps the Clerk subject to the global Verigence USER and issues the Verigence human access token. Security remains the live functional authorization authority; the human token proves authenticated USER identity but does not replace current role/permission evaluation. Security also authenticates registered machine identities and issues short-lived ServiceIntegration JWTs for module-to-module calls. Role-aligned Groups are the Tenant user collections for the same operating roles and never form a second permission authority. Security starts from approved default role bundles and allows Tenant-specific SuperAdmin changes. The single Phase-1 SuperAdmin has every ACTIVE registered permission. TenantAdmin administers one Tenant across modules for normal administration; global USER deletion is Tenant-independent. ModuleAdmin administers one module across Tenants. TestUser is isolated to TestTenant and follows the TestTenant PC functional bundle. Audit Core decides the single Phase-1 Dealer/Outlet business scope for Audit operations. DI may serve authorized humans directly for approved DI capabilities but owns no human onboarding and has no Clerk integration. The Web BFF is part of the Web module, owns no Security authority and has no Clerk integration.**
