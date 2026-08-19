@@ -1,0 +1,77 @@
+name: Security v2 SuperAdmin Probe
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/security-v2-superadmin-probe.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install PostgreSQL client
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Publish sanitized SuperAdmin classification counts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          context='security-v2-superadmin-probe'
+          post() {
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state="$1" -f context="$context" -f description="$2" >/dev/null
+          }
+          trap 'post failure "SuperAdmin DEV probe failed"' ERR
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || exit 1
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+
+          result="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "
+            WITH ids AS (
+              SELECT
+                max(user_id) FILTER (WHERE provider='CLERK' AND provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud') AS approved_id,
+                max(user_id) FILTER (WHERE provider='CLERK' AND provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN') AS test_id
+              FROM security.external_identities
+            ), legacy AS (
+              SELECT
+                count(*) FILTER (WHERE p.user_id=i.approved_id) AS approved,
+                count(*) FILTER (WHERE p.user_id=i.test_id) AS test,
+                count(*) FILTER (WHERE p.user_id IS DISTINCT FROM i.approved_id AND p.user_id IS DISTINCT FROM i.test_id) AS other
+              FROM security.platform_user_role_assignments p CROSS JOIN ids i
+              WHERE p.role_key='platform.super_admin' AND p.status='ACTIVE'
+            ), v2 AS (
+              SELECT
+                count(*) FILTER (WHERE a.user_id=i.approved_id) AS approved,
+                count(*) FILTER (WHERE a.user_id=i.test_id) AS test,
+                count(*) FILTER (WHERE a.user_id IS DISTINCT FROM i.approved_id AND a.user_id IS DISTINCT FROM i.test_id) AS other
+              FROM security.user_admin_role_assignments a CROSS JOIN ids i
+              WHERE a.role_key='SuperAdmin' AND a.status='ACTIVE'
+            )
+            SELECT
+              'ai=' || CASE WHEN i.approved_id IS NULL THEN '0' ELSE '1' END ||
+              ',ti=' || CASE WHEN i.test_id IS NULL THEN '0' ELSE '1' END ||
+              ',L=' || l.approved || '/' || l.test || '/' || l.other ||
+              ',V=' || v.approved || '/' || v.test || '/' || v.other
+            FROM ids i CROSS JOIN legacy l CROSS JOIN v2 v;
+          ")"
+          post success "$result (approved/test/other)"
+          trap - ERR
