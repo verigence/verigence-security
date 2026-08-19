@@ -6,8 +6,10 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.security import HTTPAuthorizationCredentials
 
 from verigence_security.adapters.identity import ClerkJwtIdentityProvider
+from verigence_security.api.v2_human_dependencies import security_human_user_id
 from verigence_security.config import Settings
 from verigence_security.core.errors import SecurityError
 
@@ -35,6 +37,7 @@ def _settings(public_pem: str) -> Settings:
         clerk_issuer=ISSUER,
         clerk_jwt_key=public_pem,
         clerk_authorized_parties=AUTHORIZED_PARTY,
+        security_public_key_pem=public_pem,
     )
 
 
@@ -64,7 +67,7 @@ def _assert_security_error(exc: pytest.ExceptionInfo[SecurityError], code: str) 
     assert exc.value.code == code
 
 
-def test_v2_clerk_identity_accepts_valid_signed_session_jwt() -> None:
+def test_legacy_clerk_identity_provider_accepts_valid_signed_session_jwt() -> None:
     private_pem, public_pem = _keypair()
     identity = ClerkJwtIdentityProvider(_settings(public_pem)).verify(_token(private_pem))
 
@@ -73,7 +76,7 @@ def test_v2_clerk_identity_accepts_valid_signed_session_jwt() -> None:
     assert identity.session_id == "sess_test"
 
 
-def test_v2_clerk_identity_rejects_wrong_signature() -> None:
+def test_legacy_clerk_identity_provider_rejects_wrong_signature() -> None:
     signing_private, _ = _keypair()
     _, trusted_public = _keypair()
 
@@ -83,7 +86,7 @@ def test_v2_clerk_identity_rejects_wrong_signature() -> None:
     _assert_security_error(exc, "AUTH_TOKEN_INVALID")
 
 
-def test_v2_clerk_identity_rejects_wrong_issuer() -> None:
+def test_legacy_clerk_identity_provider_rejects_wrong_issuer() -> None:
     private_pem, public_pem = _keypair()
 
     with pytest.raises(SecurityError) as exc:
@@ -94,7 +97,7 @@ def test_v2_clerk_identity_rejects_wrong_issuer() -> None:
     _assert_security_error(exc, "AUTH_TOKEN_INVALID")
 
 
-def test_v2_clerk_identity_rejects_expired_token() -> None:
+def test_legacy_clerk_identity_provider_rejects_expired_token() -> None:
     private_pem, public_pem = _keypair()
 
     with pytest.raises(SecurityError) as exc:
@@ -105,12 +108,25 @@ def test_v2_clerk_identity_rejects_expired_token() -> None:
     _assert_security_error(exc, "AUTH_TOKEN_EXPIRED")
 
 
-def test_v2_clerk_identity_rejects_unapproved_authorized_party() -> None:
+def test_legacy_clerk_identity_provider_rejects_unapproved_authorized_party() -> None:
     private_pem, public_pem = _keypair()
 
     with pytest.raises(SecurityError) as exc:
         ClerkJwtIdentityProvider(_settings(public_pem)).verify(
             _token(private_pem, authorized_party="https://untrusted.example.test")
         )
+
+    _assert_security_error(exc, "AUTH_TOKEN_INVALID")
+
+
+def test_active_v2_human_dependency_rejects_clerk_session_jwt() -> None:
+    private_pem, public_pem = _keypair()
+    credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer",
+        credentials=_token(private_pem),
+    )
+
+    with pytest.raises(SecurityError) as exc:
+        security_human_user_id(credentials=credentials, settings=_settings(public_pem))
 
     _assert_security_error(exc, "AUTH_TOKEN_INVALID")
