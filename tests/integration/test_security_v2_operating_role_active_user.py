@@ -37,21 +37,15 @@ def _create_user(
     user_status: str,
     now: datetime,
 ) -> None:
-    principal_status = "ACTIVE" if user_status == "ACTIVE" else "ACTIVE"
     conn.execute(  # type: ignore[attr-defined]
         text(
             """
             INSERT INTO security.security_principals
             (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
-            VALUES (:user_id,'USER',:name,:principal_status,:now,:now)
+            VALUES (:user_id,'USER',:name,'ACTIVE',:now,:now)
             """
         ),
-        {
-            "user_id": user_id,
-            "name": name,
-            "principal_status": principal_status,
-            "now": now,
-        },
+        {"user_id": user_id, "name": name, "now": now},
     )
     conn.execute(  # type: ignore[attr-defined]
         text(
