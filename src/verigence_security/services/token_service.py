@@ -36,6 +36,13 @@ class AccessTokenClaims:
     subject: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ServiceTokenClaims:
+    subject: str
+    audience: str
+    expires_at: datetime
+
+
 def _validate_actor_claim_shape(claims: AccessTokenClaims) -> None:
     if claims.actor_type == ActorType.USER:
         if not claims.device_id or not claims.location_id or not claims.roles:
@@ -87,6 +94,32 @@ class TokenService:
             payload["location_id"] = claims.location_id
         if claims.delegated_actor_id:
             payload["act"] = {"sub": claims.delegated_actor_id}
+        try:
+            return jwt.encode(
+                payload,
+                self.settings.security_private_key_pem,
+                algorithm="RS256",
+                headers={"kid": self.settings.security_key_id},
+            )
+        except (ValueError, TypeError, jwt.PyJWTError) as exc:
+            raise security_error("SIGNING_KEY_UNAVAILABLE") from exc
+
+    def issue_service_token(self, claims: ServiceTokenClaims) -> str:
+        if not self.settings.security_private_key_pem or not self.settings.security_key_id:
+            raise security_error("SIGNING_KEY_UNAVAILABLE")
+        if not claims.subject.strip() or not claims.audience.strip():
+            raise ValueError("Service token subject and audience are required")
+
+        now = datetime.now(UTC)
+        payload: dict[str, Any] = {
+            "iss": self.settings.security_token_issuer,
+            "sub": claims.subject,
+            "aud": claims.audience,
+            "iat": now,
+            "exp": claims.expires_at,
+            "jti": str(uuid4()),
+            "actor_type": ActorType.SERVICE_INTEGRATION.value,
+        }
         try:
             return jwt.encode(
                 payload,
@@ -149,6 +182,43 @@ class TokenService:
                 validate_permissions([str(value) for value in payload.get("permissions", [])])
             except ValueError as exc:
                 raise security_error("AUTH_TOKEN_INVALID") from exc
+            return payload
+        except jwt.ExpiredSignatureError as exc:
+            raise security_error("AUTH_TOKEN_EXPIRED") from exc
+        except jwt.PyJWTError as exc:
+            raise security_error("AUTH_TOKEN_INVALID") from exc
+
+    def verify_service_token(self, token: str, *, audience: str) -> dict[str, Any]:
+        if not self.settings.security_public_key_pem:
+            raise security_error("SIGNING_KEY_UNAVAILABLE")
+        if not audience.strip():
+            raise security_error("AUTH_TOKEN_INVALID")
+        try:
+            payload = jwt.decode(
+                token,
+                self.settings.security_public_key_pem,
+                algorithms=["RS256"],
+                issuer=self.settings.security_token_issuer,
+                audience=audience,
+                options={
+                    "require": ["exp", "iat", "sub", "jti", "actor_type", "aud"]
+                },
+            )
+            if payload.get("actor_type") != ActorType.SERVICE_INTEGRATION.value:
+                raise security_error("ACTOR_TYPE_NOT_ALLOWED")
+            forbidden_claims = {
+                "tenant_id",
+                "access_session_id",
+                "permissions",
+                "roles",
+                "device_id",
+                "location_id",
+                "act",
+            }
+            if forbidden_claims.intersection(payload):
+                raise security_error("AUTH_TOKEN_INVALID")
+            if not isinstance(payload.get("sub"), str) or not str(payload["sub"]).strip():
+                raise security_error("AUTH_TOKEN_INVALID")
             return payload
         except jwt.ExpiredSignatureError as exc:
             raise security_error("AUTH_TOKEN_EXPIRED") from exc
