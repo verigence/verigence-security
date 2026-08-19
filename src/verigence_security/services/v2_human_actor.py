@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -55,18 +56,31 @@ class HumanActorContext:
 
 
 class HumanActorAuthenticationService:
-    """Resolve a verified Clerk identity to the current global human USER.
+    """Resolve the authenticated Security USER to current v2 human actor state.
 
-    JWT verification is deliberately outside this service. The caller must provide an
-    AuthenticatedIdentity produced by ClerkJwtIdentityProvider. This service then
-    enforces the global identity/USER/principal state and projects current v2 admin
-    classifications without consulting legacy role or Group authorization.
+    Active v2 routes receive a global USER id from a validated Security-issued human JWT.
+    Clerk remains behind Security: this service reads the stored Clerk mapping only for
+    Security-owned lifecycle operations and never trusts a client-supplied Clerk subject.
     """
 
     def __init__(self, session: Session) -> None:
         self.repository = V2HumanActorRepository(session)
 
+    def authenticate_user_id(self, user_id: str) -> HumanActorContext:
+        normalized_user_id = user_id.strip()
+        if not normalized_user_id:
+            raise security_error("AUTH_TOKEN_INVALID")
+        row = self.repository.human_for_user_id(normalized_user_id)
+        if row is None:
+            raise security_error("USER_NOT_ONBOARDED")
+        clerk_subject = row.get("clerk_subject")
+        if not isinstance(clerk_subject, str) or not clerk_subject.strip():
+            raise security_error("USER_NOT_ONBOARDED")
+        return self._context_from_row(row, clerk_subject=clerk_subject)
+
     def authenticate(self, identity: AuthenticatedIdentity) -> HumanActorContext:
+        """Legacy external-identity resolver retained outside the active v2 route boundary."""
+
         if identity.provider != "CLERK":
             raise security_error("ACTOR_TYPE_NOT_ALLOWED")
 
@@ -74,13 +88,23 @@ class HumanActorAuthenticationService:
             provider="CLERK",
             provider_subject=identity.provider_subject,
         )
-        if row is None or row["identity_status"] != "ACTIVE":
+        if row is None:
             raise security_error("USER_NOT_ONBOARDED")
-        if row["principal_actor_type"] != "USER":
+        return self._context_from_row(row, clerk_subject=identity.provider_subject)
+
+    def _context_from_row(
+        self,
+        row: dict[str, Any],
+        *,
+        clerk_subject: str,
+    ) -> HumanActorContext:
+        if row.get("identity_status") != "ACTIVE":
+            raise security_error("USER_NOT_ONBOARDED")
+        if row.get("principal_actor_type") != "USER":
             raise security_error("ACTOR_TYPE_NOT_ALLOWED")
-        if row["principal_status"] != "ACTIVE":
+        if row.get("principal_status") != "ACTIVE":
             raise security_error("PRINCIPAL_NOT_ACTIVE")
-        if row["user_status"] != "ACTIVE":
+        if row.get("user_status") != "ACTIVE":
             raise security_error("USER_NOT_ACTIVE")
 
         user_id = str(row["user_id"])
@@ -98,7 +122,7 @@ class HumanActorAuthenticationService:
         )
         return HumanActorContext(
             user_id=user_id,
-            clerk_subject=identity.provider_subject,
+            clerk_subject=clerk_subject,
             admin_scopes=admin_scopes,
         )
 
