@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from uuid import UUID
 
 from fastapi import Depends, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -38,7 +39,10 @@ def security_human_user_id(
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject.strip():
         raise security_error("AUTH_TOKEN_INVALID")
-    return subject
+    try:
+        return str(UUID(subject))
+    except ValueError as exc:
+        raise security_error("AUTH_TOKEN_INVALID") from exc
 
 
 def security_human_actor(
