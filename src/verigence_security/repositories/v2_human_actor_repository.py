@@ -7,15 +7,37 @@ from sqlalchemy.orm import Session
 
 
 class V2HumanActorRepository:
-    """Persistence for Clerk-authenticated Phase-1 human actor resolution.
+    """Persistence for Phase-1 human actor resolution.
 
-    This repository reads the global USER/external identity registry and the new v2
-    administrative assignments. It does not consult legacy Platform/Tenant role
-    assignments or Group-derived authorization.
+    Active v2 routes resolve the global USER identified by a Security-issued human token.
+    The Clerk mapping is read only from Security-owned state so lifecycle operations can still
+    call Clerk through Security when required. Legacy external-identity lookup is retained for
+    compatibility code and tests; it is not the active v2 route trust boundary.
     """
 
     def __init__(self, session: Session) -> None:
         self.s = session
+
+    def human_for_user_id(self, user_id: str) -> dict[str, Any] | None:
+        row = self.s.execute(
+            text(
+                """
+                SELECT u.user_id,
+                       u.status AS user_status,
+                       sp.actor_type AS principal_actor_type,
+                       sp.status AS principal_status,
+                       ei.provider_subject AS clerk_subject,
+                       ei.status AS identity_status
+                FROM security.users u
+                JOIN security.security_principals sp ON sp.principal_id=u.user_id
+                JOIN security.external_identities ei
+                  ON ei.user_id=u.user_id AND ei.provider='CLERK'
+                WHERE u.user_id=:user_id
+                """
+            ),
+            {"user_id": user_id},
+        ).mappings().first()
+        return dict(row) if row else None
 
     def human_for_external_identity(
         self,
