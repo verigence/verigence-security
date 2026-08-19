@@ -155,7 +155,7 @@ class InitialSuperAdminProvisioningService:
                 WHERE role_key='platform.super_admin'
                   AND status='ACTIVE'
                   AND (
-                    :approved_user_id IS NULL
+                    CAST(:approved_user_id AS uuid) IS NULL
                     OR user_id<>CAST(:approved_user_id AS uuid)
                   )
                 LIMIT 1
@@ -176,7 +176,7 @@ class InitialSuperAdminProvisioningService:
                 WHERE role_key='SuperAdmin'
                   AND status='ACTIVE'
                   AND (
-                    :approved_user_id IS NULL
+                    CAST(:approved_user_id AS uuid) IS NULL
                     OR user_id<>CAST(:approved_user_id AS uuid)
                   )
                 LIMIT 1
