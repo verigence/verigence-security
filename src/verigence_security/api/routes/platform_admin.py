@@ -8,11 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from verigence_security.adapters.identity import AuthenticatedIdentity
-from verigence_security.api.platform_dependencies import (
-    platform_claims,
-    platform_session,
-    require_platform_permission,
-)
+from verigence_security.api.platform_dependencies import platform_claims, platform_session
 from verigence_security.api.platform_schemas import (
     PlatformLoginRequest,
     PlatformMeResponse,
@@ -21,10 +17,13 @@ from verigence_security.api.platform_schemas import (
     PlatformTenantUpdateRequest,
     PlatformTokenResponse,
 )
+from verigence_security.api.v2_human_dependencies import clerk_human_actor
 from verigence_security.config import Settings, get_settings
+from verigence_security.core.errors import security_error
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.platform_admin import PlatformTenantService
 from verigence_security.services.platform_identity import PlatformIdentityResult, PlatformIdentityService
+from verigence_security.services.v2_human_actor import HumanActorContext
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
 
@@ -53,14 +52,45 @@ def _token_response(result: PlatformIdentityResult) -> dict[str, object]:
     }
 
 
-@router.post("/bootstrap/claim", response_model=PlatformTokenResponse)
+def _require_super_admin(actor: HumanActorContext) -> None:
+    if not actor.is_super_admin:
+        raise security_error("PERMISSION_DENIED")
+
+
+def _has_module_admin(actor: HumanActorContext) -> bool:
+    return any(scope.role_key == "ModuleAdmin" for scope in actor.admin_scopes)
+
+
+def _tenant_admin_scope_ids(actor: HumanActorContext) -> set[str]:
+    return {
+        str(scope.scope_id)
+        for scope in actor.admin_scopes
+        if scope.role_key == "TenantAdmin"
+        and scope.scope_type == "TENANT"
+        and scope.scope_id is not None
+    }
+
+
+def _require_tenant_metadata_access(actor: HumanActorContext, tenant_id: str) -> None:
+    if actor.is_super_admin or _has_module_admin(actor) or actor.is_tenant_admin(tenant_id):
+        return
+    raise security_error("PERMISSION_DENIED")
+
+
+def _require_tenant_update_access(actor: HumanActorContext, tenant_id: str) -> None:
+    if actor.is_super_admin or actor.is_tenant_admin(tenant_id):
+        return
+    raise security_error("PERMISSION_DENIED")
+
+
+@router.post("/bootstrap/claim", response_model=PlatformTokenResponse, deprecated=True)
 def claim_platform_super_admin(
     body: PlatformLoginRequest,
     request: Request,
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    """Backend-only first Super Admin claim; Clerk credentials never leave Security."""
+    """Legacy bootstrap claim retained until the explicit human-token retirement step."""
 
     identity = _credential_identity(body, settings)
     result = PlatformIdentityService(session, settings).bootstrap_claim(
@@ -70,20 +100,20 @@ def claim_platform_super_admin(
     return _token_response(result)
 
 
-@router.post("/auth/login", response_model=PlatformTokenResponse)
+@router.post("/auth/login", response_model=PlatformTokenResponse, deprecated=True)
 def platform_login(
     body: PlatformLoginRequest,
     settings: Settings = Depends(get_settings),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    """Verify credentials through Clerk Backend API and issue Security Platform Admin JWT."""
+    """Legacy PlatformAdmin JWT path retained temporarily for migration compatibility."""
 
     identity = _credential_identity(body, settings)
     result = PlatformIdentityService(session, settings).login(identity=identity)
     return _token_response(result)
 
 
-@router.get("/me", response_model=PlatformMeResponse)
+@router.get("/me", response_model=PlatformMeResponse, deprecated=True)
 def platform_me(
     claims: dict[str, Any] = Depends(platform_claims),
 ) -> dict[str, object]:
@@ -103,12 +133,13 @@ def platform_me(
 def create_tenant(
     body: PlatformTenantCreateRequest,
     request: Request,
-    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.create")),
+    actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
+    _require_super_admin(actor)
     try:
         tenant = PlatformTenantService(session).create_tenant(
-            actor_user_id=str(claims["sub"]),
+            actor_user_id=actor.user_id,
             tenant_code=body.tenantCode,
             tenant_name=body.tenantName,
             correlation_id=request.state.correlation_id,
@@ -120,20 +151,29 @@ def create_tenant(
 
 @router.get("/tenants", response_model=list[PlatformTenantResponse])
 def list_tenants(
-    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.read")),
+    actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
-    _ = claims
-    return [_tenant_response(row) for row in PlatformTenantService(session).list_tenants()]
+    rows = PlatformTenantService(session).list_tenants()
+    if actor.is_super_admin or _has_module_admin(actor):
+        return [_tenant_response(row) for row in rows]
+    allowed_tenants = _tenant_admin_scope_ids(actor)
+    if not allowed_tenants:
+        raise security_error("PERMISSION_DENIED")
+    return [
+        _tenant_response(row)
+        for row in rows
+        if str(row["tenant_id"]) in allowed_tenants
+    ]
 
 
 @router.get("/tenants/{tenantId}", response_model=PlatformTenantResponse)
 def get_tenant(
     tenantId: str,
-    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.read")),
+    actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
-    _ = claims
+    _require_tenant_metadata_access(actor, tenantId)
     tenant = PlatformTenantService(session).get_tenant(tenantId)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -145,11 +185,12 @@ def update_tenant(
     tenantId: str,
     body: PlatformTenantUpdateRequest,
     request: Request,
-    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.update")),
+    actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
+    _require_tenant_update_access(actor, tenantId)
     tenant = PlatformTenantService(session).update_tenant_name(
-        actor_user_id=str(claims["sub"]),
+        actor_user_id=actor.user_id,
         tenant_id=tenantId,
         tenant_name=body.tenantName,
         correlation_id=request.state.correlation_id,
@@ -163,12 +204,13 @@ def update_tenant(
 def activate_tenant(
     tenantId: str,
     request: Request,
-    claims: dict[str, Any] = Depends(require_platform_permission("security.tenant.activate")),
+    actor: HumanActorContext = Depends(clerk_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
+    _require_super_admin(actor)
     try:
         tenant = PlatformTenantService(session).activate_tenant(
-            actor_user_id=str(claims["sub"]),
+            actor_user_id=actor.user_id,
             tenant_id=tenantId,
             correlation_id=request.state.correlation_id,
         )
