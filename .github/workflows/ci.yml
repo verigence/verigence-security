@@ -205,7 +205,9 @@ jobs:
             migrations/0007_clerk_email_otp_onboarding_v1.4.6.sql \
             migrations/0008_privileged_access_maker_checker_v1.4.7.sql \
             migrations/0009_backend_email_otp_facade_v1.4.8.sql \
-            migrations/0010_audit_core_di_permissions.sql
+            migrations/0010_audit_core_di_permissions.sql \
+            migrations/0011_security_v2_role_foundation.sql \
+            migrations/0012_v2_super_admin_reconciliation.sql
           do
             echo "Applying $(basename "$migration")"
             psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
@@ -220,6 +222,78 @@ jobs:
             echo "::error::Audit Core DI permission migration verification failed."
             exit 1
           }
+
+          v2_tables_ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT
+              to_regclass('security.role_definitions') IS NOT NULL
+              AND to_regclass('security.platform_role_permission_defaults') IS NOT NULL
+              AND to_regclass('security.tenant_role_permissions') IS NOT NULL
+              AND to_regclass('security.user_tenant_operating_roles') IS NOT NULL
+              AND to_regclass('security.user_admin_role_assignments') IS NOT NULL;
+          ")"
+          [ "$v2_tables_ready" = "t" ] || {
+            echo "::error::Security v2 RBAC foundation migration verification failed."
+            exit 1
+          }
+
+          v2_role_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM security.role_definitions
+            WHERE status='ACTIVE'
+              AND role_key IN ('PC','TL','PM','CRM','Executive','TenantAdmin','ModuleAdmin','SuperAdmin','TestUser');
+          ")"
+          [ "$v2_role_count" = "9" ] || {
+            echo "::error::Security v2 role-definition seed verification failed."
+            exit 1
+          }
+
+          obsolete_super_admin_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT
+              (SELECT count(*)
+               FROM security.platform_user_role_assignments pura
+               JOIN security.external_identities ei ON ei.user_id=pura.user_id
+               WHERE ei.provider='CLERK'
+                 AND ei.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
+                 AND pura.role_key='platform.super_admin')
+              +
+              (SELECT count(*)
+               FROM security.user_admin_role_assignments uara
+               JOIN security.external_identities ei ON ei.user_id=uara.user_id
+               WHERE ei.provider='CLERK'
+                 AND ei.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
+                 AND uara.role_key='SuperAdmin');
+          ")"
+          [ "$obsolete_super_admin_count" = "0" ] || {
+            echo "::error::Obsolete TestUser SuperAdmin assignment still exists after migration 0012."
+            exit 1
+          }
+
+          approved_super_admin_user_id="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT ei.user_id
+            FROM security.external_identities ei
+            WHERE ei.provider='CLERK'
+              AND ei.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+              AND ei.status='ACTIVE'
+            LIMIT 1;
+          ")"
+          if [ -n "$approved_super_admin_user_id" ]; then
+            canonical_super_admin_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+              SELECT count(*)
+              FROM security.user_admin_role_assignments
+              WHERE user_id='$approved_super_admin_user_id'::uuid
+                AND role_key='SuperAdmin'
+                AND scope_type='PLATFORM'
+                AND scope_id IS NULL
+                AND status='ACTIVE';
+            ")"
+            [ "$canonical_super_admin_count" = "1" ] || {
+              echo "::error::Approved Clerk SuperAdmin was not reconciled to the canonical v2 assignment."
+              exit 1
+            }
+          else
+            echo "Approved Clerk SuperAdmin is not yet provisioned as a Security USER; migration 0012 did not fabricate one."
+          fi
+
+          echo "SECURITY_V2_MIGRATIONS=PASS"
           echo "SECURITY_MIGRATIONS=PASS"
 
       - name: Link and verify approved shared Railway DEV target
@@ -1015,7 +1089,7 @@ jobs:
             --url 'https://backboard.railway.com/graphql/v2' \
             --header "Project-Access-Token: $RAILWAY_TOKEN" \
             --header 'Content-Type: application/json' \
-            --data '{"query":"query { projectToken { projectId environmentId } }"}')"
+            --data '{"query":"query { projectToken { projectId environmentId } }')"
           [ "$(printf '%s' "$token_response" | jq -r '.data.projectToken.projectId // empty')" = "$PLATFORM_PROJECT_ID" ] || {
             echo "::error::Railway Project Token is not scoped to approved DEV project."
             exit 1
