@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from verigence_security.api.platform_dependencies import platform_session
-from verigence_security.api.v2_human_dependencies import clerk_human_actor
+from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.api.v2_rbac_schemas import (
     OperatingRoleKey,
     OperatingRoleMutationResponse,
@@ -78,11 +78,11 @@ def _operating_result_response(
 
 @router.get("/roles", response_model=list[RoleDefinitionResponse])
 def list_v2_roles(
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> list[RoleDefinitionResponse]:
-    # Role definitions are catalogue metadata. Authentication still requires an
-    # ACTIVE Clerk-backed human USER; no machine actor can enter this route.
+    # Role definitions are catalogue metadata. Authentication still requires an ACTIVE
+    # Security-authenticated human USER; no machine actor can enter this route.
     _ = actor
     return [_role_response(row) for row in RoleDefinitionService(session).list_roles()]
 
@@ -93,7 +93,7 @@ def list_v2_roles(
 )
 def get_platform_role_default(
     roleKey: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> RolePermissionBundleResponse:
     _require_super_admin(actor)
@@ -114,7 +114,7 @@ def get_platform_role_default(
 def get_tenant_role_bundle(
     tenantId: str,
     roleKey: str,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> TenantRolePermissionBundleResponse:
     _require_tenant_role_admin(actor, tenantId)
@@ -139,7 +139,7 @@ def replace_tenant_role_bundle(
     roleKey: str,
     body: TenantRolePermissionBundlePutRequest,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> TenantRolePermissionBundleResponse:
     _require_super_admin(actor)
@@ -169,7 +169,7 @@ def set_operating_role(
     userId: str,
     body: OperatingRolePutRequest,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> OperatingRoleMutationResponse:
     _require_tenant_role_admin(actor, tenantId)
@@ -198,7 +198,7 @@ def remove_operating_role(
     tenantId: str,
     userId: str,
     request: Request,
-    actor: HumanActorContext = Depends(clerk_human_actor),
+    actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> OperatingRoleMutationResponse:
     _require_tenant_role_admin(actor, tenantId)
