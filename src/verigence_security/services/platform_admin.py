@@ -170,6 +170,12 @@ class PlatformTenantService:
                 tenant_name=tenant_name,
                 now=now,
             )
+            self._seed_v2_tenant_role_defaults(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                now=now,
+            )
+            # Retained only for the current legacy runtime until authorization cutover.
             self._seed_standard_tenant_roles(tenant_id=tenant_id, now=now)
             if self_onboarding_token is not None:
                 self.repository.upsert_self_onboarding_token(
@@ -296,6 +302,50 @@ class PlatformTenantService:
         if tenant is None:
             raise RuntimeError("Activated Tenant could not be reloaded")
         return tenant
+
+    def _seed_v2_tenant_role_defaults(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        now: datetime,
+    ) -> None:
+        defaults = self.s.execute(
+            text(
+                """
+                SELECT d.role_key,d.permission_key
+                FROM security.platform_role_permission_defaults d
+                JOIN security.permissions p
+                  ON p.permission_key=d.permission_key
+                 AND p.status='ACTIVE'
+                WHERE d.status='ACTIVE'
+                  AND d.role_key IN ('PC','TL','PM','CRM','Executive')
+                ORDER BY d.role_key,d.permission_key
+                """
+            )
+        ).mappings().all()
+        expected_roles = {"PC", "TL", "PM", "CRM", "Executive"}
+        observed_roles = {str(row["role_key"]) for row in defaults}
+        if observed_roles != expected_roles:
+            raise RuntimeError("Approved v2 operating-role platform defaults are not ready")
+
+        for row in defaults:
+            self.s.execute(
+                text(
+                    """
+                    INSERT INTO security.tenant_role_permissions
+                    (tenant_id,role_key,permission_key,assigned_by_user_id,assigned_at_utc)
+                    VALUES (:tenant_id,:role_key,:permission_key,:actor_user_id,:now)
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "role_key": str(row["role_key"]),
+                    "permission_key": str(row["permission_key"]),
+                    "actor_user_id": actor_user_id,
+                    "now": now,
+                },
+            )
 
     def _seed_standard_tenant_roles(self, *, tenant_id: str, now: datetime) -> None:
         for definition in STANDARD_TENANT_ADMIN_ROLES:
