@@ -30,8 +30,8 @@ app = FastAPI(
     title="Verigence Security API",
     version="0.3.0",
     description=(
-        "Phase-1 Security: Clerk human authentication, Security-owned authorization, "
-        "and Security-issued ServiceIntegration machine tokens"
+        "Phase-1 Security: Security-only Clerk-backed human authentication, "
+        "Security-owned authorization, and Security-issued ServiceIntegration machine tokens"
     ),
     dependencies=[Depends(correlation_header_parameter)],
 )
@@ -40,9 +40,9 @@ app.add_exception_handler(SecurityError, security_error_handler)
 app.add_exception_handler(Exception, unexpected_error_handler)
 app.include_router(health.router)
 app.include_router(jwks.router)
-# Temporary compatibility only. Audit Core dev still consumes the legacy OAuth/token-
-# exchange surface; remove these routers only after that dependent caller migrates to
-# /security/v1/service/token and Clerk-subject authorization/check.
+# access.router contains the canonical /security/v1/auth/login plus the deprecated
+# /security/v1/access-sessions bridge. oauth_router is retained only because current Audit Core
+# dev still calls /oauth/token; it is not the target machine-token contract.
 app.include_router(access.oauth_router)
 app.include_router(access.router)
 app.include_router(service_tokens.router)
