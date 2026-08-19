@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, Iterable
 from uuid import uuid4
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -123,6 +124,12 @@ class OperatingRoleAssignmentService:
             # admin-vs-operating exclusivity invariant.
             if not self.repository.lock_user(user_id):
                 raise ValueError("USER not found")
+            user_status = self.repository.s.execute(
+                text("SELECT status FROM security.users WHERE user_id=:user_id"),
+                {"user_id": user_id},
+            ).scalar_one()
+            if str(user_status) != "ACTIVE":
+                raise ValueError("USER must be ACTIVE for an operating-role assignment")
             if not self.repository.lock_tenant(tenant_id):
                 raise ValueError("Tenant not found")
             if not self.repository.lock_user(actor_user_id):
