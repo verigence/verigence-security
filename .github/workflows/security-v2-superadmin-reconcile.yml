@@ -59,7 +59,6 @@ jobs:
               raise SystemExit("Security DEV database is not configured")
 
           with factory() as session:
-              # Serialize this one-time authority handover.
               session.execute(text("SELECT pg_advisory_xact_lock(hashtext('security.v2.superadmin.handover'))"))
 
               approved = session.execute(
@@ -87,7 +86,7 @@ jobs:
                       JOIN security.security_principals sp ON sp.principal_id=p.user_id
                       WHERE p.role_key='platform.super_admin'
                         AND p.status='ACTIVE'
-                        AND (:approved_id IS NULL OR p.user_id<>CAST(:approved_id AS uuid))
+                        AND (CAST(:approved_id AS uuid) IS NULL OR p.user_id<>CAST(:approved_id AS uuid))
                       FOR UPDATE
                   """),
                   {"approved_id": approved_id},
@@ -98,7 +97,7 @@ jobs:
                       SELECT user_id
                       FROM security.user_admin_role_assignments
                       WHERE role_key='SuperAdmin' AND status='ACTIVE'
-                        AND (:approved_id IS NULL OR user_id<>CAST(:approved_id AS uuid))
+                        AND (CAST(:approved_id AS uuid) IS NULL OR user_id<>CAST(:approved_id AS uuid))
                       FOR UPDATE
                   """),
                   {"approved_id": approved_id},
@@ -119,7 +118,6 @@ jobs:
                   ):
                       raise SystemExit("Legacy SuperAdmin is not the proven ACTIVE Clerk-backed BOOTSTRAP identity")
 
-                  # Remove only the obsolete bootstrap authority. Preserve its USER and Clerk mapping.
                   session.execute(
                       text("""
                           DELETE FROM security.platform_user_role_assignments
