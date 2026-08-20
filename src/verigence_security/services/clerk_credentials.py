@@ -23,10 +23,10 @@ class ClerkCredentialResult:
 class ClerkCredentialService:
     """Backend-only Phase-1 human password verification against Clerk.
 
-    Security is authoritative for which human identity may authenticate. The entered email must
-    first resolve to exactly one ACTIVE Verigence USER/principal with an ACTIVE Clerk mapping.
-    Only that immutable Clerk subject is then used for password verification. Clerk therefore
-    proves the password but does not choose the Verigence identity being authenticated.
+    Security is authoritative for which human identity may authenticate. An ACTIVE Verigence
+    USER/principal with an ACTIVE Clerk mapping proceeds to Clerk password verification. A fully
+    verified UC-001 USER that is still PENDING_ADMIN_APPROVAL receives the explicit pending
+    lifecycle denial instead; its Clerk identity intentionally remains banned until approval.
     """
 
     def __init__(self, settings: Settings, clerk: ClerkBackendClient | None = None) -> None:
@@ -45,7 +45,8 @@ class ClerkCredentialService:
 
         expected_clerk_user_id = self._resolve_verigence_clerk_subject(normalized)
         if expected_clerk_user_id is None:
-            # Keep the external error generic so login cannot enumerate Verigence USER records.
+            # Keep all states generic except the deliberate UC-001 PENDING_ADMIN_APPROVAL
+            # lifecycle signal emitted by _resolve_verigence_clerk_subject().
             raise security_error("AUTH_TOKEN_INVALID")
 
         try:
@@ -75,7 +76,16 @@ class ClerkCredentialService:
             rows = session.execute(
                 text(
                     """
-                    SELECT e.provider_subject
+                    SELECT e.provider_subject,
+                           u.status AS user_status,
+                           p.status AS principal_status,
+                           e.status AS identity_status,
+                           EXISTS (
+                               SELECT 1
+                               FROM security.platform_user_onboarding_requests r
+                               WHERE r.user_id=u.user_id
+                                 AND r.status='PENDING_ADMIN_APPROVAL'
+                           ) AS pending_admin_approval
                     FROM security.users u
                     JOIN security.security_principals p
                       ON p.principal_id=u.user_id
@@ -83,18 +93,36 @@ class ClerkCredentialService:
                     JOIN security.external_identities e
                       ON e.user_id=u.user_id
                      AND e.provider='CLERK'
-                     AND e.status='ACTIVE'
                     WHERE lower(u.primary_email)=:email
-                      AND u.status='ACTIVE'
-                      AND p.status='ACTIVE'
                     LIMIT 2
                     """
                 ),
                 {"email": normalized_email},
-            ).scalars().all()
+            ).mappings().all()
             if len(rows) != 1:
                 return None
-            subject = rows[0]
+
+            row = rows[0]
+            if (
+                row["user_status"] == "PENDING"
+                and row["principal_status"] == "ACTIVE"
+                and row["identity_status"] == "ACTIVE"
+                and bool(row["pending_admin_approval"])
+            ):
+                # Pending Clerk users are deliberately banned by the approved onboarding design,
+                # so Clerk cannot be used as the normal sign-in gate for this UX state. UC-001
+                # explicitly requires the channel to distinguish this completed, verified pending
+                # lifecycle from an invalid credential attempt. No access token is issued.
+                raise security_error("USER_PENDING_APPROVAL")
+
+            if (
+                row["user_status"] != "ACTIVE"
+                or row["principal_status"] != "ACTIVE"
+                or row["identity_status"] != "ACTIVE"
+            ):
+                return None
+
+            subject = row["provider_subject"]
             return str(subject) if isinstance(subject, str) and subject.startswith("user_") else None
         finally:
             session.close()
