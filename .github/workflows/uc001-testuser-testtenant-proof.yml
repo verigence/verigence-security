@@ -1,0 +1,134 @@
+name: UC-001 TestUser TestTenant Proof
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-testuser-testtenant-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  TESTUSER_EMAIL: gigsinopensource@gmail.com
+  TESTUSER_CLERK_ID: user_3I7HFuZZiFC9K2muiweXFRoeoud
+  TESTUSER_SECURITY_ID: 018a40c1-f946-dc4c-4a52-0766b59ccf2d
+
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+
+      - name: Verify TestUser and TestTenant binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' -v email="$TESTUSER_EMAIL" -v clerk="$TESTUSER_CLERK_ID" -v uid="$TESTUSER_SECURITY_ID" <<'SQL' >/tmp/testuser.txt
+          SELECT u.user_id,u.primary_email,u.status,p.status,e.provider_subject,e.status
+          FROM security.users u
+          JOIN security.security_principals p ON p.principal_id=u.user_id
+          JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+          WHERE u.user_id=:'uid'::uuid
+            AND lower(u.primary_email)=lower(:'email')
+            AND e.provider_subject=:'clerk';
+          SQL
+          [ "$(wc -l </tmp/testuser.txt | tr -d ' ')" = 1 ] || { echo '::error::Canonical TestUser row not found exactly once'; exit 1; }
+          IFS='|' read -r user_id email user_status principal_status clerk_id identity_status </tmp/testuser.txt
+          [ "$user_status" = ACTIVE ] || { echo "::error::TestUser status=$user_status"; exit 1; }
+          [ "$principal_status" = ACTIVE ] || { echo "::error::TestUser principal status=$principal_status"; exit 1; }
+          [ "$identity_status" = ACTIVE ] || { echo "::error::TestUser Clerk identity status=$identity_status"; exit 1; }
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' -v uid="$TESTUSER_SECURITY_ID" <<'SQL' >/tmp/testtenant.txt
+          SELECT pti.tenant_id,pti.status,t.tenant_code,t.tenant_name,t.status
+          FROM security.phase1_test_identity pti
+          JOIN security.tenants t ON t.tenant_id=pti.tenant_id
+          WHERE pti.singleton_id=1
+            AND pti.user_id=:'uid'::uuid;
+          SQL
+          [ "$(wc -l </tmp/testtenant.txt | tr -d ' ')" = 1 ] || { echo '::error::Active canonical TestUser/TestTenant singleton binding not found'; exit 1; }
+          IFS='|' read -r tenant_id binding_status tenant_code tenant_name tenant_status </tmp/testtenant.txt
+          [ "$binding_status" = ACTIVE ] || { echo "::error::TestUser/TestTenant binding status=$binding_status"; exit 1; }
+          [ "$tenant_status" = ACTIVE ] || { echo "::error::TestTenant status=$tenant_status"; exit 1; }
+
+          membership_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -v uid="$TESTUSER_SECURITY_ID" -v tid="$tenant_id" -c "SELECT status FROM security.tenant_memberships WHERE user_id=:'uid'::uuid AND tenant_id=:'tid'::uuid ORDER BY updated_at_utc DESC LIMIT 1;")"
+          [ -n "$membership_status" ] || membership_status='NONE'
+
+          test_role_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -c "SELECT status FROM security.role_definitions WHERE role_key='TestUser';")"
+          [ "$test_role_status" = ACTIVE ] || { echo "::error::TestUser role definition not ACTIVE"; exit 1; }
+
+          upload_permission_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -c "SELECT status FROM security.permissions WHERE permission_key='di.document.upload';")"
+          [ "$upload_permission_status" = ACTIVE ] || { echo "::error::di.document.upload permission not ACTIVE"; exit 1; }
+
+          {
+            echo "TESTUSER_STATUS=$user_status"
+            echo "TESTUSER_PRINCIPAL_STATUS=$principal_status"
+            echo "TESTUSER_IDENTITY_STATUS=$identity_status"
+            echo "TESTTENANT_ID=$tenant_id"
+            echo "TESTTENANT_CODE=$tenant_code"
+            echo "TESTTENANT_NAME=$tenant_name"
+            echo "TESTTENANT_STATUS=$tenant_status"
+            echo "TEST_BINDING_STATUS=$binding_status"
+            echo "MEMBERSHIP_STATUS=$membership_status"
+            echo "TEST_ROLE_STATUS=$test_role_status"
+            echo "UPLOAD_PERMISSION_STATUS=$upload_permission_status"
+          } >> "$GITHUB_ENV"
+
+      - name: Record proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_TESTUSER_TESTTENANT_PROOF.md <<EOF
+          # UC-001 TestUser / TestTenant DB Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - source_sha: $GITHUB_SHA
+          - testuser_email: $TESTUSER_EMAIL
+          - testuser_clerk_subject: $TESTUSER_CLERK_ID
+          - testuser_security_user_id: $TESTUSER_SECURITY_ID
+          - testuser_status: ${TESTUSER_STATUS:-not_reached}
+          - testuser_principal_status: ${TESTUSER_PRINCIPAL_STATUS:-not_reached}
+          - testuser_external_identity_status: ${TESTUSER_IDENTITY_STATUS:-not_reached}
+          - testtenant_id: ${TESTTENANT_ID:-not_reached}
+          - testtenant_code: ${TESTTENANT_CODE:-not_reached}
+          - testtenant_name: ${TESTTENANT_NAME:-not_reached}
+          - testtenant_status: ${TESTTENANT_STATUS:-not_reached}
+          - phase1_test_binding_status: ${TEST_BINDING_STATUS:-not_reached}
+          - tenant_membership_status: ${MEMBERSHIP_STATUS:-not_reached}
+          - TestUser_role_definition: ${TEST_ROLE_STATUS:-not_reached}
+          - di.document.upload_permission_catalog_status: ${UPLOAD_PERMISSION_STATUS:-not_reached}
+          - job_status: ${{ job.status }}
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_TESTUSER_TESTTENANT_PROOF.md
+          git commit -m 'docs(dev): record TestUser/TestTenant proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
