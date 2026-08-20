@@ -179,6 +179,9 @@ class Phase1SelfOnboardingService:
         last_name = str(attempt["last_name"])
         mobile = str(attempt["mobile"])
 
+        # Never hold a database transaction open across Clerk network calls. Password and OTP
+        # values are never written to Security storage/audit/log state. If a prior attempt already
+        # verified the exact email but Security failed before commit, accept that same provider state.
         self.s.rollback()
         verification_accepted = clerk.attempt_email_verification(email_address_id, code.strip())
         email_verified = clerk.is_email_verified(clerk_user_id, expected_email)
@@ -207,7 +210,11 @@ class Phase1SelfOnboardingService:
                     VALUES (:user_id,'USER',:principal_name,'ACTIVE',:now,:now)
                     """
                 ),
-                {"user_id": user_id, "principal_name": expected_email, "now": now},
+                {
+                    "user_id": user_id,
+                    "principal_name": expected_email,
+                    "now": now,
+                },
             )
             self.s.execute(
                 text(
@@ -237,7 +244,12 @@ class Phase1SelfOnboardingService:
                     VALUES (:external_identity_id,:user_id,'CLERK',:clerk_user_id,'ACTIVE',:now)
                     """
                 ),
-                {"external_identity_id": str(uuid4()), "user_id": user_id, "clerk_user_id": clerk_user_id, "now": now},
+                {
+                    "external_identity_id": str(uuid4()),
+                    "user_id": user_id,
+                    "clerk_user_id": clerk_user_id,
+                    "now": now,
+                },
             )
             self.s.execute(
                 text(
@@ -283,6 +295,8 @@ class Phase1SelfOnboardingService:
             self.s.rollback()
             raise
 
+        # The Clerk identity remains banned. Existing Security admin activation is authoritative
+        # and unbans it only when the Security USER transitions to ACTIVE.
         return {
             "onboardingRequestId": request_id,
             "status": "PENDING_ADMIN_APPROVAL",
@@ -299,7 +313,8 @@ class Phase1SelfOnboardingService:
                        completed_at_utc
                 FROM security.platform_user_signup_attempts
                 WHERE signup_attempt_id=:attempt_id
-                """ + suffix
+                """
+                + suffix
             ),
             {"attempt_id": signup_attempt_id},
         ).mappings().first()
@@ -307,7 +322,12 @@ class Phase1SelfOnboardingService:
             raise LookupError("Signup attempt was not found")
         return dict(row)
 
-    def _require_completable(self, attempt: dict[str, Any], *, now: datetime | None = None) -> None:
+    def _require_completable(
+        self,
+        attempt: dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> None:
         current = now or datetime.now(UTC)
         if str(attempt["status"]) != "AUTHORIZED_FOR_CLERK":
             raise ValueError("Signup attempt is no longer available for completion")
