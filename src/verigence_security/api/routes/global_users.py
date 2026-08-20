@@ -17,6 +17,7 @@ from verigence_security.core.errors import security_error
 from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
 from verigence_security.services.onboarding_key import require_onboarding_key_shape
 from verigence_security.services.phase1_self_onboarding import Phase1SelfOnboardingService
+from verigence_security.services.uc001_self_onboarding import UC001SelfOnboardingService
 
 router = APIRouter(prefix="/security/v1", tags=["Global User Onboarding"])
 
@@ -101,7 +102,7 @@ def start_global_user_onboarding(
         raise security_error("PERMISSION_DENIED") from exc
 
     try:
-        return Phase1SelfOnboardingService(session).start(
+        return UC001SelfOnboardingService(session).start(
             first_name=body.firstName,
             last_name=body.lastName,
             email=body.email,
