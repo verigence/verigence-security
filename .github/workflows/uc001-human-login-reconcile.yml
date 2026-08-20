@@ -1,0 +1,274 @@
+name: UC-001 Human Login Reconcile
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-human-login-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+  SECURITY_URL: https://security-dev.up.railway.app
+  WEB_URL: https://verigence-web-dev.jbrconsulting-it.workers.dev
+  SUPERADMIN_EMAIL: jbrconsulting.it@gmail.com
+  SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+  TESTUSER_EMAIL: gigsinopensource@gmail.com
+  TESTUSER_CLERK_ID: user_3I7HFuZZiFC9K2muiweXFRoeoud
+  TESTUSER_SECURITY_ID: 018a40c1-f946-dc4c-4a52-0766b59ccf2d
+  TESTTENANT_ID: 9de3af49-260f-4b15-8263-07c93dcc04d2
+
+jobs:
+  reconcile-and-prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+
+      - name: Prove canonical Security database identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' \
+            -v email="$SUPERADMIN_EMAIL" -v clerk="$SUPERADMIN_CLERK_ID" <<'SQL' >/tmp/super-db.txt
+          SELECT u.user_id,u.status,p.status,e.status,
+                 CASE WHEN EXISTS (
+                   SELECT 1 FROM security.user_admin_role_assignments a
+                   WHERE a.user_id=u.user_id AND a.role_key='SuperAdmin'
+                     AND a.scope_type='PLATFORM' AND a.scope_id IS NULL AND a.status='ACTIVE'
+                 ) THEN 'SuperAdmin' ELSE 'NONE' END
+          FROM security.users u
+          JOIN security.security_principals p ON p.principal_id=u.user_id AND p.actor_type='USER'
+          JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+          WHERE lower(u.primary_email)=lower(:'email') AND e.provider_subject=:'clerk';
+          SQL
+          [ "$(wc -l </tmp/super-db.txt | tr -d ' ')" = 1 ] || { echo '::error::Canonical SuperAdmin database chain is not unique'; exit 1; }
+          IFS='|' read -r super_uid super_user_status super_principal_status super_identity_status super_role </tmp/super-db.txt
+          [ "$super_user_status|$super_principal_status|$super_identity_status|$super_role" = 'ACTIVE|ACTIVE|ACTIVE|SuperAdmin' ] || {
+            echo "::error::SuperAdmin database chain invalid: $super_user_status|$super_principal_status|$super_identity_status|$super_role"; exit 1;
+          }
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' \
+            -v uid="$TESTUSER_SECURITY_ID" -v email="$TESTUSER_EMAIL" -v clerk="$TESTUSER_CLERK_ID" -v tid="$TESTTENANT_ID" <<'SQL' >/tmp/test-db.txt
+          SELECT u.user_id,u.status,p.status,e.status,
+                 COALESCE((SELECT pti.status FROM security.phase1_test_identity pti
+                           WHERE pti.singleton_id=1 AND pti.user_id=u.user_id AND pti.tenant_id=:'tid'::uuid),'NONE'),
+                 COALESCE((SELECT tm.status FROM security.tenant_memberships tm
+                           WHERE tm.user_id=u.user_id AND tm.tenant_id=:'tid'::uuid),'NONE')
+          FROM security.users u
+          JOIN security.security_principals p ON p.principal_id=u.user_id AND p.actor_type='USER'
+          JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+          WHERE u.user_id=:'uid'::uuid
+            AND lower(u.primary_email)=lower(:'email')
+            AND e.provider_subject=:'clerk';
+          SQL
+          [ "$(wc -l </tmp/test-db.txt | tr -d ' ')" = 1 ] || { echo '::error::Canonical TestUser database chain is not unique'; exit 1; }
+          IFS='|' read -r test_uid test_user_status test_principal_status test_identity_status test_binding test_membership </tmp/test-db.txt
+          [ "$test_user_status|$test_principal_status|$test_identity_status|$test_binding|$test_membership" = 'ACTIVE|ACTIVE|ACTIVE|ACTIVE|ACTIVE' ] || {
+            echo "::error::TestUser database chain invalid: $test_user_status|$test_principal_status|$test_identity_status|$test_binding|$test_membership"; exit 1;
+          }
+
+          echo "SUPERADMIN_SECURITY_ID=$super_uid" >> "$GITHUB_ENV"
+          echo 'DB_IDENTITIES=PASS' >> "$GITHUB_ENV"
+
+      - name: Reconcile Clerk state, reset temporary passwords, and prove both login paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${CLERK_SECRET_KEY:-}" ] || { echo '::error::CLERK_SECRET_KEY missing'; exit 1; }
+
+          generate_password() {
+            python - <<'PY'
+          import secrets, string
+          alphabet = string.ascii_letters + string.digits + '!@#%_-'
+          while True:
+              value = ''.join(secrets.choice(alphabet) for _ in range(22))
+              if (any(c.islower() for c in value)
+                  and any(c.isupper() for c in value)
+                  and any(c.isdigit() for c in value)
+                  and any(c in '!@#%_-' for c in value)):
+                  print(value)
+                  break
+          PY
+          }
+
+          super_pw="$(generate_password)"
+          test_pw="$(generate_password)"
+          echo "::add-mask::$super_pw"
+          echo "::add-mask::$test_pw"
+
+          get_user() {
+            local user_id="$1"
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              "https://api.clerk.com/v1/users/$user_id"
+          }
+
+          ensure_usable() {
+            local user_id="$1" expected_email="$2" password="$3" prefix="$4"
+            local before banned locked email_match patch verify after
+            before="$(get_user "$user_id")"
+            [ "$(printf '%s' "$before" | jq -r '.id // empty')" = "$user_id" ] || { echo "::error::$prefix Clerk user not found"; exit 1; }
+            banned="$(printf '%s' "$before" | jq -r '.banned // false')"
+            locked="$(printf '%s' "$before" | jq -r '.locked // false')"
+            email_match="$(printf '%s' "$before" | jq -r --arg e "$expected_email" '[.email_addresses[]?.email_address | ascii_downcase] | index($e|ascii_downcase) != null')"
+            echo "${prefix}_CLERK_BANNED_BEFORE=$banned" >> "$GITHUB_ENV"
+            echo "${prefix}_CLERK_LOCKED_BEFORE=$locked" >> "$GITHUB_ENV"
+            echo "${prefix}_CLERK_EMAIL_MATCH=$email_match" >> "$GITHUB_ENV"
+
+            if [ "$banned" = true ]; then
+              curl --fail-with-body --silent --show-error -X POST \
+                -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+                "https://api.clerk.com/v1/users/$user_id/unban" >/dev/null
+            fi
+            if [ "$locked" = true ]; then
+              curl --fail-with-body --silent --show-error -X POST \
+                -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+                "https://api.clerk.com/v1/users/$user_id/unlock" >/dev/null
+            fi
+
+            patch="$(curl --fail-with-body --silent --show-error -X PATCH \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -cn --arg password "$password" '{password:$password,sign_out_of_other_sessions:true}')" \
+              "https://api.clerk.com/v1/users/$user_id")"
+            [ "$(printf '%s' "$patch" | jq -r '.id // empty')" = "$user_id" ] || { echo "::error::$prefix password reset failed"; exit 1; }
+
+            verify="$(curl --fail-with-body --silent --show-error -X POST \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -cn --arg password "$password" '{password:$password}')" \
+              "https://api.clerk.com/v1/users/$user_id/verify_password")"
+            [ "$(printf '%s' "$verify" | jq -r '.verified // false')" = true ] || { echo "::error::$prefix Clerk password verification failed"; exit 1; }
+
+            after="$(get_user "$user_id")"
+            [ "$(printf '%s' "$after" | jq -r '.banned // false')" = false ] || { echo "::error::$prefix remains banned"; exit 1; }
+            [ "$(printf '%s' "$after" | jq -r '.locked // false')" = false ] || { echo "::error::$prefix remains locked"; exit 1; }
+          }
+
+          ensure_usable "$SUPERADMIN_CLERK_ID" "$SUPERADMIN_EMAIL" "$super_pw" SUPERADMIN
+          ensure_usable "$TESTUSER_CLERK_ID" "$TESTUSER_EMAIL" "$test_pw" TESTUSER
+          echo 'CLERK_STATE=PASS' >> "$GITHUB_ENV"
+          echo 'PASSWORD_RESET=PASS' >> "$GITHUB_ENV"
+
+          prove_login() {
+            local label="$1" email="$2" password="$3" expect_super="$4"
+            local payload direct_code web_code direct_super web_super
+            payload="$(jq -cn --arg identifier "$email" --arg password "$password" '{identifier:$identifier,password:$password}')"
+
+            direct_code="$(curl --silent --show-error -o "/tmp/${label}-direct.json" -w '%{http_code}' \
+              -X POST "$SECURITY_URL/security/v1/auth/login" \
+              -H 'Content-Type: application/json' --data "$payload" || true)"
+            if [ "$direct_code" != 200 ]; then
+              echo "::error::$label direct Security login HTTP $direct_code"
+              cat "/tmp/${label}-direct.json" || true
+              exit 1
+            fi
+            [ -n "$(jq -r '.accessToken // empty' "/tmp/${label}-direct.json")" ] || { echo "::error::$label direct login missing access token"; exit 1; }
+            direct_super="$(jq -r '.isSuperAdmin // false' "/tmp/${label}-direct.json")"
+            [ "$direct_super" = "$expect_super" ] || { echo "::error::$label direct isSuperAdmin=$direct_super expected=$expect_super"; exit 1; }
+
+            web_code="$(curl --silent --show-error -D "/tmp/${label}-web.headers" -o "/tmp/${label}-web.json" -w '%{http_code}' \
+              -X POST "$WEB_URL/security/v1/auth/login" \
+              -H 'Content-Type: application/json' --data "$payload" || true)"
+            if [ "$web_code" != 200 ]; then
+              echo "::error::$label Cloudflare login HTTP $web_code"
+              cat "/tmp/${label}-web.json" || true
+              exit 1
+            fi
+            grep -qi '^x-verigence-proxy: security' "/tmp/${label}-web.headers" || { echo "::error::$label Web response did not come through Security proxy"; exit 1; }
+            web_super="$(jq -r '.isSuperAdmin // false' "/tmp/${label}-web.json")"
+            [ "$web_super" = "$expect_super" ] || { echo "::error::$label Web isSuperAdmin=$web_super expected=$expect_super"; exit 1; }
+          }
+
+          prove_login superadmin "$SUPERADMIN_EMAIL" "$super_pw" true
+          echo 'SUPERADMIN_DIRECT_LOGIN=PASS' >> "$GITHUB_ENV"
+          echo 'SUPERADMIN_WEB_LOGIN=PASS' >> "$GITHUB_ENV"
+
+          prove_login testuser "$TESTUSER_EMAIL" "$test_pw" false
+          echo 'TESTUSER_DIRECT_LOGIN=PASS' >> "$GITHUB_ENV"
+          echo 'TESTUSER_WEB_LOGIN=PASS' >> "$GITHUB_ENV"
+
+          umask 077
+          cat > /tmp/uc001-human-login-credentials.txt <<EOF
+          SuperAdmin
+          email=$SUPERADMIN_EMAIL
+          password=$super_pw
+
+          TestUser
+          email=$TESTUSER_EMAIL
+          password=$test_pw
+          EOF
+
+      - name: Upload proven temporary credentials
+        if: always() && env.PASSWORD_RESET == 'PASS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uc001-human-login-credentials-${{ github.run_id }}
+          path: /tmp/uc001-human-login-credentials.txt
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Record proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_HUMAN_LOGIN_RECONCILE_PROOF.md <<EOF
+          # UC-001 Human Login Reconcile Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - source_sha: $GITHUB_SHA
+          - superadmin_email: $SUPERADMIN_EMAIL
+          - superadmin_clerk_id: $SUPERADMIN_CLERK_ID
+          - testuser_email: $TESTUSER_EMAIL
+          - testuser_clerk_id: $TESTUSER_CLERK_ID
+          - database_identities: ${DB_IDENTITIES:-not_reached}
+          - superadmin_clerk_banned_before: ${SUPERADMIN_CLERK_BANNED_BEFORE:-not_reached}
+          - superadmin_clerk_locked_before: ${SUPERADMIN_CLERK_LOCKED_BEFORE:-not_reached}
+          - superadmin_clerk_email_match: ${SUPERADMIN_CLERK_EMAIL_MATCH:-not_reached}
+          - testuser_clerk_banned_before: ${TESTUSER_CLERK_BANNED_BEFORE:-not_reached}
+          - testuser_clerk_locked_before: ${TESTUSER_CLERK_LOCKED_BEFORE:-not_reached}
+          - testuser_clerk_email_match: ${TESTUSER_CLERK_EMAIL_MATCH:-not_reached}
+          - clerk_state_after_reconcile: ${CLERK_STATE:-not_reached}
+          - temporary_password_reset_and_verified: ${PASSWORD_RESET:-not_reached}
+          - superadmin_direct_security_login: ${SUPERADMIN_DIRECT_LOGIN:-not_reached}
+          - superadmin_cloudflare_login: ${SUPERADMIN_WEB_LOGIN:-not_reached}
+          - testuser_direct_security_login: ${TESTUSER_DIRECT_LOGIN:-not_reached}
+          - testuser_cloudflare_login: ${TESTUSER_WEB_LOGIN:-not_reached}
+          - credentials_artifact: uc001-human-login-credentials-$GITHUB_RUN_ID
+          - job_status: ${{ job.status }}
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_HUMAN_LOGIN_RECONCILE_PROOF.md
+          git commit -m 'docs(dev): record human login reconcile proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
