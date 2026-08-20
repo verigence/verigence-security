@@ -89,7 +89,7 @@ jobs:
               JOIN security.security_principals p ON p.principal_id=u.user_id
               JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
               WHERE e.provider='CLERK'
-                AND e.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+                AND e.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
                 AND e.status='ACTIVE'
                 AND u.status='ACTIVE'
                 AND p.status='ACTIVE'
