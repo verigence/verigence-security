@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy.orm import Session
 
@@ -13,15 +13,12 @@ from verigence_security.api.platform_dependencies import (
     require_platform_permission,
 )
 from verigence_security.config import Settings, get_settings
+from verigence_security.core.errors import security_error
 from verigence_security.services.global_user_onboarding import GlobalUserOnboardingService
+from verigence_security.services.onboarding_key import require_onboarding_key_shape
 from verigence_security.services.phase1_self_onboarding import Phase1SelfOnboardingService
 
 router = APIRouter(prefix="/security/v1", tags=["Global User Onboarding"])
-
-
-class OnboardingKeyRequest(BaseModel):
-    onboardingKey: str = Field(min_length=8, max_length=64)
-    enabled: bool = True
 
 
 class GlobalUserOnboardingRequest(BaseModel):
@@ -58,92 +55,22 @@ def _clerk_failure(exc: ClerkBackendError) -> HTTPException:
     return HTTPException(status_code=503, detail="Identity provider is temporarily unavailable")
 
 
-@router.get("/platform/user-onboarding/key")
-def get_global_onboarding_key(
-    claims: dict[str, Any] = Depends(
-        require_platform_permission("security.user_onboarding.read")
-    ),
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> dict[str, object]:
-    _ = claims
-    try:
-        return GlobalUserOnboardingService(session, settings).get_onboarding_key()
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.put("/platform/user-onboarding/key")
-def set_global_onboarding_key(
-    body: OnboardingKeyRequest,
-    request: Request,
-    claims: dict[str, Any] = Depends(
-        require_platform_permission("security.user_onboarding.manage")
-    ),
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> dict[str, object]:
-    try:
-        return GlobalUserOnboardingService(session, settings).set_onboarding_key(
-            actor_user_id=str(claims["sub"]),
-            onboarding_key=body.onboardingKey,
-            enabled=body.enabled,
-            correlation_id=request.state.correlation_id,
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.post("/platform/user-onboarding/key/rotate")
-def rotate_global_onboarding_key(
-    request: Request,
-    claims: dict[str, Any] = Depends(
-        require_platform_permission("security.user_onboarding.manage")
-    ),
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> dict[str, object]:
-    try:
-        return GlobalUserOnboardingService(session, settings).rotate_onboarding_key(
-            actor_user_id=str(claims["sub"]),
-            correlation_id=request.state.correlation_id,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.delete(
-    "/platform/user-onboarding/key",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-def disable_global_onboarding_key(
-    request: Request,
-    claims: dict[str, Any] = Depends(
-        require_platform_permission("security.user_onboarding.manage")
-    ),
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> Response:
-    changed = GlobalUserOnboardingService(session, settings).disable_onboarding_key(
-        actor_user_id=str(claims["sub"]),
-        correlation_id=request.state.correlation_id,
-    )
-    if not changed:
-        raise HTTPException(status_code=404, detail="Global user onboarding key is not configured")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
 @router.post("/onboarding/users", status_code=status.HTTP_202_ACCEPTED)
 def start_global_user_onboarding(
     body: GlobalUserOnboardingRequest,
     request: Request,
-    onboarding_key: str = Header(min_length=8, max_length=64, alias="X-Onboarding-Key"),
+    onboarding_key: str = Header(min_length=11, max_length=11, alias="X-Onboarding-Key"),
     settings: Settings = Depends(get_settings),
     client_ip: str = Depends(source_ip),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
+    # Cheap structural rejection before any Clerk network call or Argon2 verification. The prefix
+    # is intentionally public; the complete key remains authoritative only in Security storage.
+    try:
+        normalized_key = require_onboarding_key_shape(onboarding_key)
+    except ValueError as exc:
+        raise security_error("PERMISSION_DENIED") from exc
+
     try:
         return Phase1SelfOnboardingService(session).start(
             first_name=body.firstName,
@@ -151,7 +78,7 @@ def start_global_user_onboarding(
             email=body.email,
             mobile=body.mobile,
             password=body.password.get_secret_value(),
-            onboarding_key=onboarding_key,
+            onboarding_key=normalized_key,
             source_ip=client_ip,
             correlation_id=request.state.correlation_id,
             clerk=_clerk(settings),
