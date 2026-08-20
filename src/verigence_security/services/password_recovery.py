@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -7,7 +8,12 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
+from verigence_security.adapters.clerk_backend import ClerkBackendClient
+from verigence_security.adapters.clerk_password_recovery import (
+    prepare_password_recovery_email,
+    restore_registered_email,
+    update_password,
+)
 
 _RESET_TTL = timedelta(minutes=15)
 _RATE_WINDOW = timedelta(minutes=15)
@@ -52,15 +58,15 @@ class PasswordRecoveryService:
                  AND e.provider='CLERK'
                  AND e.status='ACTIVE'
                 WHERE lower(u.primary_email)=:email
-                  AND u.status IN ('ACTIVE','SUSPENDED','PENDING')
+                  AND u.status IN ('ACTIVE','SUSPENDED')
                 LIMIT 2
                 """
             ),
             {"email": normalized},
         ).mappings().all()
 
-        # Deliberately keep the public response shape identical for unknown/non-eligible accounts.
-        # No attempt row is stored and no provider call is made in that case.
+        # Keep the public response shape identical for unknown/non-eligible accounts. No attempt
+        # record and no Clerk request are created in that case.
         if len(rows) != 1:
             self.s.rollback()
             return self._public_start_response(public_attempt_id, expires_at)
@@ -85,56 +91,83 @@ class PasswordRecoveryService:
             self.s.rollback()
             raise ValueError("Too many password reset requests. Please try again later.")
 
-        # Cancel an older live challenge before asking Clerk for a fresh one.
-        self.s.execute(
-            text(
-                """
-                UPDATE security.password_reset_attempts
-                SET status='CANCELLED'
-                WHERE user_id=:user_id AND status='PENDING'
-                """
-            ),
-            {"user_id": user_id},
+        prior = list(
+            self.s.execute(
+                text(
+                    """
+                    SELECT password_reset_attempt_id,clerk_email_address_id
+                    FROM security.password_reset_attempts
+                    WHERE user_id=:user_id AND status='PENDING'
+                    """
+                ),
+                {"user_id": user_id},
+            ).mappings()
         )
-        self.s.commit()
+        if prior:
+            self.s.execute(
+                text(
+                    """
+                    UPDATE security.password_reset_attempts
+                    SET status='CANCELLED'
+                    WHERE user_id=:user_id AND status='PENDING'
+                    """
+                ),
+                {"user_id": user_id},
+            )
+            self.s.commit()
+            # Each previous challenge started from a verified registered email. Restore that prior
+            # state before opening a fresh challenge so abandoned/restarted flows do not accumulate.
+            for row in prior:
+                restore_registered_email(
+                    clerk,
+                    email_address_id=str(row["clerk_email_address_id"]),
+                )
+        else:
+            self.s.rollback()
 
-        email_address_id = self._verified_clerk_email_id(
-            clerk=clerk,
+        email_address_id, verification_id = prepare_password_recovery_email(
+            clerk,
             clerk_user_id=clerk_user_id,
             expected_email=normalized,
         )
-        verification_id = clerk.prepare_email_verification(email_address_id)
 
-        self.s.execute(
-            text(
-                """
-                INSERT INTO security.password_reset_attempts
-                (password_reset_attempt_id,user_id,clerk_user_id,clerk_email_address_id,
-                 clerk_email_verification_id,status,submitted_source_ip,correlation_id,
-                 created_at_utc,expires_at_utc)
-                VALUES
-                (:attempt_id,:user_id,:clerk_user_id,:email_address_id,:verification_id,'PENDING',
-                 CAST(:source_ip AS inet),:correlation_id,:now,:expires_at)
-                """
-            ),
-            {
-                "attempt_id": public_attempt_id,
-                "user_id": user_id,
-                "clerk_user_id": clerk_user_id,
-                "email_address_id": email_address_id,
-                "verification_id": verification_id,
-                "source_ip": source_ip,
-                "correlation_id": correlation_id,
-                "now": now,
-                "expires_at": expires_at,
-            },
-        )
-        self.s.commit()
+        try:
+            self.s.execute(
+                text(
+                    """
+                    INSERT INTO security.password_reset_attempts
+                    (password_reset_attempt_id,user_id,clerk_user_id,clerk_email_address_id,
+                     clerk_email_verification_id,status,submitted_source_ip,correlation_id,
+                     created_at_utc,expires_at_utc)
+                    VALUES
+                    (:attempt_id,:user_id,:clerk_user_id,:email_address_id,:verification_id,'PENDING',
+                     CAST(:source_ip AS inet),:correlation_id,:now,:expires_at)
+                    """
+                ),
+                {
+                    "attempt_id": public_attempt_id,
+                    "user_id": user_id,
+                    "clerk_user_id": clerk_user_id,
+                    "email_address_id": email_address_id,
+                    "verification_id": verification_id,
+                    "source_ip": source_ip,
+                    "correlation_id": correlation_id,
+                    "now": now,
+                    "expires_at": expires_at,
+                },
+            )
+            self.s.commit()
+        except Exception:
+            self.s.rollback()
+            with suppress(Exception):
+                restore_registered_email(clerk, email_address_id=email_address_id)
+            raise
+
         return self._public_start_response(public_attempt_id, expires_at)
 
     def resend(self, *, attempt_id: str, clerk: ClerkBackendClient) -> dict[str, Any]:
         attempt = self._load(attempt_id)
-        self._require_pending(attempt)
+        self._require_pending(attempt, clerk=clerk)
         email_address_id = str(attempt["clerk_email_address_id"])
         self.s.rollback()
 
@@ -156,6 +189,27 @@ class PasswordRecoveryService:
         self.s.commit()
         return self._public_start_response(attempt_id, updated["expires_at_utc"])
 
+    def cancel(self, *, attempt_id: str, clerk: ClerkBackendClient) -> dict[str, str]:
+        attempt = self._load(attempt_id, for_update=True)
+        if str(attempt["status"]) != "PENDING":
+            self.s.rollback()
+            return {"status": "PASSWORD_RESET_CANCELLED"}
+
+        email_address_id = str(attempt["clerk_email_address_id"])
+        self.s.execute(
+            text(
+                """
+                UPDATE security.password_reset_attempts
+                SET status='CANCELLED'
+                WHERE password_reset_attempt_id=:attempt_id AND status='PENDING'
+                """
+            ),
+            {"attempt_id": attempt_id},
+        )
+        self.s.commit()
+        restore_registered_email(clerk, email_address_id=email_address_id)
+        return {"status": "PASSWORD_RESET_CANCELLED"}
+
     def complete(
         self,
         *,
@@ -171,31 +225,36 @@ class PasswordRecoveryService:
             raise ValueError("New password must be at least 8 characters long")
 
         attempt = self._load(attempt_id, for_update=True)
-        self._require_pending(attempt)
+        self._require_pending(attempt, clerk=clerk)
         user_id = str(attempt["user_id"])
         clerk_user_id = str(attempt["clerk_user_id"])
         email_address_id = str(attempt["clerk_email_address_id"])
         verification_id = str(attempt["clerk_email_verification_id"])
         self.s.rollback()
 
-        if not clerk.attempt_email_verification(email_address_id, verification_id, clean_code):
+        verification_accepted = clerk.attempt_email_verification(
+            email_address_id,
+            verification_id,
+            clean_code,
+        )
+        email_verified = clerk.is_email_verified(clerk_user_id, self._security_user_email(user_id))
+        if not verification_accepted and not email_verified:
             raise ValueError("Invalid or expired verification code")
+        if not email_verified:
+            raise ValueError("Email verification did not complete")
 
         # Clerk owns password storage. The new password exists only on this active TLS request path.
-        clerk._request_object(  # noqa: SLF001 - Security's backend-only Clerk facade
-            "PATCH",
-            f"/users/{clerk_user_id}",
-            json={
-                "password": new_password,
-                "sign_out_of_other_sessions": True,
-            },
+        update_password(
+            clerk,
+            clerk_user_id=clerk_user_id,
+            password=new_password,
         )
         if not clerk.verify_password(clerk_user_id=clerk_user_id, password=new_password):
             raise RuntimeError("Identity provider did not accept the new password")
 
         now = datetime.now(UTC)
         locked = self._load(attempt_id, for_update=True)
-        self._require_pending(locked, now=now)
+        self._require_pending(locked, now=now, clerk=clerk)
         if str(locked["clerk_user_id"]) != clerk_user_id:
             self.s.rollback()
             raise ValueError("Password reset identity changed during completion")
@@ -251,7 +310,13 @@ class PasswordRecoveryService:
             raise LookupError("Password reset request was not found")
         return dict(row)
 
-    def _require_pending(self, attempt: dict[str, Any], *, now: datetime | None = None) -> None:
+    def _require_pending(
+        self,
+        attempt: dict[str, Any],
+        *,
+        now: datetime | None = None,
+        clerk: ClerkBackendClient | None = None,
+    ) -> None:
         current = now or datetime.now(UTC)
         if str(attempt["status"]) != "PENDING":
             raise ValueError("Password reset request is no longer available")
@@ -267,34 +332,23 @@ class PasswordRecoveryService:
                 {"attempt_id": str(attempt["password_reset_attempt_id"])},
             )
             self.s.commit()
+            if clerk is not None:
+                with suppress(Exception):
+                    restore_registered_email(
+                        clerk,
+                        email_address_id=str(attempt["clerk_email_address_id"]),
+                    )
             raise ValueError("Password reset request has expired")
 
-    @staticmethod
-    def _verified_clerk_email_id(
-        *,
-        clerk: ClerkBackendClient,
-        clerk_user_id: str,
-        expected_email: str,
-    ) -> str:
-        user = clerk.get_user(clerk_user_id)
-        values = user.get("email_addresses")
-        if not isinstance(values, list):
-            raise ClerkBackendError("Clerk user response did not contain email addresses")
-        expected = expected_email.strip().lower()
-        for item in values:
-            if not isinstance(item, dict):
-                continue
-            value = item.get("email_address")
-            if not isinstance(value, str) or value.strip().lower() != expected:
-                continue
-            verification = item.get("verification")
-            if not isinstance(verification, dict) or verification.get("status") != "verified":
-                raise ClerkBackendError("Registered email is not verified at Clerk")
-            email_address_id = item.get("id")
-            if not isinstance(email_address_id, str) or not email_address_id:
-                raise ClerkBackendError("Clerk email address did not contain an ID")
-            return email_address_id
-        raise ClerkBackendError("Clerk user did not contain the registered email address")
+    def _security_user_email(self, user_id: str) -> str:
+        email = self.s.execute(
+            text("SELECT primary_email FROM security.users WHERE user_id=:user_id"),
+            {"user_id": user_id},
+        ).scalar_one_or_none()
+        if not isinstance(email, str) or not email.strip():
+            raise ValueError("Password reset user email is unavailable")
+        self.s.rollback()
+        return email.strip().lower()
 
     @staticmethod
     def _public_start_response(attempt_id: str, expires_at: datetime) -> dict[str, Any]:
