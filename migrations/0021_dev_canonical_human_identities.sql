@@ -85,16 +85,46 @@ BEGIN
     LIMIT 1;
   END IF;
 
+  -- DEV currently may have no Security-side TestUser row at all. The immutable Clerk subject and
+  -- approved email are authoritative inputs, so create a dedicated Security USER rather than
+  -- repurposing an unrelated historical DEV user.
   IF test_user_id IS NULL THEN
-    RAISE EXCEPTION 'Cannot safely resolve the DEV TestUser USER for canonical Clerk subject %', test_subject;
+    test_user_id := md5('security-0021-test-user-' || test_subject)::uuid;
+
+    IF EXISTS (
+      SELECT 1 FROM security.security_principals
+      WHERE principal_id=test_user_id
+        AND actor_type<>'USER'
+    ) THEN
+      RAISE EXCEPTION 'Deterministic TestUser principal id collides with a non-USER principal';
+    END IF;
+
+    INSERT INTO security.security_principals
+      (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+    VALUES
+      (test_user_id,'USER',test_email,'ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+    ON CONFLICT (principal_id) DO UPDATE SET
+      principal_name=EXCLUDED.principal_name,
+      status='ACTIVE',
+      updated_at_utc=CURRENT_TIMESTAMP;
+
+    INSERT INTO security.users
+      (user_id,display_name,primary_email,status,created_at_utc,updated_at_utc)
+    VALUES
+      (test_user_id,'TestUser',test_email,'ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+    ON CONFLICT (user_id) DO UPDATE SET
+      display_name='TestUser',
+      primary_email=EXCLUDED.primary_email,
+      status='ACTIVE',
+      updated_at_utc=CURRENT_TIMESTAMP;
   END IF;
 
   IF test_user_id=super_user_id THEN
     RAISE EXCEPTION 'Canonical SuperAdmin and TestUser identities resolve to the same Security USER';
   END IF;
 
-  -- If TestUser was resolved through the singleton/email rather than its Clerk subject, replace
-  -- its current Clerk mapping directly in Security. No provider API call is required.
+  -- If TestUser was resolved through the singleton/email or newly created rather than its Clerk
+  -- subject, replace/create its Clerk mapping directly in Security. No provider API call is required.
   IF NOT EXISTS (
     SELECT 1 FROM security.external_identities
     WHERE provider='CLERK'
@@ -156,7 +186,8 @@ BEGIN
    WHERE user_id=super_user_id;
 
   UPDATE security.users
-     SET primary_email=test_email,
+     SET display_name='TestUser',
+         primary_email=test_email,
          status='ACTIVE',
          updated_at_utc=CURRENT_TIMESTAMP
    WHERE user_id=test_user_id;
