@@ -54,6 +54,40 @@ class _ReleaseSession:
         self.commits += 1
 
 
+class _NonOwningSession:
+    def __init__(self) -> None:
+        self.commits = 0
+        self.statements: list[str] = []
+
+    def execute(self, statement: object, params: dict[str, str]) -> _Result:
+        sql = str(statement)
+        self.statements.append(sql)
+        if "SELECT DISTINCT u.user_id" in sql:
+            assert params == {
+                "email": "retry@example.com",
+                "mobile_digits": "919876543210",
+            }
+            return _Result(
+                [
+                    {
+                        "user_id": "00000000-0000-0000-0000-000000000001",
+                        "clerk_user_id": "user_old_pending",
+                    }
+                ]
+            )
+        assert params == {"user_id": "00000000-0000-0000-0000-000000000001"}
+        if "UPDATE security.platform_user_onboarding_requests" in sql:
+            return _Result([])
+        if "UPDATE security.external_identities" in sql:
+            return _Result([])
+        if "UPDATE security.security_principals" in sql:
+            return _Result([])
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
 class _FakeClerk:
     def __init__(self, failures: dict[str, int] | None = None) -> None:
         self.deleted: list[str] = []
@@ -81,7 +115,14 @@ def test_restart_validates_complete_key_before_releasing_prior_attempt(
         service,
         "_release_prior_attempts",
         lambda **kwargs: order.append(
-            f"release:{kwargs['email']}:{kwargs['mobile']}"
+            f"release-attempt:{kwargs['email']}:{kwargs['mobile']}"
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_release_nonowning_users",
+        lambda **kwargs: order.append(
+            f"release-user:{kwargs['email']}:{kwargs['mobile']}"
         ),
     )
 
@@ -106,7 +147,8 @@ def test_restart_validates_complete_key_before_releasing_prior_attempt(
     assert result["status"] == "EMAIL_VERIFICATION_REQUIRED"
     assert order == [
         "key:VGN-8273105",
-        "release:retry@example.com:+919876543210",
+        "release-attempt:retry@example.com:+919876543210",
+        "release-user:retry@example.com:+919876543210",
         "base:retry@example.com:+919876543210",
     ]
 
@@ -158,3 +200,19 @@ def test_restart_surfaces_provider_cleanup_failure_after_db_release() -> None:
     # The attempt is deliberately committed as CANCELLED before the network cleanup call. A later
     # retry will include CANCELLED rows and retry deletion instead of leaving the contact locked.
     assert session.commits == 1
+
+
+def test_restart_retires_nonowning_user_and_deletes_clerk_identity() -> None:
+    session = _NonOwningSession()
+    clerk = _FakeClerk()
+    service = UC001SelfOnboardingService(session)  # type: ignore[arg-type]
+
+    service._release_nonowning_users(  # noqa: SLF001 - targeted UC-001 contract test
+        email="retry@example.com",
+        mobile="+919876543210",
+        clerk=clerk,  # type: ignore[arg-type]
+    )
+
+    assert session.commits == 1
+    assert len(session.statements) == 4
+    assert clerk.deleted == ["user_old_pending"]
