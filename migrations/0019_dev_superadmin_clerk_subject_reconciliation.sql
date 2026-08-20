@@ -28,8 +28,8 @@ BEGIN
   LIMIT 1;
 
   -- Resolve the currently classified DEV Platform SuperAdmin. There must not be ambiguity.
-  SELECT count(DISTINCT a.user_id), min(a.user_id)
-    INTO current_superadmin_count, current_superadmin_user_id
+  SELECT count(DISTINCT a.user_id)
+    INTO current_superadmin_count
   FROM security.user_admin_role_assignments a
   WHERE a.role_key='SuperAdmin'
     AND a.scope_type='PLATFORM'
@@ -38,6 +38,17 @@ BEGIN
 
   IF current_superadmin_count > 1 THEN
     RAISE EXCEPTION 'DEV has % active Platform SuperAdmin USERs; refusing ambiguous Clerk-subject reconciliation', current_superadmin_count;
+  END IF;
+
+  IF current_superadmin_count = 1 THEN
+    SELECT a.user_id
+      INTO current_superadmin_user_id
+    FROM security.user_admin_role_assignments a
+    WHERE a.role_key='SuperAdmin'
+      AND a.scope_type='PLATFORM'
+      AND a.scope_id IS NULL
+      AND a.status='ACTIVE'
+    LIMIT 1;
   END IF;
 
   -- If the canonical Clerk subject is not mapped yet, bind it directly to the existing
