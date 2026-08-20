@@ -63,12 +63,12 @@ class ClerkBackendClient:
         email: str,
         password: str,
     ) -> tuple[str, str]:
-        """Create a banned Clerk user with a reserved email and send an email OTP.
+        """Create a banned Clerk user, make its email explicitly unverified, and send OTP.
 
-        Current Clerk Backend API supports creating email identifiers with status ``reserved``.
-        That keeps the address unverified from the first provider write and removes the previous
-        create-verified-then-patch-back-to-unverified transition. The user is also created banned,
-        so no provider session can become usable before Verigence Security activates the USER.
+        Clerk createUser creates supplied email addresses verified by default. The user is created
+        banned first, so that transient provider state cannot create a usable session. Security then
+        immediately sets the exact primary email address to verified=false and prepares email-code
+        verification. This produces a real Clerk EmailAddress verification object for OTP attempts.
         """
 
         data = self._request_object(
@@ -78,7 +78,6 @@ class ClerkBackendClient:
                 "first_name": first_name,
                 "last_name": last_name,
                 "email_address": [email],
-                "email_address_identification_status": ["reserved"],
                 "password": password,
                 "banned": True,
             },
@@ -89,6 +88,11 @@ class ClerkBackendClient:
         email_address_id = self._email_address_id(data, email)
 
         try:
+            self._request_object(
+                "PATCH",
+                f"/email_addresses/{email_address_id}",
+                json={"verified": False},
+            )
             self.prepare_email_verification(email_address_id)
         except Exception:
             # Best-effort compensation. A failed onboarding preparation must not leave a usable
