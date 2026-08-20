@@ -10,6 +10,7 @@ from verigence_security.api.routes import (
     health,
     jwks,
     legacy_onboarding_compat,
+    password_recovery,
     platform_admin,
     platform_modules,
     service_tokens,
@@ -45,6 +46,7 @@ app.include_router(jwks.router)
 # dev still calls /oauth/token; it is not the target machine-token contract.
 app.include_router(access.oauth_router)
 app.include_router(access.router)
+app.include_router(password_recovery.router)
 app.include_router(service_tokens.router)
 app.include_router(authorization.router)
 app.include_router(platform_admin.router)
