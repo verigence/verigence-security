@@ -8,7 +8,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-PHASE1_SUPER_ADMIN_CLERK_USER_ID = "user_3I7HFuZZiFC9K2muiweXFRoeoud"
+PHASE1_SUPER_ADMIN_CLERK_USER_ID = "user_3I7FdD5Pkmydsp23OfjH9hBMxpN"
 
 
 @dataclass(frozen=True, slots=True)
