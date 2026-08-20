@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy import text
 
 from verigence_security.adapters.clerk_backend import (
     ClerkBackendClient,
@@ -9,6 +12,7 @@ from verigence_security.adapters.clerk_backend import (
 )
 from verigence_security.config import Settings
 from verigence_security.core.errors import SecurityError, security_error
+from verigence_security.db.session import build_session_factory
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,12 +23,14 @@ class ClerkCredentialResult:
 class ClerkCredentialService:
     """Backend-only Phase-1 human password verification against Clerk.
 
-    The password is a transient argument and is never persisted or returned. Phase 1 does not
-    require TOTP/MFA in the canonical login contract. Clerk proves credential validity; Security
-    remains responsible for all Verigence identity state and authorization.
+    Security is authoritative for which human identity may authenticate. The entered email must
+    first resolve to exactly one ACTIVE Verigence USER/principal with an ACTIVE Clerk mapping.
+    Only that immutable Clerk subject is then used for password verification. Clerk therefore
+    proves the password but does not choose the Verigence identity being authenticated.
     """
 
     def __init__(self, settings: Settings, clerk: ClerkBackendClient | None = None) -> None:
+        self.settings = settings
         self.clerk = clerk or ClerkBackendClient(settings)
 
     def authenticate(
@@ -33,16 +39,21 @@ class ClerkCredentialService:
         identifier: str,
         password: str,
     ) -> ClerkCredentialResult:
-        normalized = identifier.strip()
+        normalized = identifier.strip().lower()
         if not normalized or not password:
             raise security_error("AUTH_TOKEN_INVALID")
 
+        expected_clerk_user_id = self._resolve_verigence_clerk_subject(normalized)
+        if expected_clerk_user_id is None:
+            # Keep the external error generic so login cannot enumerate Verigence USER records.
+            raise security_error("AUTH_TOKEN_INVALID")
+
         try:
-            user = self.clerk.find_user(normalized)
-            if user is None or user.banned or user.locked:
+            user = self._clerk_user(expected_clerk_user_id)
+            if user.banned or user.locked:
                 raise security_error("AUTH_TOKEN_INVALID")
             if not self.clerk.verify_password(
-                clerk_user_id=user.user_id,
+                clerk_user_id=expected_clerk_user_id,
                 password=password,
             ):
                 raise security_error("AUTH_TOKEN_INVALID")
@@ -54,3 +65,69 @@ class ClerkCredentialService:
                 raise security_error("IDENTITY_PROVIDER_UNAVAILABLE") from exc
             # Do not expose identifier existence/provider details on authentication failures.
             raise security_error("AUTH_TOKEN_INVALID") from exc
+
+    def _resolve_verigence_clerk_subject(self, normalized_email: str) -> str | None:
+        factory = build_session_factory(self.settings)
+        if factory is None:
+            raise security_error("DATABASE_UNAVAILABLE")
+        session = factory()
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT e.provider_subject
+                    FROM security.users u
+                    JOIN security.security_principals p
+                      ON p.principal_id=u.user_id
+                     AND p.actor_type='USER'
+                    JOIN security.external_identities e
+                      ON e.user_id=u.user_id
+                     AND e.provider='CLERK'
+                     AND e.status='ACTIVE'
+                    WHERE lower(u.primary_email)=:email
+                      AND u.status='ACTIVE'
+                      AND p.status='ACTIVE'
+                    LIMIT 2
+                    """
+                ),
+                {"email": normalized_email},
+            ).scalars().all()
+            if len(rows) != 1:
+                return None
+            subject = rows[0]
+            return str(subject) if isinstance(subject, str) and subject.startswith("user_") else None
+        finally:
+            session.close()
+
+    def _clerk_user(self, clerk_user_id: str) -> ClerkBackendUser:
+        data = self.clerk.get_user(clerk_user_id)
+        return self._user_from_payload(data)
+
+    @staticmethod
+    def _user_from_payload(row: dict[str, Any]) -> ClerkBackendUser:
+        user_id = row.get("id")
+        if not isinstance(user_id, str) or not user_id:
+            raise ClerkBackendError("Clerk user response did not contain an immutable user ID")
+        first_name = row.get("first_name") if isinstance(row.get("first_name"), str) else ""
+        last_name = row.get("last_name") if isinstance(row.get("last_name"), str) else ""
+        display_name = " ".join(value for value in (first_name, last_name) if value).strip()
+        primary_email: str | None = None
+        primary_id = row.get("primary_email_address_id")
+        values = row.get("email_addresses")
+        if isinstance(values, list):
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("email_address")
+                if isinstance(value, str) and (item.get("id") == primary_id or primary_email is None):
+                    primary_email = value
+                    if item.get("id") == primary_id:
+                        break
+        return ClerkBackendUser(
+            user_id=user_id,
+            display_name=display_name or primary_email or user_id,
+            primary_email=primary_email,
+            totp_enabled=bool(row.get("totp_enabled")),
+            banned=bool(row.get("banned")),
+            locked=bool(row.get("locked")),
+        )
