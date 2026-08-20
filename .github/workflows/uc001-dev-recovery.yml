@@ -1,0 +1,308 @@
+name: UC-001 DEV Recovery Deploy
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/uc001-dev-recovery.yml
+      - migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql
+      - migrations/0017_di_permission_catalogue_sync.sql
+      - migrations/0018_uc001_direct_onboarding_key.sql
+      - migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
+      - src/verigence_security/adapters/clerk_backend.py
+      - src/verigence_security/services/clerk_credentials.py
+      - src/verigence_security/services/initial_super_admin.py
+      - src/verigence_security/services/onboarding.py
+      - src/verigence_security/services/phase1_self_onboarding.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: security-uc001-dev-recovery
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+  CANONICAL_SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+  DEPLOY_SHA: ${{ github.sha }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+jobs:
+  recover-and-deploy:
+    name: Reconcile UC-001 DEV and deploy exact Security revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out exact Security revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Install PostgreSQL client and Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+          psql --version
+          railway --version
+
+      - name: Resolve DEV migration database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo "::error::MIGRATION_DATABASE_URL is not configured."; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo "::error::MIGRATION_DATABASE_URL is not PostgreSQL."; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "SECURITY_MIGRATION_DATABASE_URL=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+      - name: Apply post-0015 Security migrations and UC-001 reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          for migration in \
+            migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql \
+            migrations/0017_di_permission_catalogue_sync.sql \
+            migrations/0018_uc001_direct_onboarding_key.sql \
+            migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
+          do
+            echo "Applying $(basename "$migration")"
+            psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+          key_state="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT status || ':' || key_version || ':' || (key_ciphertext='VGN-8273105')::text
+            FROM security.platform_user_onboarding_settings
+            WHERE singleton_id=1;
+          ")"
+          case "$key_state" in
+            ACTIVE:*:true) echo "UC001_ONBOARDING_KEY_DB=PASS ($key_state)" ;;
+            *) echo "::error::UC-001 onboarding key reconciliation failed ($key_state)."; exit 1 ;;
+          esac
+
+          superadmin_ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.external_identities e
+            JOIN security.users u ON u.user_id=e.user_id
+            JOIN security.security_principals p ON p.principal_id=u.user_id
+            JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+            WHERE e.provider='CLERK'
+              AND e.provider_subject='$CANONICAL_SUPERADMIN_CLERK_ID'
+              AND e.status='ACTIVE'
+              AND u.status='ACTIVE'
+              AND p.actor_type='USER'
+              AND p.status='ACTIVE'
+              AND a.role_key='SuperAdmin'
+              AND a.scope_type='PLATFORM'
+              AND a.scope_id IS NULL
+              AND a.status='ACTIVE';
+          ")"
+          [ "$superadmin_ready" = "1" ] || {
+            echo "::error::Canonical DEV SuperAdmin Security mapping is not ready ($superadmin_ready)."
+            exit 1
+          }
+          echo "SUPERADMIN_SECURITY_MAPPING=PASS"
+
+      - name: Link exact Railway DEV target and load Security runtime variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo "::error::RAILWAY_API_TOKEN is not configured."; exit 1; }
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo "::error::RAILWAY_TOKEN is not configured."; exit 1; }
+
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/railway-services.json
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" '[.[] | select(.name == $service)] | first | .id // empty' /tmp/railway-services.json)"
+          [ -n "$service_id" ] || { echo "::error::Security Railway service was not found."; exit 1; }
+          echo "RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
+
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/security-vars.json
+          clerk_secret="$(jq -r '.CLERK_SECRET_KEY // empty' /tmp/security-vars.json)"
+          [ -n "$clerk_secret" ] || { echo "::error::CLERK_SECRET_KEY is not configured on Security DEV."; exit 1; }
+          echo "::add-mask::$clerk_secret"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+          echo "SECURITY_RAILWAY_TARGET=PASS"
+
+      - name: Repair canonical SuperAdmin Clerk availability if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          get_user() {
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              "https://api.clerk.com/v1/users/$CANONICAL_SUPERADMIN_CLERK_ID"
+          }
+
+          user_json="$(get_user)"
+          [ "$(printf '%s' "$user_json" | jq -r '.id // empty')" = "$CANONICAL_SUPERADMIN_CLERK_ID" ] || {
+            echo "::error::Canonical SuperAdmin Clerk user could not be resolved."
+            exit 1
+          }
+
+          banned="$(printf '%s' "$user_json" | jq -r '.banned // false')"
+          locked="$(printf '%s' "$user_json" | jq -r '.locked // false')"
+          echo "SUPERADMIN_CLERK_BEFORE banned=$banned locked=$locked"
+
+          if [ "$banned" = "true" ]; then
+            curl --fail-with-body --silent --show-error -X POST \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              "https://api.clerk.com/v1/users/$CANONICAL_SUPERADMIN_CLERK_ID/unban" >/dev/null
+          fi
+          if [ "$locked" = "true" ]; then
+            curl --fail-with-body --silent --show-error -X POST \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              "https://api.clerk.com/v1/users/$CANONICAL_SUPERADMIN_CLERK_ID/unlock" >/dev/null
+          fi
+
+          user_json="$(get_user)"
+          banned="$(printf '%s' "$user_json" | jq -r '.banned // false')"
+          locked="$(printf '%s' "$user_json" | jq -r '.locked // false')"
+          [ "$banned" = "false" ] && [ "$locked" = "false" ] || {
+            echo "::error::Canonical SuperAdmin remains unavailable in Clerk (banned=$banned locked=$locked)."
+            exit 1
+          }
+          echo "SUPERADMIN_CLERK_AVAILABILITY=PASS"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish exact immutable Security image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ env.DEPLOY_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.DEPLOY_SHA }}
+          provenance: true
+
+      - name: Resolve immutable image reference
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE_REPOSITORY}@${{ steps.build.outputs.digest }}"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "SECURITY_IMAGE=$image_ref"
+
+      - name: Snapshot current Security deployment
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" 'https://backboard.railway.com/graphql/v2')"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // {}')"
+          echo "id=$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')" >> "$GITHUB_OUTPUT"
+
+      - name: Attach exact Security image to Railway DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          mutation='mutation EnvironmentPatchCommit($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }'
+          patch="$(jq -cn --arg service "$RAILWAY_SERVICE_ID" --arg image "${{ steps.image.outputs.image_ref }}" '{services:{($service):{source:{image:$image}}}}')"
+          variables="$(jq -cn --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg message "UC-001 recovery deploy ${DEPLOY_SHA}" --argjson patch "$patch" '{environmentId:$environment,patch:$patch,commitMessage:$message}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" 'https://backboard.railway.com/graphql/v2')"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          echo "SECURITY_IMAGE_ATTACHED=PASS"
+
+      - name: Wait for exact Security deployment
+        id: deployment
+        shell: bash
+        env:
+          PREVIOUS_DEPLOYMENT_ID: ${{ steps.before.outputs.id }}
+          EXPECTED_IMAGE: ${{ steps.image.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error -X POST \
+              -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+              --data "$body" 'https://backboard.railway.com/graphql/v2')"
+            node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // {}')"
+            source_image="$(printf '%s' "$node" | jq -r '.source.image // empty')"
+            deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+            status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+            if [ "$source_image" != "$EXPECTED_IMAGE" ] || [ -z "$deployment_id" ] || [ "$deployment_id" = "${PREVIOUS_DEPLOYMENT_ID:-}" ]; then sleep 5; continue; fi
+            echo "Security deployment $deployment_id status=$status"
+            case "$status" in
+              SUCCESS) echo "id=$deployment_id" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              FAILED|CRASHED|REMOVED|SKIPPED) echo "::error::Security deployment ended with $status."; exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for Security deployment."; exit 1
+
+      - name: Verify deployed Security readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" 'https://backboard.railway.com/graphql/v2')"
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ] || { echo "::error::Security DEV domain is missing."; exit 1; }
+          base_url="https://$domain"
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$base_url/health/ready" || true)"
+            if [ "$code" = "200" ]; then
+              cat /tmp/ready.json
+              echo "SECURITY_DEV_RECOVERY=PASS"
+              echo "source_commit=$DEPLOY_SHA"
+              echo "railway_deployment=${{ steps.deployment.outputs.id }}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Security readiness failed after deployment."; exit 1
