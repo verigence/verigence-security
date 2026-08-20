@@ -22,8 +22,10 @@ class Phase1SelfOnboardingService:
     """Backend-only Phase 1 onboarding with Clerk-owned password and email OTP.
 
     The channel talks to Verigence only. Security validates the onboarding gate, creates a banned
-    Clerk user server-to-server, forces the email unverified, asks Clerk to send/verify email OTP,
-    and creates a PENDING Security USER only after successful email verification.
+    Clerk user with an internal verified placeholder, attaches the applicant email as unverified,
+    asks Clerk to send/verify email OTP, and creates a PENDING Security USER only after successful
+    email verification. The temporary provider placeholder is removed after the applicant email is
+    verified; the Clerk user remains banned until Verigence Admin approval.
     """
 
     def __init__(self, session: Session) -> None:
@@ -93,7 +95,7 @@ class Phase1SelfOnboardingService:
 
         clerk_user_id: str | None = None
         try:
-            clerk_user_id, email_address_id = clerk.create_pending_email_user(
+            clerk_user_id, email_address_id, verification_id = clerk.create_pending_email_user(
                 first_name=clean_first,
                 last_name=clean_last,
                 email=clean_email,
@@ -104,7 +106,8 @@ class Phase1SelfOnboardingService:
                     """
                     UPDATE security.platform_user_signup_attempts
                     SET clerk_user_id=:clerk_user_id,
-                        clerk_email_address_id=:email_address_id
+                        clerk_email_address_id=:email_address_id,
+                        clerk_email_verification_id=:verification_id
                     WHERE signup_attempt_id=:attempt_id
                       AND status='AUTHORIZED_FOR_CLERK'
                     """
@@ -113,6 +116,7 @@ class Phase1SelfOnboardingService:
                     "attempt_id": attempt_id,
                     "clerk_user_id": clerk_user_id,
                     "email_address_id": email_address_id,
+                    "verification_id": verification_id,
                 },
             )
             self.s.commit()
@@ -151,7 +155,29 @@ class Phase1SelfOnboardingService:
         self._require_completable(attempt)
         email_address_id = self._required_clerk_email_id(attempt)
         self.s.rollback()
-        clerk.prepare_email_verification(email_address_id)
+
+        verification_id = clerk.prepare_email_verification(email_address_id)
+        updated = self.s.execute(
+            text(
+                """
+                UPDATE security.platform_user_signup_attempts
+                SET clerk_email_verification_id=:verification_id
+                WHERE signup_attempt_id=:attempt_id
+                  AND status='AUTHORIZED_FOR_CLERK'
+                  AND clerk_email_address_id=:email_address_id
+                RETURNING signup_attempt_id
+                """
+            ),
+            {
+                "verification_id": verification_id,
+                "attempt_id": signup_attempt_id,
+                "email_address_id": email_address_id,
+            },
+        ).first()
+        if updated is None:
+            self.s.rollback()
+            raise ValueError("Signup attempt is no longer available for completion")
+        self.s.commit()
         return {
             "signupAttemptId": signup_attempt_id,
             "status": "EMAIL_VERIFICATION_REQUIRED",
@@ -174,6 +200,7 @@ class Phase1SelfOnboardingService:
         self._require_completable(attempt)
         clerk_user_id = self._required_clerk_user_id(attempt)
         email_address_id = self._required_clerk_email_id(attempt)
+        verification_id = self._required_clerk_verification_id(attempt)
         expected_email = str(attempt["email"])
         first_name = str(attempt["first_name"])
         last_name = str(attempt["last_name"])
@@ -183,11 +210,26 @@ class Phase1SelfOnboardingService:
         # values are never written to Security storage/audit/log state. If a prior attempt already
         # verified the exact email but Security failed before commit, accept that same provider state.
         self.s.rollback()
-        verification_accepted = clerk.attempt_email_verification(email_address_id, code.strip())
+        verification_accepted = clerk.attempt_email_verification(
+            email_address_id,
+            verification_id,
+            code.strip(),
+        )
         email_verified = clerk.is_email_verified(clerk_user_id, expected_email)
         if not verification_accepted and not email_verified:
             raise ValueError("Invalid or expired email verification code")
         if not email_verified:
+            raise ValueError("Email verification did not complete for the signup address")
+
+        # Only after OTP success (or an idempotent retry observing the already-verified provider
+        # state) may the applicant email replace the internal verified placeholder. The user stays
+        # banned throughout and therefore cannot sign in before Verigence Admin approval.
+        clerk.finalize_pending_email_user(
+            clerk_user_id=clerk_user_id,
+            email_address_id=email_address_id,
+            expected_email=expected_email,
+        )
+        if not clerk.is_email_verified(clerk_user_id, expected_email):
             raise ValueError("Email verification did not complete for the signup address")
 
         now = datetime.now(UTC)
@@ -195,6 +237,10 @@ class Phase1SelfOnboardingService:
         self._require_completable(locked_attempt, now=now)
         if self._required_clerk_user_id(locked_attempt) != clerk_user_id:
             raise ValueError("Signup identity changed during verification")
+        if self._required_clerk_email_id(locked_attempt) != email_address_id:
+            raise ValueError("Signup email changed during verification")
+        if self._required_clerk_verification_id(locked_attempt) != verification_id:
+            raise ValueError("Signup email verification changed during verification")
         self._require_identity_not_registered(expected_email, mobile)
         self._require_clerk_identity_not_registered(clerk_user_id)
 
@@ -310,7 +356,7 @@ class Phase1SelfOnboardingService:
                 """
                 SELECT signup_attempt_id,first_name,last_name,email,mobile,status,
                        created_at_utc,expires_at_utc,clerk_user_id,clerk_email_address_id,
-                       completed_at_utc
+                       clerk_email_verification_id,completed_at_utc
                 FROM security.platform_user_signup_attempts
                 WHERE signup_attempt_id=:attempt_id
                 """
@@ -487,6 +533,13 @@ class Phase1SelfOnboardingService:
         return value
 
     @staticmethod
+    def _required_clerk_verification_id(attempt: dict[str, Any]) -> str:
+        value = attempt.get("clerk_email_verification_id")
+        if not isinstance(value, str) or not value.startswith("ver_"):
+            raise ValueError("Signup email verification has not been prepared")
+        return value
+
+    @staticmethod
     def _email(value: str) -> str:
         clean = value.strip().lower()
         if not clean or "@" not in clean or clean.startswith("@") or clean.endswith("@"):
@@ -525,17 +578,16 @@ class Phase1SelfOnboardingService:
             text(
                 """
                 INSERT INTO security.security_events
-                (security_event_id,principal_id,actor_type,event_type,entity_type,entity_id,
-                 outcome,reason_code,source_ip,correlation_id,occurred_at_utc)
-                VALUES (:event_id,:principal_id,'USER','GLOBAL_USER_EMAIL_VERIFIED_REGISTERED','USER',
-                        :entity_id,'PENDING_ADMIN_APPROVAL','SECURITY_ADMIN_APPROVAL_REQUIRED',
-                        CAST(:source_ip AS inet),:correlation_id,:now)
+                (security_event_id,event_type,principal_id,actor_type,tenant_id,source_ip,
+                 outcome,reason_code,correlation_id,occurred_at_utc)
+                VALUES
+                (:event_id,'PLATFORM_USER_SELF_REGISTRATION',:user_id,'USER',NULL,
+                 CAST(:source_ip AS inet),'SUCCESS','PENDING_ADMIN_APPROVAL',:correlation_id,:now)
                 """
             ),
             {
                 "event_id": str(uuid4()),
-                "principal_id": user_id,
-                "entity_id": user_id,
+                "user_id": user_id,
                 "source_ip": source_ip,
                 "correlation_id": correlation_id,
                 "now": now,
