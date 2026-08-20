@@ -1,0 +1,23 @@
+# UC-001 Human Login Reconcile Proof
+
+- run_id: 32367670096
+- source_sha: ab2b0c3d4ffb7064d7c1a4232ffc7b3b976dcca4
+- superadmin_email: jbrconsulting.it@gmail.com
+- superadmin_clerk_id: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+- testuser_email: gigsinopensource@gmail.com
+- testuser_clerk_id: user_3I7HFuZZiFC9K2muiweXFRoeoud
+- database_identities: PASS
+- superadmin_clerk_banned_before: false
+- superadmin_clerk_locked_before: false
+- superadmin_clerk_email_match: true
+- testuser_clerk_banned_before: false
+- testuser_clerk_locked_before: false
+- testuser_clerk_email_match: true
+- clerk_state_after_reconcile: PASS
+- temporary_password_reset_and_verified: PASS
+- superadmin_direct_security_login: PASS
+- superadmin_cloudflare_login: PASS
+- testuser_direct_security_login: PASS
+- testuser_cloudflare_login: PASS
+- credentials_artifact: uc001-human-login-credentials-32367670096
+- job_status: success
