@@ -7,7 +7,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from verigence_security.adapters.clerk_backend import ClerkBackendClient
+from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
 
 _RESET_TTL = timedelta(minutes=15)
 _RATE_WINDOW = timedelta(minutes=15)
@@ -42,7 +42,7 @@ class PasswordRecoveryService:
         expires_at = now + _RESET_TTL
         public_attempt_id = str(uuid4())
 
-        row = self.s.execute(
+        rows = self.s.execute(
             text(
                 """
                 SELECT u.user_id,e.provider_subject
@@ -61,12 +61,12 @@ class PasswordRecoveryService:
 
         # Deliberately keep the public response shape identical for unknown/non-eligible accounts.
         # No attempt row is stored and no provider call is made in that case.
-        if len(row) != 1:
+        if len(rows) != 1:
             self.s.rollback()
             return self._public_start_response(public_attempt_id, expires_at)
 
-        user_id = str(row[0]["user_id"])
-        clerk_user_id = str(row[0]["provider_subject"])
+        user_id = str(rows[0]["user_id"])
+        clerk_user_id = str(rows[0]["provider_subject"])
 
         recent_count = int(
             self.s.execute(
@@ -98,7 +98,8 @@ class PasswordRecoveryService:
         )
         self.s.commit()
 
-        email_address_id = clerk.verified_email_address_id(
+        email_address_id = self._verified_clerk_email_id(
+            clerk=clerk,
             clerk_user_id=clerk_user_id,
             expected_email=normalized,
         )
@@ -180,10 +181,14 @@ class PasswordRecoveryService:
         if not clerk.attempt_email_verification(email_address_id, verification_id, clean_code):
             raise ValueError("Invalid or expired verification code")
 
-        clerk.update_password(
-            clerk_user_id=clerk_user_id,
-            password=new_password,
-            sign_out_of_other_sessions=True,
+        # Clerk owns password storage. The new password exists only on this active TLS request path.
+        clerk._request_object(  # noqa: SLF001 - Security's backend-only Clerk facade
+            "PATCH",
+            f"/users/{clerk_user_id}",
+            json={
+                "password": new_password,
+                "sign_out_of_other_sessions": True,
+            },
         )
         if not clerk.verify_password(clerk_user_id=clerk_user_id, password=new_password):
             raise RuntimeError("Identity provider did not accept the new password")
@@ -265,10 +270,40 @@ class PasswordRecoveryService:
             raise ValueError("Password reset request has expired")
 
     @staticmethod
+    def _verified_clerk_email_id(
+        *,
+        clerk: ClerkBackendClient,
+        clerk_user_id: str,
+        expected_email: str,
+    ) -> str:
+        user = clerk.get_user(clerk_user_id)
+        values = user.get("email_addresses")
+        if not isinstance(values, list):
+            raise ClerkBackendError("Clerk user response did not contain email addresses")
+        expected = expected_email.strip().lower()
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("email_address")
+            if not isinstance(value, str) or value.strip().lower() != expected:
+                continue
+            verification = item.get("verification")
+            if not isinstance(verification, dict) or verification.get("status") != "verified":
+                raise ClerkBackendError("Registered email is not verified at Clerk")
+            email_address_id = item.get("id")
+            if not isinstance(email_address_id, str) or not email_address_id:
+                raise ClerkBackendError("Clerk email address did not contain an ID")
+            return email_address_id
+        raise ClerkBackendError("Clerk user did not contain the registered email address")
+
+    @staticmethod
     def _public_start_response(attempt_id: str, expires_at: datetime) -> dict[str, Any]:
         return {
             "passwordResetAttemptId": attempt_id,
             "status": "EMAIL_VERIFICATION_REQUIRED",
             "expiresAt": expires_at.isoformat(),
-            "message": "If the account is eligible, a verification code has been sent to the registered email address.",
+            "message": (
+                "If the account is eligible, a verification code has been sent to the registered "
+                "email address."
+            ),
         }
