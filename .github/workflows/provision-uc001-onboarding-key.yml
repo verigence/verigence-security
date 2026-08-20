@@ -49,6 +49,34 @@ jobs:
           echo "SECURITY_MIGRATION_DATABASE_URL=$database_url" >> "$GITHUB_ENV"
           psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
 
+      - name: Verify existing SuperAdmin identity state
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT EXISTS (
+              SELECT 1
+              FROM security.external_identities e
+              JOIN security.users u ON u.user_id=e.user_id
+              JOIN security.security_principals p ON p.principal_id=u.user_id
+              JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+              WHERE e.provider='CLERK'
+                AND e.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+                AND e.status='ACTIVE'
+                AND u.status='ACTIVE'
+                AND p.status='ACTIVE'
+                AND a.role_key='SuperAdmin'
+                AND a.scope_type='PLATFORM'
+                AND a.scope_id IS NULL
+                AND a.status='ACTIVE'
+            );
+          ")"
+          [ "$ready" = "t" ] || {
+            echo "::error::Approved Clerk SuperAdmin is not fully ACTIVE/mapped in Security DEV."
+            exit 1
+          }
+          echo "SUPERADMIN_DB_MAPPING=PASS"
+
       - name: Provision UC-001 onboarding key directly
         shell: bash
         run: |
@@ -65,3 +93,14 @@ jobs:
             ACTIVE:*) echo "UC001_ONBOARDING_KEY_DB=PASS ($state)" ;;
             *) echo "::error::UC-001 onboarding key is not ACTIVE after direct DB provisioning ($state)."; exit 1 ;;
           esac
+
+          exact="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT key_ciphertext='VGN-8273105'
+            FROM security.platform_user_onboarding_settings
+            WHERE singleton_id=1;
+          ")"
+          [ "$exact" = "t" ] || {
+            echo "::error::DEV onboarding plaintext does not match the approved UC-001 value."
+            exit 1
+          }
+          echo "UC001_ONBOARDING_KEY_VALUE=PASS"
