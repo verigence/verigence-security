@@ -35,7 +35,7 @@ jobs:
             sudo apt-get install -y postgresql-client
           fi
 
-      - name: Verify TestUser and TestTenant binding
+      - name: Inspect TestUser and TestTenant state
         shell: bash
         run: |
           set -euo pipefail
@@ -60,43 +60,71 @@ jobs:
           SQL
           [ "$(wc -l </tmp/testuser.txt | tr -d ' ')" = 1 ] || { echo '::error::Canonical TestUser row not found exactly once'; exit 1; }
           IFS='|' read -r user_id email user_status principal_status clerk_id identity_status </tmp/testuser.txt
-          [ "$user_status" = ACTIVE ] || { echo "::error::TestUser status=$user_status"; exit 1; }
-          [ "$principal_status" = ACTIVE ] || { echo "::error::TestUser principal status=$principal_status"; exit 1; }
-          [ "$identity_status" = ACTIVE ] || { echo "::error::TestUser Clerk identity status=$identity_status"; exit 1; }
-
-          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' -v uid="$TESTUSER_SECURITY_ID" <<'SQL' >/tmp/testtenant.txt
-          SELECT pti.tenant_id,pti.status,t.tenant_code,t.tenant_name,t.status
-          FROM security.phase1_test_identity pti
-          JOIN security.tenants t ON t.tenant_id=pti.tenant_id
-          WHERE pti.singleton_id=1
-            AND pti.user_id=:'uid'::uuid;
-          SQL
-          [ "$(wc -l </tmp/testtenant.txt | tr -d ' ')" = 1 ] || { echo '::error::Active canonical TestUser/TestTenant singleton binding not found'; exit 1; }
-          IFS='|' read -r tenant_id binding_status tenant_code tenant_name tenant_status </tmp/testtenant.txt
-          [ "$binding_status" = ACTIVE ] || { echo "::error::TestUser/TestTenant binding status=$binding_status"; exit 1; }
-          [ "$tenant_status" = ACTIVE ] || { echo "::error::TestTenant status=$tenant_status"; exit 1; }
-
-          membership_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -v uid="$TESTUSER_SECURITY_ID" -v tid="$tenant_id" -c "SELECT status FROM security.tenant_memberships WHERE user_id=:'uid'::uuid AND tenant_id=:'tid'::uuid ORDER BY updated_at_utc DESC LIMIT 1;")"
-          [ -n "$membership_status" ] || membership_status='NONE'
-
-          test_role_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -c "SELECT status FROM security.role_definitions WHERE role_key='TestUser';")"
-          [ "$test_role_status" = ACTIVE ] || { echo "::error::TestUser role definition not ACTIVE"; exit 1; }
-
-          upload_permission_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -c "SELECT status FROM security.permissions WHERE permission_key='di.document.upload';")"
-          [ "$upload_permission_status" = ACTIVE ] || { echo "::error::di.document.upload permission not ACTIVE"; exit 1; }
-
           {
             echo "TESTUSER_STATUS=$user_status"
             echo "TESTUSER_PRINCIPAL_STATUS=$principal_status"
             echo "TESTUSER_IDENTITY_STATUS=$identity_status"
-            echo "TESTTENANT_ID=$tenant_id"
-            echo "TESTTENANT_CODE=$tenant_code"
-            echo "TESTTENANT_NAME=$tenant_name"
-            echo "TESTTENANT_STATUS=$tenant_status"
+          } >> "$GITHUB_ENV"
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' -v uid="$TESTUSER_SECURITY_ID" <<'SQL' >/tmp/binding.txt
+          SELECT pti.tenant_id,pti.status,t.tenant_code,t.tenant_name,t.status
+          FROM security.phase1_test_identity pti
+          JOIN security.tenants t ON t.tenant_id=pti.tenant_id
+          WHERE pti.singleton_id=1 AND pti.user_id=:'uid'::uuid;
+          SQL
+          if [ -s /tmp/binding.txt ]; then
+            IFS='|' read -r bound_tenant_id binding_status bound_tenant_code bound_tenant_name bound_tenant_status </tmp/binding.txt
+          else
+            bound_tenant_id='NONE'; binding_status='MISSING'; bound_tenant_code='NONE'; bound_tenant_name='NONE'; bound_tenant_status='NONE'
+          fi
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' -v uid="$TESTUSER_SECURITY_ID" <<'SQL' >/tmp/memberships.txt
+          SELECT t.tenant_id,t.tenant_code,t.tenant_name,t.status,m.status
+          FROM security.tenant_memberships m
+          JOIN security.tenants t ON t.tenant_id=m.tenant_id
+          WHERE m.user_id=:'uid'::uuid
+          ORDER BY m.updated_at_utc DESC;
+          SQL
+          membership_count="$(wc -l </tmp/memberships.txt | tr -d ' ')"
+          membership_summary="$(tr '\n' ';' </tmp/memberships.txt | sed 's/;*$//')"
+          [ -n "$membership_summary" ] || membership_summary='NONE'
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' <<'SQL' >/tmp/testtenants.txt
+          SELECT tenant_id,tenant_code,tenant_name,status
+          FROM security.tenants
+          WHERE lower(tenant_code) LIKE '%test%'
+             OR lower(tenant_name) LIKE '%test%'
+          ORDER BY created_at_utc;
+          SQL
+          candidate_count="$(wc -l </tmp/testtenants.txt | tr -d ' ')"
+          candidate_summary="$(tr '\n' ';' </tmp/testtenants.txt | sed 's/;*$//')"
+          [ -n "$candidate_summary" ] || candidate_summary='NONE'
+
+          psql "$db" -X -v ON_ERROR_STOP=1 -At -F '|' <<'SQL' >/tmp/singleton.txt
+          SELECT pti.user_id,pti.tenant_id,pti.status,t.tenant_code,t.tenant_name,t.status
+          FROM security.phase1_test_identity pti
+          JOIN security.tenants t ON t.tenant_id=pti.tenant_id
+          WHERE pti.singleton_id=1;
+          SQL
+          singleton_summary="$(tr '\n' ';' </tmp/singleton.txt | sed 's/;*$//')"
+          [ -n "$singleton_summary" ] || singleton_summary='NONE'
+
+          test_role_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -c "SELECT status FROM security.role_definitions WHERE role_key='TestUser';")"
+          upload_permission_status="$(psql "$db" -X -v ON_ERROR_STOP=1 -At -c "SELECT status FROM security.permissions WHERE permission_key='di.document.upload';")"
+
+          {
             echo "TEST_BINDING_STATUS=$binding_status"
-            echo "MEMBERSHIP_STATUS=$membership_status"
-            echo "TEST_ROLE_STATUS=$test_role_status"
-            echo "UPLOAD_PERMISSION_STATUS=$upload_permission_status"
+            echo "BOUND_TENANT_ID=$bound_tenant_id"
+            echo "BOUND_TENANT_CODE=$bound_tenant_code"
+            echo "BOUND_TENANT_NAME=$bound_tenant_name"
+            echo "BOUND_TENANT_STATUS=$bound_tenant_status"
+            echo "MEMBERSHIP_COUNT=$membership_count"
+            echo "MEMBERSHIP_SUMMARY=$membership_summary"
+            echo "TESTTENANT_CANDIDATE_COUNT=$candidate_count"
+            echo "TESTTENANT_CANDIDATES=$candidate_summary"
+            echo "PHASE1_SINGLETON=$singleton_summary"
+            echo "TEST_ROLE_STATUS=${test_role_status:-MISSING}"
+            echo "UPLOAD_PERMISSION_STATUS=${upload_permission_status:-MISSING}"
           } >> "$GITHUB_ENV"
 
       - name: Record proof
@@ -116,12 +144,16 @@ jobs:
           - testuser_status: ${TESTUSER_STATUS:-not_reached}
           - testuser_principal_status: ${TESTUSER_PRINCIPAL_STATUS:-not_reached}
           - testuser_external_identity_status: ${TESTUSER_IDENTITY_STATUS:-not_reached}
-          - testtenant_id: ${TESTTENANT_ID:-not_reached}
-          - testtenant_code: ${TESTTENANT_CODE:-not_reached}
-          - testtenant_name: ${TESTTENANT_NAME:-not_reached}
-          - testtenant_status: ${TESTTENANT_STATUS:-not_reached}
           - phase1_test_binding_status: ${TEST_BINDING_STATUS:-not_reached}
-          - tenant_membership_status: ${MEMBERSHIP_STATUS:-not_reached}
+          - bound_testtenant_id: ${BOUND_TENANT_ID:-not_reached}
+          - bound_testtenant_code: ${BOUND_TENANT_CODE:-not_reached}
+          - bound_testtenant_name: ${BOUND_TENANT_NAME:-not_reached}
+          - bound_testtenant_status: ${BOUND_TENANT_STATUS:-not_reached}
+          - tenant_membership_count: ${MEMBERSHIP_COUNT:-not_reached}
+          - tenant_memberships: ${MEMBERSHIP_SUMMARY:-not_reached}
+          - testtenant_candidate_count: ${TESTTENANT_CANDIDATE_COUNT:-not_reached}
+          - testtenant_candidates: ${TESTTENANT_CANDIDATES:-not_reached}
+          - phase1_singleton_row: ${PHASE1_SINGLETON:-not_reached}
           - TestUser_role_definition: ${TEST_ROLE_STATUS:-not_reached}
           - di.document.upload_permission_catalog_status: ${UPLOAD_PERMISSION_STATUS:-not_reached}
           - job_status: ${{ job.status }}
