@@ -1,0 +1,236 @@
+name: UC-001 DEV Direct Recovery
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/uc001-dev-direct-recovery.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: security-uc001-direct-recovery
+  cancel-in-progress: false
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+  SECURITY_PUBLIC_URL: https://security-dev.up.railway.app
+  CANONICAL_SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+jobs:
+  recover:
+    name: Directly recover Security DEV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out DEV
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Install PostgreSQL client and Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+          railway --version
+
+      - name: Reconcile UC-001 database state
+        id: database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo "::error::MIGRATION_DATABASE_URL is missing"; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo "::error::Unsupported migration database URL"; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "SECURITY_MIGRATION_DATABASE_URL=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+          for migration in \
+            migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql \
+            migrations/0017_di_permission_catalogue_sync.sql \
+            migrations/0018_uc001_direct_onboarding_key.sql \
+            migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
+          do
+            echo "Applying $(basename "$migration")"
+            psql "$database_url" -X -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+          key_ok="$(psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.platform_user_onboarding_settings
+            WHERE singleton_id=1
+              AND status='ACTIVE'
+              AND key_ciphertext='VGN-8273105';
+          ")"
+          [ "$key_ok" = "1" ] || { echo "::error::Onboarding key is not reconciled"; exit 1; }
+
+          admin_ok="$(psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.external_identities e
+            JOIN security.users u ON u.user_id=e.user_id
+            JOIN security.security_principals p ON p.principal_id=u.user_id
+            JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+            WHERE e.provider='CLERK'
+              AND e.provider_subject='$CANONICAL_SUPERADMIN_CLERK_ID'
+              AND e.status='ACTIVE'
+              AND u.status='ACTIVE'
+              AND p.actor_type='USER'
+              AND p.status='ACTIVE'
+              AND a.role_key='SuperAdmin'
+              AND a.scope_type='PLATFORM'
+              AND a.scope_id IS NULL
+              AND a.status='ACTIVE';
+          ")"
+          [ "$admin_ok" = "1" ] || { echo "::error::Canonical SuperAdmin Security mapping is not ready"; exit 1; }
+          echo "DATABASE_RECOVERY=PASS"
+
+      - name: Link Railway DEV and obtain persisted Clerk credential
+        id: railway
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo "::error::RAILWAY_API_TOKEN is missing"; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/security-vars.json
+          clerk_secret="$(jq -r '.CLERK_SECRET_KEY // empty' /tmp/security-vars.json)"
+          [ -n "$clerk_secret" ] || { echo "::error::Security DEV CLERK_SECRET_KEY is missing"; exit 1; }
+          echo "::add-mask::$clerk_secret"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+          echo "RAILWAY_LINK=PASS"
+
+      - name: Repair canonical Clerk SuperAdmin availability
+        id: clerk
+        shell: bash
+        run: |
+          set -euo pipefail
+          user_url="https://api.clerk.com/v1/users/$CANONICAL_SUPERADMIN_CLERK_ID"
+          get_user() {
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              "$user_url"
+          }
+
+          user_json="$(get_user)"
+          [ "$(printf '%s' "$user_json" | jq -r '.id // empty')" = "$CANONICAL_SUPERADMIN_CLERK_ID" ] || {
+            echo "::error::Canonical Clerk SuperAdmin was not found"
+            exit 1
+          }
+          banned="$(printf '%s' "$user_json" | jq -r '.banned // false')"
+          locked="$(printf '%s' "$user_json" | jq -r '.locked // false')"
+          echo "CLERK_BEFORE banned=$banned locked=$locked"
+
+          if [ "$banned" = "true" ]; then
+            curl --fail-with-body --silent --show-error -X POST \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              "$user_url/unban" >/dev/null
+          fi
+          if [ "$locked" = "true" ]; then
+            curl --fail-with-body --silent --show-error -X POST \
+              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              -H 'Content-Type: application/json' \
+              "$user_url/unlock" >/dev/null
+          fi
+
+          user_json="$(get_user)"
+          banned="$(printf '%s' "$user_json" | jq -r '.banned // false')"
+          locked="$(printf '%s' "$user_json" | jq -r '.locked // false')"
+          [ "$banned" = "false" ] && [ "$locked" = "false" ] || {
+            echo "::error::Canonical Clerk SuperAdmin remains unavailable"
+            exit 1
+          }
+          echo "CLERK_SUPERADMIN=PASS"
+
+      - name: Deploy current Security source directly to Railway DEV
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway up \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --detach
+          echo "RAILWAY_DEPLOY_SUBMITTED=PASS"
+
+      - name: Verify deployed Security readiness
+        id: ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' \
+              "$SECURITY_PUBLIC_URL/health/ready" || true)"
+            if [ "$code" = "200" ]; then
+              cat /tmp/ready.json
+              echo "SECURITY_READY=PASS"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Security readiness did not reach HTTP 200"
+          exit 1
+
+      - name: Record direct recovery evidence
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_DIRECT_RECOVERY_LATEST.md <<EOF
+          # UC-001 DEV Direct Recovery — Latest Run
+
+          - run_id: ${RUN_ID}
+          - run_number: ${RUN_NUMBER}
+          - run_attempt: ${RUN_ATTEMPT}
+          - source_sha: ${SOURCE_SHA}
+          - job_status: ${JOB_STATUS}
+          - database_step: ${{ steps.database.outcome }}
+          - railway_link_step: ${{ steps.railway.outcome }}
+          - clerk_step: ${{ steps.clerk.outcome }}
+          - deploy_step: ${{ steps.deploy.outcome }}
+          - readiness_step: ${{ steps.ready.outcome }}
+          EOF
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/deploy-evidence/UC001_DIRECT_RECOVERY_LATEST.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'chore(dev): record direct UC-001 recovery result [skip ci]'
+          git pull --rebase origin dev
+          git push origin HEAD:dev
