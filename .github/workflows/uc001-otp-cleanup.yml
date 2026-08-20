@@ -1,0 +1,136 @@
+name: UC-001 OTP Cleanup
+
+on:
+  workflow_run:
+    workflows:
+      - UC-001 DEV Recovery Deploy
+    types: [completed]
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      SECURITY_SERVICE: security
+      CLEANUP_EMAIL: akanshchopra3@gmail.com
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+          npm install --global @railway/cli
+
+      - name: Resolve database and eligible failed attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$MIGRATION_DATABASE_URL"
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo 'Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "DATABASE_URL_RESOLVED=$database_url" >> "$GITHUB_ENV"
+
+          registered="$(psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM security.users WHERE lower(primary_email)=lower('$CLEANUP_EMAIL');")"
+          if [ "$registered" != "0" ]; then
+            echo 'CLEANUP_ACTION=SKIP_ALREADY_REGISTERED' >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          row="$(psql "$database_url" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
+            SELECT signup_attempt_id,status,coalesce(clerk_user_id,'')
+            FROM security.platform_user_signup_attempts
+            WHERE lower(email)=lower('$CLEANUP_EMAIL')
+            ORDER BY created_at_utc DESC
+            LIMIT 1;
+          ")"
+          if [ -z "$row" ]; then
+            echo 'CLEANUP_ACTION=SKIP_NO_ATTEMPT' >> "$GITHUB_ENV"
+            exit 0
+          fi
+          IFS='|' read -r attempt_id attempt_status clerk_user_id <<< "$row"
+          echo "ATTEMPT_ID=$attempt_id" >> "$GITHUB_ENV"
+          echo "ATTEMPT_STATUS=$attempt_status" >> "$GITHUB_ENV"
+          echo "CLERK_USER_ID=$clerk_user_id" >> "$GITHUB_ENV"
+          if [ "$attempt_status" != "AUTHORIZED_FOR_CLERK" ]; then
+            echo 'CLEANUP_ACTION=SKIP_NOT_ACTIVE' >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo 'CLEANUP_ACTION=CANCEL_FAILED_ATTEMPT' >> "$GITHUB_ENV"
+
+      - name: Resolve Clerk secret
+        if: env.CLEANUP_ACTION == 'CANCEL_FAILED_ATTEMPT'
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway link --project "$PLATFORM_PROJECT_ID" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/dev/null
+          env -u RAILWAY_TOKEN railway variable list --service "$SECURITY_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/tmp/security-vars.json
+          clerk_secret="$(jq -r '.CLERK_SECRET_KEY // empty' /tmp/security-vars.json)"
+          [ -n "$clerk_secret" ] || { echo 'Missing Clerk secret'; exit 1; }
+          echo "::add-mask::$clerk_secret"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+
+      - name: Delete broken Clerk placeholder and cancel signup attempt
+        if: env.CLEANUP_ACTION == 'CANCEL_FAILED_ATTEMPT'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${CLERK_USER_ID:-}" ]; then
+            status="$(curl --silent --show-error --output /tmp/delete.json --write-out '%{http_code}' \
+              -X DELETE -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              "https://api.clerk.com/v1/users/$CLERK_USER_ID")"
+            case "$status" in
+              200|204|404) ;;
+              *) cat /tmp/delete.json; echo "Unexpected Clerk delete HTTP $status"; exit 1 ;;
+            esac
+          fi
+          psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -c "
+            UPDATE security.platform_user_signup_attempts
+            SET status='CANCELLED'
+            WHERE signup_attempt_id='$ATTEMPT_ID'::uuid
+              AND status='AUTHORIZED_FOR_CLERK';
+          " >/dev/null
+
+      - name: Record cleanup evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_OTP_CLEANUP_LATEST.md <<EOF
+          # UC-001 OTP Cleanup — Latest Run
+
+          - run_id: $GITHUB_RUN_ID
+          - source_sha: $GITHUB_SHA
+          - action: ${CLEANUP_ACTION:-UNKNOWN}
+          - signup_attempt_id: ${ATTEMPT_ID:-none}
+          - prior_signup_status: ${ATTEMPT_STATUS:-none}
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_OTP_CLEANUP_LATEST.md
+          git commit -m 'docs(dev): record UC-001 OTP cleanup [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
