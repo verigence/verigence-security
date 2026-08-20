@@ -6,6 +6,7 @@ on:
       - dev
     paths:
       - migrations/0018_uc001_direct_onboarding_key.sql
+      - migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
       - .github/workflows/provision-uc001-onboarding-key.yml
   workflow_dispatch:
 
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   provision:
-    name: Provision onboarding key directly in Security DEV DB
+    name: Provision onboarding key and reconcile DEV SuperAdmin
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -77,30 +78,36 @@ jobs:
           }
           echo "UC001_ONBOARDING_KEY_VALUE=PASS"
 
-      - name: Diagnose existing SuperAdmin identity state
+      - name: Reconcile actual DEV SuperAdmin Clerk subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -f migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
+
+      - name: Verify SuperAdmin identity state
         shell: bash
         run: |
           set -euo pipefail
           ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT EXISTS (
-              SELECT 1
-              FROM security.external_identities e
-              JOIN security.users u ON u.user_id=e.user_id
-              JOIN security.security_principals p ON p.principal_id=u.user_id
-              JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
-              WHERE e.provider='CLERK'
-                AND e.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
-                AND e.status='ACTIVE'
-                AND u.status='ACTIVE'
-                AND p.status='ACTIVE'
-                AND a.role_key='SuperAdmin'
-                AND a.scope_type='PLATFORM'
-                AND a.scope_id IS NULL
-                AND a.status='ACTIVE'
-            );
+            SELECT count(*)
+            FROM security.external_identities e
+            JOIN security.users u ON u.user_id=e.user_id
+            JOIN security.security_principals p ON p.principal_id=u.user_id
+            JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+            WHERE e.provider='CLERK'
+              AND e.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
+              AND e.status='ACTIVE'
+              AND u.status='ACTIVE'
+              AND p.actor_type='USER'
+              AND p.status='ACTIVE'
+              AND a.role_key='SuperAdmin'
+              AND a.scope_type='PLATFORM'
+              AND a.scope_id IS NULL
+              AND a.status='ACTIVE';
           ")"
-          if [ "$ready" = "t" ]; then
-            echo "SUPERADMIN_DB_MAPPING=PASS"
-          else
-            echo "::warning::SUPERADMIN_DB_MAPPING=FAIL — signup key provisioning is unaffected; investigate login separately."
-          fi
+          [ "$ready" = "1" ] || {
+            echo "::error::SUPERADMIN_DB_MAPPING=FAIL ($ready active canonical mappings)"
+            exit 1
+          }
+          echo "SUPERADMIN_DB_MAPPING=PASS"
