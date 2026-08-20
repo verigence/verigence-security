@@ -75,7 +75,7 @@ jobs:
           echo "::add-mask::$clerk_secret"
           echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
 
-      - name: Inspect Clerk email verification state
+      - name: Inspect Clerk email verification linkage
         shell: bash
         run: |
           set -euo pipefail
@@ -86,10 +86,14 @@ jobs:
             -H "Authorization: Bearer $CLERK_SECRET_KEY" \
             "https://api.clerk.com/v1/users/$CLERK_USER_ID" >/tmp/user.json
 
+          email_object="$(jq -r '.object // "null"' /tmp/email.json)"
           email_status="$(jq -r '.verification.status // "null"' /tmp/email.json)"
           email_strategy="$(jq -r '.verification.strategy // "null"' /tmp/email.json)"
           email_attempts="$(jq -r '.verification.attempts // "null"' /tmp/email.json)"
           email_expire_at="$(jq -r '.verification.expire_at // .verification.expireAt // "null"' /tmp/email.json)"
+          linked_to="$(jq -c '.linked_to // .linkedTo // []' /tmp/email.json)"
+          primary_email_id="$(jq -r '.primary_email_address_id // "null"' /tmp/user.json)"
+          user_email_ids="$(jq -c '[.email_addresses[]?.id]' /tmp/user.json)"
           user_email_status="$(jq -r --arg id "$CLERK_EMAIL_ID" '[.email_addresses[] | select(.id == $id) | .verification.status] | first // "missing"' /tmp/user.json)"
           banned="$(jq -r '.banned // false' /tmp/user.json)"
 
@@ -104,10 +108,14 @@ jobs:
           - signup_expires_at: $ATTEMPT_EXPIRES
           - clerk_user_id: $CLERK_USER_ID
           - clerk_email_address_id: $CLERK_EMAIL_ID
+          - clerk_email_object: $email_object
+          - clerk_email_linked_to: $linked_to
           - clerk_email_verification_status: $email_status
           - clerk_email_verification_strategy: $email_strategy
           - clerk_email_verification_attempts: $email_attempts
           - clerk_email_verification_expire_at: $email_expire_at
+          - clerk_user_primary_email_address_id: $primary_email_id
+          - clerk_user_email_address_ids: $user_email_ids
           - clerk_user_email_verification_status: $user_email_status
           - clerk_user_banned: $banned
           EOF
@@ -119,5 +127,5 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add docs/deploy-evidence/UC001_OTP_DIAGNOSTIC.md
-          git commit -m 'docs(dev): record UC-001 OTP diagnostic' || exit 0
+          git commit -m 'docs(dev): record expanded UC-001 OTP diagnostic' || exit 0
           git push origin HEAD:dev
