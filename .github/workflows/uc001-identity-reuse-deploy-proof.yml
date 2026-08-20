@@ -7,6 +7,7 @@ on:
       - migrations/0020_uc001_identity_reuse.sql
       - src/verigence_security/services/phase1_self_onboarding.py
       - src/verigence_security/services/uc001_self_onboarding.py
+      - src/verigence_security/services/clerk_credentials.py
       - src/verigence_security/api/routes/global_users.py
       - tests/unit/test_uc001_identity_reuse_contract.py
       - tests/unit/test_uc001_signup_restart.py
@@ -47,7 +48,11 @@ jobs:
           grep -q "status IN ('ACTIVE','SUSPENDED')" src/verigence_security/services/phase1_self_onboarding.py
           grep -q "UC001SelfOnboardingService(session).start" src/verigence_security/api/routes/global_users.py
           grep -q "SET status='CANCELLED'" src/verigence_security/services/uc001_self_onboarding.py
+          grep -q "lower(u.primary_email)=:email" src/verigence_security/services/clerk_credentials.py
+          grep -q "expected_clerk_user_id" src/verigence_security/services/clerk_credentials.py
+          grep -q "verify_password" src/verigence_security/services/clerk_credentials.py
           echo 'IDENTITY_REUSE_SOURCE=PASS' >> "$GITHUB_ENV"
+          echo 'EMAIL_FIRST_LOGIN_SOURCE=PASS' >> "$GITHUB_ENV"
 
       - name: Install validation and deployment tools
         shell: bash
@@ -70,14 +75,18 @@ jobs:
           ruff check \
             src/verigence_security/services/phase1_self_onboarding.py \
             src/verigence_security/services/uc001_self_onboarding.py \
+            src/verigence_security/services/clerk_credentials.py \
             src/verigence_security/api/routes/global_users.py \
             tests/unit/test_uc001_identity_reuse_contract.py \
             tests/unit/test_uc001_signup_restart.py
-          mypy src/verigence_security/services/uc001_self_onboarding.py
+          mypy \
+            src/verigence_security/services/uc001_self_onboarding.py \
+            src/verigence_security/services/clerk_credentials.py
           pytest -q \
             tests/unit/test_uc001_identity_reuse_contract.py \
             tests/unit/test_uc001_signup_restart.py
           echo 'IDENTITY_REUSE_TESTS=PASS' >> "$GITHUB_ENV"
+          echo 'EMAIL_FIRST_LOGIN_TESTS=PASS' >> "$GITHUB_ENV"
 
       - name: Resolve DEV database and Railway service
         shell: bash
@@ -128,6 +137,21 @@ jobs:
           ")"
           [ "$predicate_count" = "2" ] || {
             echo "::error::Expected two ACTIVE/SUSPENDED contact ownership indexes, found $predicate_count"
+            exit 1
+          }
+
+          legacy_count="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='security'
+              AND c.relname IN (
+                'uq_security_users_primary_email',
+                'uq_security_users_primary_mobile_digits'
+              );
+          ")"
+          [ "$legacy_count" = "0" ] || {
+            echo "::error::Legacy unconditional contact indexes still exist: $legacy_count"
             exit 1
           }
 
@@ -264,13 +288,15 @@ jobs:
           set -euo pipefail
           mkdir -p docs/deploy-evidence
           cat > docs/deploy-evidence/UC001_IDENTITY_REUSE_DEPLOY_PROOF.md <<EOF
-          # UC-001 Identity Reuse Deploy Proof
+          # UC-001 Identity Reuse + Email-First Login Deploy Proof
 
           - run_id: $GITHUB_RUN_ID
           - workflow_source_sha: $GITHUB_SHA
           - deployed_source_sha: ${SOURCE_SHA:-unknown}
           - source_contract: ${IDENTITY_REUSE_SOURCE:-not_reached}
           - targeted_tests: ${IDENTITY_REUSE_TESTS:-not_reached}
+          - email_first_login_source: ${EMAIL_FIRST_LOGIN_SOURCE:-not_reached}
+          - email_first_login_tests: ${EMAIL_FIRST_LOGIN_TESTS:-not_reached}
           - database_rule: ${IDENTITY_REUSE_DB:-not_reached}
           - previous_railway_deployment_id: ${PREVIOUS_DEPLOYMENT_ID:-unknown}
           - new_railway_deployment_id: ${NEW_DEPLOYMENT_ID:-unknown}
@@ -280,6 +306,6 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add docs/deploy-evidence/UC001_IDENTITY_REUSE_DEPLOY_PROOF.md
-          git commit -m 'docs(dev): record UC-001 identity reuse deploy proof [skip ci]' || exit 0
+          git commit -m 'docs(dev): record UC-001 login/reuse deploy proof [skip ci]' || exit 0
           git pull --rebase origin dev
           git push origin HEAD:dev
