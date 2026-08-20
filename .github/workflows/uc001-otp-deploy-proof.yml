@@ -1,0 +1,237 @@
+name: UC-001 OTP Deploy Proof
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-otp-deploy-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: security-uc001-otp-deploy-proof
+  cancel-in-progress: false
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+  SECURITY_PUBLIC_URL: https://security-dev.up.railway.app
+  CLEANUP_EMAIL: akanshchopra3@gmail.com
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+jobs:
+  deploy-prove-clean:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Record exact source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          grep -q 'json={"verified": False}' src/verigence_security/adapters/clerk_backend.py
+          if grep -q 'email_address_identification_status.*reserved' src/verigence_security/adapters/clerk_backend.py; then
+            echo '::error::Reserved-email OTP implementation is still present.'
+            exit 1
+          fi
+          echo 'OTP_SOURCE_FIX=PASS'
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+          railway --version
+
+      - name: Resolve DEV database and Railway service
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$MIGRATION_DATABASE_URL"
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "DATABASE_URL_RESOLVED=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::RAILWAY_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" '[.[] | select(.name==$service)] | first | .id // empty' /tmp/services.json)"
+          [ -n "$service_id" ] || { echo '::error::Security Railway service not found'; exit 1; }
+          echo "RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
+
+          env -u RAILWAY_TOKEN railway variable list \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/security-vars.json
+          clerk_secret="$(jq -r '.CLERK_SECRET_KEY // empty' /tmp/security-vars.json)"
+          [ -n "$clerk_secret" ] || { echo '::error::CLERK_SECRET_KEY missing'; exit 1; }
+          echo "::add-mask::$clerk_secret"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+
+      - name: Snapshot Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" 'https://backboard.railway.com/graphql/v2')"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          previous="$(printf '%s' "$response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId==$service)] | first | .latestDeployment.id // empty')"
+          echo "PREVIOUS_DEPLOYMENT_ID=$previous" >> "$GITHUB_ENV"
+          echo "Previous deployment: $previous"
+
+      - name: Submit current DEV source to Railway
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway up \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --detach
+          echo 'RAILWAY_SOURCE_UPLOAD=PASS'
+
+      - name: Wait for a new successful Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error -X POST \
+              -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+              --data "$body" 'https://backboard.railway.com/graphql/v2')"
+            [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || exit 1
+            node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId==$service)] | first // {}')"
+            deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+            status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+            if [ -z "$deployment_id" ] || [ "$deployment_id" = "${PREVIOUS_DEPLOYMENT_ID:-}" ]; then
+              sleep 5
+              continue
+            fi
+            echo "New Security deployment $deployment_id status=$status"
+            case "$status" in
+              SUCCESS)
+                echo "NEW_DEPLOYMENT_ID=$deployment_id" >> "$GITHUB_ENV"
+                break
+                ;;
+              FAILED|CRASHED|REMOVED|SKIPPED)
+                echo "::error::New Security deployment ended with $status"
+                exit 1
+                ;;
+              *) sleep 5 ;;
+            esac
+            if [ "$attempt" = 120 ]; then
+              echo '::error::Timed out waiting for new Security deployment'
+              exit 1
+            fi
+          done
+          [ -n "${NEW_DEPLOYMENT_ID:-}" ] || { echo '::error::No successful new deployment observed'; exit 1; }
+
+      - name: Verify deployed Security readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$SECURITY_PUBLIC_URL/health/ready" || true)"
+            if [ "$code" = 200 ]; then
+              cat /tmp/ready.json
+              echo 'SECURITY_READY=PASS'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::Security readiness failed after new deployment success'
+          exit 1
+
+      - name: Cancel only the broken pre-fix signup attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          registered="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM security.users WHERE lower(primary_email)=lower('$CLEANUP_EMAIL');")"
+          if [ "$registered" != 0 ]; then
+            echo 'CLEANUP_ACTION=SKIP_ALREADY_REGISTERED' >> "$GITHUB_ENV"
+            exit 0
+          fi
+          row="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
+            SELECT signup_attempt_id,status,coalesce(clerk_user_id,'')
+            FROM security.platform_user_signup_attempts
+            WHERE lower(email)=lower('$CLEANUP_EMAIL')
+            ORDER BY created_at_utc DESC
+            LIMIT 1;
+          ")"
+          if [ -z "$row" ]; then
+            echo 'CLEANUP_ACTION=SKIP_NO_ATTEMPT' >> "$GITHUB_ENV"
+            exit 0
+          fi
+          IFS='|' read -r attempt_id attempt_status clerk_user_id <<< "$row"
+          echo "CLEANED_ATTEMPT_ID=$attempt_id" >> "$GITHUB_ENV"
+          if [ "$attempt_status" != AUTHORIZED_FOR_CLERK ]; then
+            echo "CLEANUP_ACTION=SKIP_$attempt_status" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -n "$clerk_user_id" ]; then
+            status="$(curl --silent --show-error --output /tmp/delete.json --write-out '%{http_code}' \
+              -X DELETE -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              "https://api.clerk.com/v1/users/$clerk_user_id")"
+            case "$status" in 200|204|404) ;; *) cat /tmp/delete.json; exit 1 ;; esac
+          fi
+          psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -c "
+            UPDATE security.platform_user_signup_attempts
+            SET status='CANCELLED'
+            WHERE signup_attempt_id='$attempt_id'::uuid
+              AND status='AUTHORIZED_FOR_CLERK';
+          " >/dev/null
+          echo 'CLEANUP_ACTION=CANCELLED_BROKEN_ATTEMPT' >> "$GITHUB_ENV"
+
+      - name: Record proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_OTP_DEPLOY_PROOF.md <<EOF
+          # UC-001 OTP Deploy Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - workflow_source_sha: $GITHUB_SHA
+          - deployed_source_sha: ${SOURCE_SHA:-unknown}
+          - previous_railway_deployment_id: ${PREVIOUS_DEPLOYMENT_ID:-unknown}
+          - new_railway_deployment_id: ${NEW_DEPLOYMENT_ID:-unknown}
+          - job_status: ${JOB_STATUS:-${{ job.status }}}
+          - cleanup_action: ${CLEANUP_ACTION:-not_reached}
+          - cleaned_signup_attempt_id: ${CLEANED_ATTEMPT_ID:-none}
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_OTP_DEPLOY_PROOF.md
+          git commit -m 'docs(dev): record UC-001 OTP deploy proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
