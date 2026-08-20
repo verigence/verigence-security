@@ -1,0 +1,285 @@
+name: UC-001 Identity Reuse Deploy Proof
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - migrations/0020_uc001_identity_reuse.sql
+      - src/verigence_security/services/phase1_self_onboarding.py
+      - src/verigence_security/services/uc001_self_onboarding.py
+      - src/verigence_security/api/routes/global_users.py
+      - tests/unit/test_uc001_identity_reuse_contract.py
+      - tests/unit/test_uc001_signup_restart.py
+      - .github/workflows/uc001-identity-reuse-deploy-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: security-uc001-identity-reuse-deploy-proof
+  cancel-in-progress: false
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+  SECURITY_PUBLIC_URL: https://security-dev.up.railway.app
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+jobs:
+  validate-migrate-deploy-prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Record exact source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          grep -q "status IN ('ACTIVE','SUSPENDED')" src/verigence_security/services/phase1_self_onboarding.py
+          grep -q "UC001SelfOnboardingService(session).start" src/verigence_security/api/routes/global_users.py
+          grep -q "SET status='CANCELLED'" src/verigence_security/services/uc001_self_onboarding.py
+          echo 'IDENTITY_REUSE_SOURCE=PASS' >> "$GITHUB_ENV"
+
+      - name: Install validation and deployment tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+          railway --version
+
+      - name: Validate UC-001 implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests
+          ruff check \
+            src/verigence_security/services/phase1_self_onboarding.py \
+            src/verigence_security/services/uc001_self_onboarding.py \
+            src/verigence_security/api/routes/global_users.py \
+            tests/unit/test_uc001_identity_reuse_contract.py \
+            tests/unit/test_uc001_signup_restart.py
+          mypy src/verigence_security/services/uc001_self_onboarding.py
+          pytest -q \
+            tests/unit/test_uc001_identity_reuse_contract.py \
+            tests/unit/test_uc001_signup_restart.py
+          echo 'IDENTITY_REUSE_TESTS=PASS' >> "$GITHUB_ENV"
+
+      - name: Resolve DEV database and Railway service
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "DATABASE_URL_RESOLVED=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::RAILWAY_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" '[.[] | select(.name==$service)] | first | .id // empty' /tmp/services.json)"
+          [ -n "$service_id" ] || { echo '::error::Security Railway service not found'; exit 1; }
+          echo "RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
+
+      - name: Apply and verify UC-001 contact ownership migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 \
+            -f migrations/0020_uc001_identity_reuse.sql
+
+          predicate_count="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM pg_index i
+            JOIN pg_class c ON c.oid=i.indexrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='security'
+              AND c.relname IN (
+                'uq_security_users_primary_email_ci',
+                'uq_security_users_primary_mobile_digits_active'
+              )
+              AND pg_get_expr(i.indpred,i.indrelid) ILIKE '%ACTIVE%'
+              AND pg_get_expr(i.indpred,i.indrelid) ILIKE '%SUSPENDED%';
+          ")"
+          [ "$predicate_count" = "2" ] || {
+            echo "::error::Expected two ACTIVE/SUSPENDED contact ownership indexes, found $predicate_count"
+            exit 1
+          }
+
+          # Transactional proof: non-owning lifecycle states may share contacts; once an ACTIVE
+          # owner exists, a second ACTIVE/SUSPENDED owner must be rejected by the database.
+          psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 <<'SQL'
+          BEGIN;
+          DO $$
+          DECLARE
+            u1 uuid := md5('uc001-reuse-proof-1')::uuid;
+            u2 uuid := md5('uc001-reuse-proof-2')::uuid;
+            u3 uuid := md5('uc001-reuse-proof-3')::uuid;
+            u4 uuid := md5('uc001-reuse-proof-4')::uuid;
+            proof_email text := 'uc001-reuse-proof@example.invalid';
+            proof_mobile text := '+919111111111';
+            blocked boolean := false;
+          BEGIN
+            INSERT INTO security.security_principals
+              (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+            VALUES
+              (u1,'USER','uc001-reuse-proof-1','ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+              (u2,'USER','uc001-reuse-proof-2','ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+              (u3,'USER','uc001-reuse-proof-3','ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+              (u4,'USER','uc001-reuse-proof-4','ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+
+            INSERT INTO security.users
+              (user_id,display_name,primary_email,primary_mobile,status,created_at_utc,updated_at_utc)
+            VALUES
+              (u1,'Reuse Proof Rejected',proof_email,proof_mobile,'REJECTED',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+              (u2,'Reuse Proof Pending',proof_email,proof_mobile,'PENDING',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+              (u3,'Reuse Proof Active',proof_email,proof_mobile,'ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+
+            BEGIN
+              INSERT INTO security.users
+                (user_id,display_name,primary_email,primary_mobile,status,created_at_utc,updated_at_utc)
+              VALUES
+                (u4,'Reuse Proof Suspended',proof_email,proof_mobile,'SUSPENDED',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+            EXCEPTION WHEN unique_violation THEN
+              blocked := true;
+            END;
+
+            IF NOT blocked THEN
+              RAISE EXCEPTION 'ACTIVE/SUSPENDED duplicate contact was not blocked';
+            END IF;
+          END $$;
+          ROLLBACK;
+          SQL
+          echo 'IDENTITY_REUSE_DB=PASS' >> "$GITHUB_ENV"
+
+      - name: Snapshot Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" 'https://backboard.railway.com/graphql/v2')"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          previous="$(printf '%s' "$response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId==$service)] | first | .latestDeployment.id // empty')"
+          echo "PREVIOUS_DEPLOYMENT_ID=$previous" >> "$GITHUB_ENV"
+
+      - name: Submit current DEV source to Railway
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway up \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --detach
+          echo 'RAILWAY_SOURCE_UPLOAD=PASS'
+
+      - name: Wait for a new successful Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          NEW_DEPLOYMENT_ID=""
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error -X POST \
+              -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+              --data "$body" 'https://backboard.railway.com/graphql/v2')"
+            [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || exit 1
+            node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId==$service)] | first // {}')"
+            deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+            status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+            if [ -z "$deployment_id" ] || [ "$deployment_id" = "${PREVIOUS_DEPLOYMENT_ID:-}" ]; then
+              sleep 5
+              continue
+            fi
+            echo "New Security deployment $deployment_id status=$status"
+            case "$status" in
+              SUCCESS)
+                NEW_DEPLOYMENT_ID="$deployment_id"
+                echo "NEW_DEPLOYMENT_ID=$NEW_DEPLOYMENT_ID" >> "$GITHUB_ENV"
+                break
+                ;;
+              FAILED|CRASHED|REMOVED|SKIPPED)
+                echo "::error::New Security deployment ended with $status"
+                exit 1
+                ;;
+              *) sleep 5 ;;
+            esac
+            if [ "$attempt" = 120 ]; then
+              echo '::error::Timed out waiting for new Security deployment'
+              exit 1
+            fi
+          done
+          [ -n "$NEW_DEPLOYMENT_ID" ] || { echo '::error::No successful new deployment observed'; exit 1; }
+
+      - name: Verify deployed Security readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$SECURITY_PUBLIC_URL/health/ready" || true)"
+            if [ "$code" = 200 ]; then
+              cat /tmp/ready.json
+              echo 'SECURITY_READY=PASS' >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::Security readiness failed after new deployment success'
+          exit 1
+
+      - name: Record proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_IDENTITY_REUSE_DEPLOY_PROOF.md <<EOF
+          # UC-001 Identity Reuse Deploy Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - workflow_source_sha: $GITHUB_SHA
+          - deployed_source_sha: ${SOURCE_SHA:-unknown}
+          - source_contract: ${IDENTITY_REUSE_SOURCE:-not_reached}
+          - targeted_tests: ${IDENTITY_REUSE_TESTS:-not_reached}
+          - database_rule: ${IDENTITY_REUSE_DB:-not_reached}
+          - previous_railway_deployment_id: ${PREVIOUS_DEPLOYMENT_ID:-unknown}
+          - new_railway_deployment_id: ${NEW_DEPLOYMENT_ID:-unknown}
+          - security_ready: ${SECURITY_READY:-not_reached}
+          - job_status: ${{ job.status }}
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_IDENTITY_REUSE_DEPLOY_PROOF.md
+          git commit -m 'docs(dev): record UC-001 identity reuse deploy proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
