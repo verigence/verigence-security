@@ -59,28 +59,30 @@ jobs:
           echo "PSQL_DB=$psql_db" >> "$GITHUB_ENV"
           echo "PY_DB=$py_db" >> "$GITHUB_ENV"
 
-          testuser="$(psql "$psql_db" -X -v ON_ERROR_STOP=1 -At -F '|' -v uid="$TESTUSER_SECURITY_ID" -v email="$TESTUSER_EMAIL" -v clerk="$TESTUSER_CLERK_ID" -c "
+          testuser="$(psql "$psql_db" -X -v ON_ERROR_STOP=1 -At -F '|' -c "
             SELECT u.status,p.status,e.status
             FROM security.users u
             JOIN security.security_principals p ON p.principal_id=u.user_id
             JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
-            WHERE u.user_id=:'uid'::uuid
-              AND lower(u.primary_email)=lower(:'email')
-              AND e.provider_subject=:'clerk';")"
+            WHERE u.user_id='$TESTUSER_SECURITY_ID'::uuid
+              AND lower(u.primary_email)=lower('$TESTUSER_EMAIL')
+              AND e.provider_subject='$TESTUSER_CLERK_ID';")"
           [ "$testuser" = 'ACTIVE|ACTIVE|ACTIVE' ] || { echo "::error::Canonical TestUser not fully ACTIVE: $testuser"; exit 1; }
 
-          testtenant="$(psql "$psql_db" -X -v ON_ERROR_STOP=1 -At -F '|' -v tid="$TESTTENANT_ID" -v code="$TESTTENANT_CODE" -v name="$TESTTENANT_NAME" -c "
+          testtenant="$(psql "$psql_db" -X -v ON_ERROR_STOP=1 -At -F '|' -c "
             SELECT tenant_code,tenant_name,status
             FROM security.tenants
-            WHERE tenant_id=:'tid'::uuid AND tenant_code=:'code' AND tenant_name=:'name';")"
+            WHERE tenant_id='$TESTTENANT_ID'::uuid
+              AND tenant_code='$TESTTENANT_CODE'
+              AND tenant_name='$TESTTENANT_NAME';")"
           [ "$testtenant" = "$TESTTENANT_CODE|$TESTTENANT_NAME|ACTIVE" ] || { echo "::error::Canonical TestTenant mismatch: $testtenant"; exit 1; }
 
-          superadmin_user_id="$(psql "$psql_db" -X -v ON_ERROR_STOP=1 -At -v clerk="$SUPERADMIN_CLERK_ID" -c "
+          superadmin_user_id="$(psql "$psql_db" -X -v ON_ERROR_STOP=1 -At -c "
             SELECT u.user_id
             FROM security.users u
             JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
             JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
-            WHERE e.provider_subject=:'clerk'
+            WHERE e.provider_subject='$SUPERADMIN_CLERK_ID'
               AND e.status='ACTIVE' AND u.status='ACTIVE'
               AND a.role_key='SuperAdmin' AND a.scope_type='PLATFORM'
               AND a.scope_id IS NULL AND a.status='ACTIVE'
@@ -152,33 +154,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          binding="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -F '|' -v uid="$TESTUSER_SECURITY_ID" -v tid="$TESTTENANT_ID" -c "
+          binding="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -F '|' -c "
             SELECT pti.status,t.status
             FROM security.phase1_test_identity pti
             JOIN security.tenants t ON t.tenant_id=pti.tenant_id
-            WHERE pti.singleton_id=1 AND pti.user_id=:'uid'::uuid AND pti.tenant_id=:'tid'::uuid;")"
+            WHERE pti.singleton_id=1
+              AND pti.user_id='$TESTUSER_SECURITY_ID'::uuid
+              AND pti.tenant_id='$TESTTENANT_ID'::uuid;")"
           [ "$binding" = 'ACTIVE|ACTIVE' ] || { echo "::error::Test identity binding proof failed: $binding"; exit 1; }
 
-          membership="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -v uid="$TESTUSER_SECURITY_ID" -v tid="$TESTTENANT_ID" -c "
+          membership="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -c "
             SELECT status FROM security.tenant_memberships
-            WHERE user_id=:'uid'::uuid AND tenant_id=:'tid'::uuid;")"
+            WHERE user_id='$TESTUSER_SECURITY_ID'::uuid
+              AND tenant_id='$TESTTENANT_ID'::uuid;")"
           [ "$membership" = ACTIVE ] || { echo "::error::TestUser membership proof failed: $membership"; exit 1; }
 
-          upload_bundle="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -v tid="$TESTTENANT_ID" -c "
+          upload_bundle="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -c "
             SELECT count(*)
             FROM security.tenant_role_permissions rp
             JOIN security.permissions p ON p.permission_key=rp.permission_key AND p.status='ACTIVE'
-            WHERE rp.tenant_id=:'tid'::uuid AND rp.role_key='PC' AND rp.permission_key='di.document.upload';")"
+            WHERE rp.tenant_id='$TESTTENANT_ID'::uuid
+              AND rp.role_key='PC'
+              AND rp.permission_key='di.document.upload';")"
           [ "$upload_bundle" = 1 ] || { echo '::error::TestTenant PC upload permission is missing'; exit 1; }
 
-          operating_roles="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -v uid="$TESTUSER_SECURITY_ID" -c "
+          operating_roles="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -c "
             SELECT count(*) FROM security.user_tenant_operating_roles
-            WHERE user_id=:'uid'::uuid AND status='ACTIVE';")"
+            WHERE user_id='$TESTUSER_SECURITY_ID'::uuid AND status='ACTIVE';")"
           [ "$operating_roles" = 0 ] || { echo "::error::TestUser must not hold a production operating role; found $operating_roles"; exit 1; }
 
-          admin_roles="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -v uid="$TESTUSER_SECURITY_ID" -c "
+          admin_roles="$(psql "$PSQL_DB" -X -v ON_ERROR_STOP=1 -At -c "
             SELECT count(*) FROM security.user_admin_role_assignments
-            WHERE user_id=:'uid'::uuid AND status='ACTIVE';")"
+            WHERE user_id='$TESTUSER_SECURITY_ID'::uuid AND status='ACTIVE';")"
           [ "$admin_roles" = 0 ] || { echo "::error::TestUser must not hold an admin role; found $admin_roles"; exit 1; }
 
           python - <<'PY'
