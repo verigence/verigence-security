@@ -43,6 +43,8 @@ class HumanLoginResponse(BaseModel):
     accessToken: str
     expiresAtUtc: datetime
     actorType: ActorType
+    # UI navigation hint only. Authorization remains Security-side and is never trusted from Web.
+    isSuperAdmin: bool = False
 
 
 class RefreshAccessSessionRequest(BaseModel):
