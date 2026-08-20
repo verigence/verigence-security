@@ -12,6 +12,11 @@ permissions:
 
 env:
   CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
   SUPERADMIN_EMAIL: jbrconsulting.it@gmail.com
   SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
   SECURITY_URL: https://security-dev.up.railway.app
@@ -20,12 +25,19 @@ env:
 jobs:
   prove:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
           ref: dev
           fetch-depth: 0
+
+      - name: Install Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @railway/cli
+          railway --version
 
       - name: Generate final temporary DEV password
         shell: bash
@@ -61,25 +73,84 @@ jobs:
           [ "$(printf '%s' "$response" | jq -r '.id // empty')" = "$SUPERADMIN_CLERK_ID" ]
           [ "$(printf '%s' "$response" | jq -r '.banned // false')" = false ]
           [ "$(printf '%s' "$response" | jq -r '.locked // false')" = false ]
+          verify="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -cn --arg password "$TEMP_PASSWORD" '{password:$password}')" \
+            "https://api.clerk.com/v1/users/$SUPERADMIN_CLERK_ID/verify_password")"
+          [ "$(printf '%s' "$verify" | jq -r '.verified // false')" = true ]
           echo 'CLERK_RESET=PASS' >> "$GITHUB_ENV"
 
-      - name: Prove direct Security login
+      - name: Call direct Security login
+        id: security-login
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           payload="$(jq -cn --arg identifier "$SUPERADMIN_EMAIL" --arg password "$TEMP_PASSWORD" '{identifier:$identifier,password:$password}')"
-          code="$(curl --silent --show-error -D /tmp/security-headers.txt -o /tmp/security-login.json -w '%{http_code}' \
+          code="$(curl --silent --show-error -D /tmp/security-headers.txt -o /tmp/security-login.txt -w '%{http_code}' \
             -X POST "$SECURITY_URL/security/v1/auth/login" \
             -H 'Content-Type: application/json' \
             --data "$payload")"
-          [ "$code" = 200 ] || { echo "::error::Direct Security login returned HTTP $code"; cat /tmp/security-login.json; exit 1; }
-          [ "$(jq -r '.actorType // empty' /tmp/security-login.json)" = USER ] || { echo '::error::Unexpected actorType'; exit 1; }
-          [ "$(jq -r '.isSuperAdmin // false' /tmp/security-login.json)" = true ] || { echo '::error::Security did not classify canonical user as SuperAdmin'; exit 1; }
-          [ -n "$(jq -r '.accessToken // empty' /tmp/security-login.json)" ] || { echo '::error::Security returned no access token'; exit 1; }
-          rm -f /tmp/security-login.json
-          echo 'SECURITY_LOGIN=PASS' >> "$GITHUB_ENV"
+          echo "SECURITY_HTTP_CODE=$code" >> "$GITHUB_ENV"
+          if [ "$code" = 200 ]; then
+            cp /tmp/security-login.txt /tmp/security-login.json
+            [ "$(jq -r '.actorType // empty' /tmp/security-login.json)" = USER ]
+            [ "$(jq -r '.isSuperAdmin // false' /tmp/security-login.json)" = true ]
+            [ -n "$(jq -r '.accessToken // empty' /tmp/security-login.json)" ]
+            rm -f /tmp/security-login.json
+            echo 'SECURITY_LOGIN=PASS' >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "Direct Security login returned HTTP $code"
+          cat /tmp/security-login.txt
+          exit 1
+
+      - name: Capture Railway runtime logs after failed login
+        if: steps.security-login.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          set +e
+          env -u RAILWAY_TOKEN railway logs \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --lines 250 \
+            --json > /tmp/security-runtime-raw.log 2>&1
+          log_rc=$?
+          set -e
+          if [ "$log_rc" -ne 0 ]; then
+            echo "railway logs command failed rc=$log_rc" >> /tmp/security-runtime-raw.log
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          src = Path('/tmp/security-runtime-raw.log').read_text(errors='replace')
+          # Keep exception/traceback/request lines around the login failure while avoiding accidental
+          # credential/config disclosure in committed evidence.
+          wanted = []
+          for line in src.splitlines():
+              low = line.lower()
+              if any(key in low for key in (
+                  'traceback', 'exception', 'error', '/security/v1/auth/login',
+                  'clerkcredential', 'humanactor', 'token', 'sqlalchemy', 'psycopg',
+                  '500 internal', 'internal server error'
+              )):
+                  line = re.sub(r'(?i)(authorization|password|secret|token)\s*[:=]\s*[^ ,}]+', r'\1=<redacted>', line)
+                  wanted.append(line[:2000])
+          Path('/tmp/security-runtime-sanitized.log').write_text('\n'.join(wanted[-120:]) + '\n')
+          PY
+          echo 'RUNTIME_LOG_CAPTURE=PASS' >> "$GITHUB_ENV"
+          cat /tmp/security-runtime-sanitized.log
 
       - name: Prove Cloudflare Web proxy login
+        id: web-login
+        if: steps.security-login.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -88,13 +159,15 @@ jobs:
             -X POST "$WEB_URL/security/v1/auth/login" \
             -H 'Content-Type: application/json' \
             --data "$payload")"
+          echo "WEB_HTTP_CODE=$code" >> "$GITHUB_ENV"
           [ "$code" = 200 ] || { echo "::error::Web proxy login returned HTTP $code"; cat /tmp/web-login.json; exit 1; }
-          grep -qi '^x-verigence-proxy: security' /tmp/web-headers.txt || { echo '::error::Web response did not come through Security proxy'; exit 1; }
-          [ "$(jq -r '.isSuperAdmin // false' /tmp/web-login.json)" = true ] || { echo '::error::Web proxy login did not return SuperAdmin'; exit 1; }
+          grep -qi '^x-verigence-proxy: security' /tmp/web-headers.txt
+          [ "$(jq -r '.isSuperAdmin // false' /tmp/web-login.json)" = true ]
           rm -f /tmp/web-login.json
           echo 'WEB_PROXY_LOGIN=PASS' >> "$GITHUB_ENV"
 
-      - name: Upload proven temporary password
+      - name: Upload current temporary password
+        if: always() && env.CLERK_RESET == 'PASS'
         uses: actions/upload-artifact@v4
         with:
           name: superadmin-live-password-${{ github.run_id }}
@@ -108,6 +181,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p docs/deploy-evidence
+          runtime_excerpt='not_captured'
+          if [ -s /tmp/security-runtime-sanitized.log ]; then
+            runtime_excerpt='docs/deploy-evidence/UC001_SUPERADMIN_LOGIN_RUNTIME_ERROR.md'
+            {
+              echo '# UC-001 SuperAdmin Login Runtime Error'
+              echo
+              echo '```text'
+              cat /tmp/security-runtime-sanitized.log
+              echo '```'
+            } > "$runtime_excerpt"
+          fi
           cat > docs/deploy-evidence/UC001_SUPERADMIN_LIVE_LOGIN_PROOF.md <<EOF
           # UC-001 SuperAdmin Live Login Proof
 
@@ -116,14 +200,27 @@ jobs:
           - superadmin_email: $SUPERADMIN_EMAIL
           - superadmin_clerk_id: $SUPERADMIN_CLERK_ID
           - clerk_password_reset: ${CLERK_RESET:-not_reached}
+          - direct_security_http: ${SECURITY_HTTP_CODE:-not_reached}
           - direct_security_login: ${SECURITY_LOGIN:-not_reached}
+          - cloudflare_proxy_http: ${WEB_HTTP_CODE:-not_reached}
           - cloudflare_proxy_login: ${WEB_PROXY_LOGIN:-not_reached}
-          - job_status: ${{ job.status }}
+          - runtime_log_capture: ${RUNTIME_LOG_CAPTURE:-not_reached}
+          - runtime_error_evidence: $runtime_excerpt
           - password_artifact: superadmin-live-password-$GITHUB_RUN_ID
           EOF
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add docs/deploy-evidence/UC001_SUPERADMIN_LIVE_LOGIN_PROOF.md
-          git commit -m 'docs(dev): record SuperAdmin live login proof [skip ci]' || exit 0
+          if [ -f docs/deploy-evidence/UC001_SUPERADMIN_LOGIN_RUNTIME_ERROR.md ]; then
+            git add docs/deploy-evidence/UC001_SUPERADMIN_LOGIN_RUNTIME_ERROR.md
+          fi
+          git commit -m 'docs(dev): record SuperAdmin live login diagnostic [skip ci]' || exit 0
           git pull --rebase origin dev
           git push origin HEAD:dev
+
+      - name: Fail proof unless both live login paths pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "${SECURITY_LOGIN:-}" = PASS ] || exit 1
+          [ "${WEB_PROXY_LOGIN:-}" = PASS ] || exit 1
