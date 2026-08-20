@@ -7,6 +7,7 @@ on:
     paths:
       - migrations/0018_uc001_direct_onboarding_key.sql
       - migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
+      - migrations/0021_dev_canonical_human_identities.sql
       - .github/workflows/provision-uc001-onboarding-key.yml
   workflow_dispatch:
 
@@ -15,7 +16,7 @@ permissions:
 
 jobs:
   provision:
-    name: Provision onboarding key and reconcile DEV SuperAdmin
+    name: Provision onboarding key and reconcile DEV identities
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -88,12 +89,20 @@ jobs:
           psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
             -f migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
 
-      - name: Verify SuperAdmin identity state
+      - name: Reconcile canonical DEV human identities
         shell: bash
         run: |
           set -euo pipefail
-          row="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
-            SELECT u.user_id,e.provider_subject,e.status,u.status,p.status,
+          psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -f migrations/0021_dev_canonical_human_identities.sql
+
+      - name: Verify canonical SuperAdmin and TestUser state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          super_row="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
+            SELECT u.user_id,u.primary_email,e.provider_subject,e.status,u.status,p.status,
                    count(a.assignment_id) FILTER (
                      WHERE a.role_key='SuperAdmin'
                        AND a.scope_type='PLATFORM'
@@ -106,40 +115,68 @@ jobs:
             LEFT JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
             WHERE e.provider='CLERK'
               AND e.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
-            GROUP BY u.user_id,e.provider_subject,e.status,u.status,p.status;
+            GROUP BY u.user_id,u.primary_email,e.provider_subject,e.status,u.status,p.status;
           ")"
-          [ -n "$row" ] || {
-            echo "::error::SUPERADMIN_DB_MAPPING=FAIL (canonical subject missing)"
-            exit 1
-          }
-          IFS='|' read -r security_user_id provider_subject identity_status user_status principal_status admin_count <<< "$row"
-          [ "$provider_subject" = 'user_3I7FdD5Pkmydsp23OfjH9hBMxpN' ] || { echo '::error::Canonical Clerk subject mismatch'; exit 1; }
-          [ "$identity_status" = 'ACTIVE' ] || { echo "::error::External identity is $identity_status"; exit 1; }
-          [ "$user_status" = 'ACTIVE' ] || { echo "::error::Security USER is $user_status"; exit 1; }
-          [ "$principal_status" = 'ACTIVE' ] || { echo "::error::Security principal is $principal_status"; exit 1; }
-          [ "$admin_count" = '1' ] || { echo "::error::Expected exactly one active SuperAdmin assignment; found $admin_count"; exit 1; }
-          echo "SUPERADMIN_SECURITY_USER_ID=$security_user_id" >> "$GITHUB_ENV"
-          echo "SUPERADMIN_DB_MAPPING=PASS"
+          [ -n "$super_row" ] || { echo "::error::SUPERADMIN_DB_MAPPING=FAIL"; exit 1; }
+          IFS='|' read -r super_user_id super_email super_subject super_identity_status super_user_status super_principal_status super_admin_count <<< "$super_row"
+          [ "$super_email" = 'jbrconsulting.it@gmail.com' ] || { echo "::error::SuperAdmin email mismatch: $super_email"; exit 1; }
+          [ "$super_subject" = 'user_3I7FdD5Pkmydsp23OfjH9hBMxpN' ] || { echo '::error::SuperAdmin Clerk subject mismatch'; exit 1; }
+          [ "$super_identity_status" = 'ACTIVE' ] || { echo "::error::SuperAdmin external identity is $super_identity_status"; exit 1; }
+          [ "$super_user_status" = 'ACTIVE' ] || { echo "::error::SuperAdmin USER is $super_user_status"; exit 1; }
+          [ "$super_principal_status" = 'ACTIVE' ] || { echo "::error::SuperAdmin principal is $super_principal_status"; exit 1; }
+          [ "$super_admin_count" = '1' ] || { echo "::error::Expected exactly one SuperAdmin assignment; found $super_admin_count"; exit 1; }
 
-      - name: Record SuperAdmin DB proof
+          test_row="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
+            SELECT u.user_id,u.primary_email,e.provider_subject,e.status,u.status,p.status,
+                   count(a.assignment_id) FILTER (
+                     WHERE a.role_key='SuperAdmin' AND a.status='ACTIVE'
+                   )
+            FROM security.external_identities e
+            JOIN security.users u ON u.user_id=e.user_id
+            JOIN security.security_principals p ON p.principal_id=u.user_id
+            LEFT JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+            WHERE e.provider='CLERK'
+              AND e.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+            GROUP BY u.user_id,u.primary_email,e.provider_subject,e.status,u.status,p.status;
+          ")"
+          [ -n "$test_row" ] || { echo "::error::TESTUSER_DB_MAPPING=FAIL"; exit 1; }
+          IFS='|' read -r test_user_id test_email test_subject test_identity_status test_user_status test_principal_status test_superadmin_count <<< "$test_row"
+          [ "$test_email" = 'gigsinopensource@gmail.com' ] || { echo "::error::TestUser email mismatch: $test_email"; exit 1; }
+          [ "$test_subject" = 'user_3I7HFuZZiFC9K2muiweXFRoeoud' ] || { echo '::error::TestUser Clerk subject mismatch'; exit 1; }
+          [ "$test_identity_status" = 'ACTIVE' ] || { echo "::error::TestUser external identity is $test_identity_status"; exit 1; }
+          [ "$test_user_status" = 'ACTIVE' ] || { echo "::error::TestUser USER is $test_user_status"; exit 1; }
+          [ "$test_principal_status" = 'ACTIVE' ] || { echo "::error::TestUser principal is $test_principal_status"; exit 1; }
+          [ "$test_superadmin_count" = '0' ] || { echo "::error::TestUser still has SuperAdmin assignment"; exit 1; }
+          [ "$super_user_id" != "$test_user_id" ] || { echo "::error::SuperAdmin and TestUser resolve to the same Security USER"; exit 1; }
+
+          echo "SUPERADMIN_SECURITY_USER_ID=$super_user_id" >> "$GITHUB_ENV"
+          echo "TESTUSER_SECURITY_USER_ID=$test_user_id" >> "$GITHUB_ENV"
+          echo "SUPERADMIN_DB_MAPPING=PASS"
+          echo "TESTUSER_DB_MAPPING=PASS"
+
+      - name: Record canonical identity DB proof
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p docs/deploy-evidence
-          cat > docs/deploy-evidence/UC001_SUPERADMIN_DB_PROOF.md <<EOF
-          # UC-001 SuperAdmin DB Proof
+          cat > docs/deploy-evidence/UC001_CANONICAL_HUMAN_IDENTITIES_DB_PROOF.md <<EOF
+          # UC-001 Canonical Human Identities DB Proof
 
           - run_id: $GITHUB_RUN_ID
           - workflow_source_sha: $GITHUB_SHA
-          - canonical_clerk_subject: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
-          - security_user_id: ${SUPERADMIN_SECURITY_USER_ID:-unknown}
           - job_status: ${{ job.status }}
           - reconciliation_mode: DIRECT_DATABASE_ONLY
+          - superadmin_email: jbrconsulting.it@gmail.com
+          - superadmin_clerk_subject: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+          - superadmin_security_user_id: ${SUPERADMIN_SECURITY_USER_ID:-unknown}
+          - testuser_email: gigsinopensource@gmail.com
+          - testuser_clerk_subject: user_3I7HFuZZiFC9K2muiweXFRoeoud
+          - testuser_security_user_id: ${TESTUSER_SECURITY_USER_ID:-unknown}
           EOF
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add docs/deploy-evidence/UC001_SUPERADMIN_DB_PROOF.md
-          git commit -m 'docs(dev): record UC-001 SuperAdmin DB proof [skip ci]' || exit 0
+          git add docs/deploy-evidence/UC001_CANONICAL_HUMAN_IDENTITIES_DB_PROOF.md
+          git commit -m 'docs(dev): record UC-001 canonical identity DB proof [skip ci]' || exit 0
           git pull --rebase origin dev
           git push origin HEAD:dev
