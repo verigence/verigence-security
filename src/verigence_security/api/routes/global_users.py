@@ -50,8 +50,37 @@ def _clerk(settings: Settings) -> ClerkBackendClient:
 
 
 def _clerk_failure(exc: ClerkBackendError) -> HTTPException:
+    """Translate Clerk failures without hiding actionable DEV onboarding problems."""
+
+    code = exc.provider_code
+    detail = exc.provider_detail
+
+    if code == "form_identifier_exists":
+        return HTTPException(
+            status_code=409,
+            detail="This email address already exists in the identity provider.",
+        )
+    if code in {"form_password_pwned", "form_password_validation_failed"}:
+        return HTTPException(
+            status_code=422,
+            detail=detail or "Password does not meet the identity provider security requirements.",
+        )
+    if code == "dev_monthly_email_limit_exceeded":
+        return HTTPException(
+            status_code=429,
+            detail="The Clerk DEV email verification limit has been reached.",
+        )
+    if code == "form_param_unknown":
+        return HTTPException(
+            status_code=502,
+            detail="Identity provider rejected the Security signup request format (form_param_unknown).",
+        )
     if exc.status_code in {400, 409, 422}:
-        return HTTPException(status_code=422, detail="Identity provider rejected the signup request")
+        provider_suffix = f" ({code})" if code else ""
+        return HTTPException(
+            status_code=422,
+            detail=detail or f"Identity provider rejected the signup request{provider_suffix}.",
+        )
     return HTTPException(status_code=503, detail="Identity provider is temporarily unavailable")
 
 
