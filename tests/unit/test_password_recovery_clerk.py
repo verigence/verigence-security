@@ -20,29 +20,58 @@ def _settings() -> Settings:
     )
 
 
-def _verified_user() -> dict[str, object]:
+def _verified_user(*, include_placeholder: bool = False) -> dict[str, object]:
+    emails: list[dict[str, object]] = [
+        {
+            "id": "idn_primary",
+            "email_address": "admin@example.com",
+            "verification": {"status": "verified", "strategy": "email_code"},
+        }
+    ]
+    if include_placeholder:
+        emails.append(
+            {
+                "id": "idn_recovery",
+                "email_address": "verigence-recovery-test@example.com",
+                "verification": {"status": "verified"},
+            }
+        )
     return {
         "id": "user_active",
         "primary_email_address_id": "idn_primary",
-        "email_addresses": [
-            {
-                "id": "idn_primary",
-                "email_address": "admin@example.com",
-                "verification": {"status": "verified", "strategy": "email_code"},
-            }
-        ],
+        "email_addresses": emails,
     }
 
 
-def test_prepare_password_recovery_temporarily_unverifies_then_sends_code() -> None:
+def test_prepare_password_recovery_keeps_verified_placeholder_before_unverifying_registered_email() -> None:
     calls: list[tuple[str, str, dict[str, object]]] = []
+    placeholder_created = False
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal placeholder_created
         payload = json.loads(request.content.decode("utf-8")) if request.content else {}
         calls.append((request.method, request.url.path, payload))
         if request.method == "GET" and request.url.path == "/v1/users/user_active":
             return httpx.Response(200, json=_verified_user())
+        if request.method == "POST" and request.url.path == "/v1/email_addresses":
+            assert payload["user_id"] == "user_active"
+            assert payload["primary"] is False
+            assert payload["verified"] is True
+            assert str(payload["email_address"]).startswith("verigence-recovery-")
+            placeholder_created = True
+            return httpx.Response(
+                200,
+                json={
+                    "id": "idn_recovery",
+                    "email_address": payload["email_address"],
+                    "verification": {"status": "verified"},
+                },
+            )
         if request.method == "PATCH" and request.url.path == "/v1/email_addresses/idn_primary":
+            # This models the production Clerk invariant: the registered email may only become
+            # unverified after Security has attached another verified address.
+            assert placeholder_created is True
+            assert payload == {"verified": False}
             return httpx.Response(
                 200,
                 json={
@@ -70,29 +99,44 @@ def test_prepare_password_recovery_temporarily_unverifies_then_sends_code() -> N
         client.close()
 
     assert result == ("idn_primary", "ver_reset")
-    assert calls == [
-        ("GET", "/v1/users/user_active", {}),
-        ("PATCH", "/v1/email_addresses/idn_primary", {"verified": False}),
-        (
-            "POST",
-            "/v1/email_addresses/idn_primary/prepare_verification",
-            {"strategy": "email_code"},
-        ),
+    assert [path for method, path, _ in calls if method == "POST"] == [
+        "/v1/email_addresses",
+        "/v1/email_addresses/idn_primary/prepare_verification",
     ]
 
 
-def test_prepare_password_recovery_restores_verified_state_when_prepare_fails() -> None:
+def test_prepare_password_recovery_restores_email_and_removes_placeholder_when_prepare_fails() -> None:
     patches: list[dict[str, object]] = []
+    deleted: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8")) if request.content else {}
         if request.method == "GET" and request.url.path == "/v1/users/user_active":
             return httpx.Response(200, json=_verified_user())
+        if request.method == "POST" and request.url.path == "/v1/email_addresses":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "idn_recovery",
+                    "email_address": payload["email_address"],
+                    "verification": {"status": "verified"},
+                },
+            )
         if request.method == "PATCH" and request.url.path == "/v1/email_addresses/idn_primary":
             patches.append(payload)
-            return httpx.Response(200, json={"id": "idn_primary"})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "idn_primary",
+                    "email_address": "admin@example.com",
+                    "verification": {"status": "verified" if payload.get("verified") else "unverified"},
+                },
+            )
         if request.method == "POST" and request.url.path.endswith("/prepare_verification"):
             return httpx.Response(503, json={"errors": [{"code": "service_unavailable"}]})
+        if request.method == "DELETE" and request.url.path == "/v1/email_addresses/idn_recovery":
+            deleted.append(request.url.path)
+            return httpx.Response(200, json={"deleted": True})
         raise AssertionError(f"Unexpected Clerk call: {request.method} {request.url}")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -108,16 +152,21 @@ def test_prepare_password_recovery_restores_verified_state_when_prepare_fails() 
         client.close()
 
     assert patches == [{"verified": False}, {"verified": True}]
+    assert deleted == ["/v1/email_addresses/idn_recovery"]
 
 
 def test_update_password_signs_out_other_sessions() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["method"] = request.method
-        captured["path"] = request.url.path
-        captured["payload"] = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(200, json={"id": "user_active"})
+        if request.method == "PATCH" and request.url.path == "/v1/users/user_active":
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["payload"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(200, json={"id": "user_active"})
+        if request.method == "GET" and request.url.path == "/v1/users/user_active":
+            return httpx.Response(200, json=_verified_user())
+        raise AssertionError(f"Unexpected Clerk call: {request.method} {request.url}")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
