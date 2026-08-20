@@ -2,7 +2,7 @@
 --
 -- DEV-only operational decision:
 --   * No application UI/API is used to create, reveal, rotate, or validate the onboarding key.
---   * Web performs only a public shape check (VGN + 8 digits).
+--   * Web performs only a public shape check (VGN- + 7 digits).
 --   * Security remains authoritative and verifies the complete value against the Argon2id hash.
 --   * The DEV plaintext value is retained in the database for direct operational retrieval.
 --
@@ -12,8 +12,8 @@
 DO $$
 DECLARE
   actor_user_id uuid;
-  desired_key text := 'VGN48273105';
-  desired_hash text := '$argon2id$v=19$m=65536,t=3,p=4$M5kTT8Lw8oMP2Xb3uBrlgw$XyHFk1vZ/lbqHMLqSAwiIhbGH4HXPfwHXzJcn21UgCU';
+  desired_key text := 'VGN-8273105';
+  desired_hash text := '$argon2id$v=19$m=65536,t=3,p=4$GAITwj01ARjxdOR1eYOzYw$dzeYbCn3UwnFcd6XnxpCDqX8ILguM+FpolrSD3lSFAE';
   current_hash text;
   current_plaintext text;
   current_status text;
