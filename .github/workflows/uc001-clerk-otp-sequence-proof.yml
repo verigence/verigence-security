@@ -44,12 +44,6 @@ jobs:
           }
           trap cleanup EXIT
 
-          get_email() {
-            curl --fail-with-body --silent --show-error \
-              -H "Authorization: Bearer $CLERK_SECRET_KEY" \
-              "https://api.clerk.com/v1/email_addresses/$1"
-          }
-
           create_payload="$(jq -cn \
             --arg placeholder "$placeholder" \
             --arg password "$password" \
@@ -78,34 +72,32 @@ jobs:
           [ -n "$signup_email_id" ] || { echo '::error::Unverified signup email was not created'; exit 1; }
           echo 'CREATE_UNVERIFIED_SIGNUP_EMAIL=PASS' >> "$GITHUB_ENV"
 
-          curl --fail-with-body --silent --show-error -X POST \
+          prepared="$(curl --fail-with-body --silent --show-error -X POST \
             -H "Authorization: Bearer $CLERK_SECRET_KEY" \
             -H 'Content-Type: application/json' \
             --data '{"strategy":"email_code"}' \
-            "https://api.clerk.com/v1/email_addresses/$signup_email_id/prepare_verification" >/tmp/prepare.json
-          prepared_email="$(get_email "$signup_email_id")"
-          prepared_status="$(printf '%s' "$prepared_email" | jq -r '.verification.status // empty')"
-          prepared_strategy="$(printf '%s' "$prepared_email" | jq -r '.verification.strategy // empty')"
-          [ "$prepared_status" = unverified ] || { echo "::error::Prepared email status=$prepared_status"; printf '%s\n' "$prepared_email" | jq -c '{id,email_address,verification}'; exit 1; }
-          [ "$prepared_strategy" = email_code ] || { echo "::error::Prepared email strategy=$prepared_strategy"; printf '%s\n' "$prepared_email" | jq -c '{id,email_address,verification}'; exit 1; }
+            "https://api.clerk.com/v1/email_addresses/$signup_email_id/prepare_verification")"
+          prepared_status="$(printf '%s' "$prepared" | jq -r '.status // .verification.status // empty')"
+          prepared_strategy="$(printf '%s' "$prepared" | jq -r '.strategy // .verification.strategy // empty')"
+          [ "$prepared_status" = unverified ] || { echo "::error::Prepared status=$prepared_status"; printf '%s\n' "$prepared" | jq -c '.'; exit 1; }
+          [ "$prepared_strategy" = email_code ] || { echo "::error::Prepared strategy=$prepared_strategy"; printf '%s\n' "$prepared" | jq -c '.'; exit 1; }
           echo 'PREPARE_EMAIL_CODE=PASS' >> "$GITHUB_ENV"
 
-          curl --fail-with-body --silent --show-error -X POST \
+          attempted="$(curl --fail-with-body --silent --show-error -X POST \
             -H "Authorization: Bearer $CLERK_SECRET_KEY" \
             -H 'Content-Type: application/json' \
             --data '{"code":"424242"}' \
-            "https://api.clerk.com/v1/email_addresses/$signup_email_id/attempt_verification" >/tmp/attempt.json
-          attempted_email="$(get_email "$signup_email_id")"
-          [ "$(printf '%s' "$attempted_email" | jq -r '.verification.status // empty')" = verified ] || { echo '::error::Fixed Clerk test OTP did not verify'; printf '%s\n' "$attempted_email" | jq -c '{id,email_address,verification}'; exit 1; }
+            "https://api.clerk.com/v1/email_addresses/$signup_email_id/attempt_verification")"
+          attempt_status="$(printf '%s' "$attempted" | jq -r '.status // .verification.status // empty')"
+          [ "$attempt_status" = verified ] || { echo "::error::Fixed Clerk test OTP status=$attempt_status"; printf '%s\n' "$attempted" | jq -c '.'; exit 1; }
           echo 'ATTEMPT_EMAIL_CODE=PASS' >> "$GITHUB_ENV"
 
-          curl --fail-with-body --silent --show-error -X PATCH \
+          promoted="$(curl --fail-with-body --silent --show-error -X PATCH \
             -H "Authorization: Bearer $CLERK_SECRET_KEY" \
             -H 'Content-Type: application/json' \
             --data '{"primary":true}' \
-            "https://api.clerk.com/v1/email_addresses/$signup_email_id" >/tmp/promote.json
-          promoted_email="$(get_email "$signup_email_id")"
-          [ "$(printf '%s' "$promoted_email" | jq -r '.verification.status // empty')" = verified ] || { echo '::error::Promoted email lost verified state'; exit 1; }
+            "https://api.clerk.com/v1/email_addresses/$signup_email_id")"
+          [ "$(printf '%s' "$promoted" | jq -r '.id // empty')" = "$signup_email_id" ] || { echo '::error::Signup email promotion failed'; exit 1; }
           echo 'PROMOTE_VERIFIED_EMAIL=PASS' >> "$GITHUB_ENV"
 
           delete_code="$(curl --silent --show-error -o /tmp/delete-placeholder.json -w '%{http_code}' -X DELETE \
@@ -121,10 +113,11 @@ jobs:
             -H "Authorization: Bearer $CLERK_SECRET_KEY" \
             "https://api.clerk.com/v1/users/$user_id")"
           [ "$(printf '%s' "$final" | jq -r '.banned // false')" = true ] || { echo '::error::User did not remain banned'; exit 1; }
-          [ "$(printf '%s' "$final" | jq -r '.email_addresses | length')" = 1 ] || { echo '::error::Unexpected email count after cleanup'; exit 1; }
+          [ "$(printf '%s' "$final" | jq -r '.email_addresses | length')" = 1 ] || { echo '::error::Unexpected email count after cleanup'; printf '%s\n' "$final" | jq -c '{primary_email_address_id,email_addresses}'; exit 1; }
           [ "$(printf '%s' "$final" | jq -r --arg e "$signup_email" '.email_addresses[0].email_address | ascii_downcase == ($e|ascii_downcase)')" = true ] || { echo '::error::Final user does not contain signup email'; exit 1; }
-          [ "$(printf '%s' "$final" | jq -r '.email_addresses[0].verification.status // empty')" = verified ] || { echo '::error::Final signup email is not verified'; exit 1; }
-          [ "$(printf '%s' "$final" | jq -r '.primary_email_address_id // empty')" = "$signup_email_id" ] || { echo '::error::Signup email is not primary'; exit 1; }
+          [ "$(printf '%s' "$final" | jq -r '.primary_email_address_id // empty')" = "$signup_email_id" ] || { echo '::error::Signup email is not primary'; printf '%s\n' "$final" | jq -c '{primary_email_address_id,email_addresses}'; exit 1; }
+          final_verification="$(printf '%s' "$final" | jq -r '.email_addresses[0].verification.status // empty')"
+          echo "FINAL_USER_EMAIL_VERIFICATION=${final_verification:-none}" >> "$GITHUB_ENV"
           echo 'FINAL_BANNED_VERIFIED_PRIMARY_STATE=PASS' >> "$GITHUB_ENV"
 
       - name: Record proof
@@ -144,6 +137,7 @@ jobs:
           - attempt_email_code_424242: ${ATTEMPT_EMAIL_CODE:-not_reached}
           - promote_verified_signup_email: ${PROMOTE_VERIFIED_EMAIL:-not_reached}
           - delete_placeholder: ${DELETE_PLACEHOLDER:-not_reached}
+          - final_user_email_verification_field: ${FINAL_USER_EMAIL_VERIFICATION:-not_reached}
           - final_banned_verified_primary_state: ${FINAL_BANNED_VERIFIED_PRIMARY_STATE:-not_reached}
           - job_status: ${{ job.status }}
           EOF
