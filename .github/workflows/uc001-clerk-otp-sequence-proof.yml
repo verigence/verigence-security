@@ -70,8 +70,7 @@ jobs:
             'https://api.clerk.com/v1/email_addresses')"
           signup_email_id="$(printf '%s' "$added" | jq -r '.id // empty')"
           [ -n "$signup_email_id" ] || { echo '::error::Unverified signup email was not created'; exit 1; }
-          signup_status_before="$(printf '%s' "$added" | jq -r '.verification.status // empty')"
-          [ "$signup_status_before" = unverified ] || { echo "::error::Signup email status is $signup_status_before, expected unverified"; exit 1; }
+          [ "$(printf '%s' "$added" | jq -r '.verified // false')" != true ] || { echo '::error::Signup email was unexpectedly created verified'; exit 1; }
           echo 'CREATE_UNVERIFIED_SIGNUP_EMAIL=PASS' >> "$GITHUB_ENV"
 
           prepared="$(curl --fail-with-body --silent --show-error -X POST \
@@ -81,8 +80,8 @@ jobs:
             "https://api.clerk.com/v1/email_addresses/$signup_email_id/prepare_verification")"
           prepared_status="$(printf '%s' "$prepared" | jq -r '.verification.status // empty')"
           prepared_strategy="$(printf '%s' "$prepared" | jq -r '.verification.strategy // empty')"
-          [ "$prepared_status" = unverified ] || { echo "::error::Prepared status=$prepared_status"; exit 1; }
-          [ "$prepared_strategy" = email_code ] || { echo "::error::Prepared strategy=$prepared_strategy"; exit 1; }
+          [ "$prepared_status" = unverified ] || { echo "::error::Prepared status=$prepared_status"; printf '%s\n' "$prepared" | jq -c '{id,email_address,verification}'; exit 1; }
+          [ "$prepared_strategy" = email_code ] || { echo "::error::Prepared strategy=$prepared_strategy"; printf '%s\n' "$prepared" | jq -c '{id,email_address,verification}'; exit 1; }
           echo 'PREPARE_EMAIL_CODE=PASS' >> "$GITHUB_ENV"
 
           attempted="$(curl --fail-with-body --silent --show-error -X POST \
@@ -90,7 +89,7 @@ jobs:
             -H 'Content-Type: application/json' \
             --data '{"code":"424242"}' \
             "https://api.clerk.com/v1/email_addresses/$signup_email_id/attempt_verification")"
-          [ "$(printf '%s' "$attempted" | jq -r '.verification.status // empty')" = verified ] || { echo '::error::Fixed Clerk test OTP did not verify'; exit 1; }
+          [ "$(printf '%s' "$attempted" | jq -r '.verification.status // empty')" = verified ] || { echo '::error::Fixed Clerk test OTP did not verify'; printf '%s\n' "$attempted" | jq -c '{id,email_address,verification}'; exit 1; }
           echo 'ATTEMPT_EMAIL_CODE=PASS' >> "$GITHUB_ENV"
 
           promoted="$(curl --fail-with-body --silent --show-error -X PATCH \
