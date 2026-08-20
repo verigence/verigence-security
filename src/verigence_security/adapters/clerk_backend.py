@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -62,22 +63,25 @@ class ClerkBackendClient:
         last_name: str,
         email: str,
         password: str,
-    ) -> tuple[str, str]:
-        """Create a banned Clerk user, make its email explicitly unverified, and send OTP.
+    ) -> tuple[str, str, str]:
+        """Create a banned Clerk user and prepare the applicant email for OTP verification.
 
-        Clerk createUser creates supplied email addresses verified by default. The user is created
-        banned first, so that transient provider state cannot create a usable session. Security then
-        immediately sets the exact primary email address to verified=false and prepares email-code
-        verification. This produces a real Clerk EmailAddress verification object for OTP attempts.
+        The DEV Clerk instance requires every user to retain at least one verified email address.
+        Clerk also marks email addresses supplied to createUser as verified automatically. To keep
+        that provider invariant without falsely verifying the applicant's email, Security creates
+        the banned user with an internal temporary verified placeholder, then attaches the real
+        signup email as a separate unverified EmailAddress and prepares email-code verification.
+        The placeholder is removed only after the applicant email has actually verified.
         """
 
+        placeholder_email = f"verigence-pending-{uuid4().hex}@example.com"
         data = self._request_object(
             "POST",
             "/users",
             json={
                 "first_name": first_name,
                 "last_name": last_name,
-                "email_address": [email],
+                "email_address": [placeholder_email],
                 "password": password,
                 "banned": True,
             },
@@ -85,22 +89,49 @@ class ClerkBackendClient:
         clerk_user_id = data.get("id")
         if not isinstance(clerk_user_id, str) or not clerk_user_id.startswith("user_"):
             raise ClerkBackendError("Clerk user response did not contain an immutable user ID")
-        email_address_id = self._email_address_id(data, email)
+        if data.get("banned") is not True:
+            with suppress(Exception):
+                self.delete_user(clerk_user_id)
+            raise ClerkBackendError("Pending Clerk user was not created banned")
 
         try:
-            self._request_object(
-                "PATCH",
-                f"/email_addresses/{email_address_id}",
-                json={"verified": False},
+            placeholder_id = self._email_address_id(data, placeholder_email)
+            placeholder_item = self._email_item(data, placeholder_email)
+            verification = placeholder_item.get("verification")
+            if not isinstance(verification, dict) or verification.get("status") != "verified":
+                raise ClerkBackendError("Pending Clerk placeholder email was not verified")
+
+            applicant = self._request_object(
+                "POST",
+                "/email_addresses",
+                json={
+                    "user_id": clerk_user_id,
+                    "email_address": email,
+                    "primary": False,
+                    "verified": False,
+                },
             )
-            self.prepare_email_verification(email_address_id)
+            email_address_id = applicant.get("id")
+            if not isinstance(email_address_id, str) or not email_address_id:
+                raise ClerkBackendError("Clerk did not return the signup email address ID")
+            if applicant.get("email_address", "").strip().lower() != email.strip().lower():
+                raise ClerkBackendError("Clerk attached a different signup email address")
+
+            verification_id = self.prepare_email_verification(email_address_id)
+
+            # Defensive invariant check: the provider placeholder must still exist until the real
+            # applicant email is verified, otherwise the Clerk instance can reject subsequent calls.
+            current = self.get_user(clerk_user_id)
+            if self._email_address_id(current, placeholder_email) != placeholder_id:
+                raise ClerkBackendError("Pending Clerk placeholder email changed during preparation")
         except Exception:
-            # Best-effort compensation. A failed onboarding preparation must not leave a usable
-            # Clerk identity. The user was created banned, so even failed cleanup remains safe.
+            # Best-effort compensation. A failed onboarding preparation must not leave a provider
+            # identity reserving the applicant's email. The user remains banned until deletion.
             with suppress(Exception):
                 self.delete_user(clerk_user_id)
             raise
-        return clerk_user_id, email_address_id
+
+        return clerk_user_id, email_address_id, verification_id
 
     # Retained for controlled migration/test compatibility. Normal self-onboarding uses
     # create_pending_email_user() so email ownership is verified explicitly.
@@ -127,26 +158,117 @@ class ClerkBackendClient:
             raise ClerkBackendError("Clerk user response did not contain an immutable user ID")
         return clerk_user_id
 
-    def prepare_email_verification(self, email_address_id: str) -> None:
-        self._request_object(
+    def prepare_email_verification(self, email_address_id: str) -> str:
+        data = self._request_object(
             "POST",
             f"/email_addresses/{email_address_id}/prepare_verification",
             json={"strategy": "email_code"},
         )
+        verification = self._verification_payload(data)
+        verification_id = verification.get("id")
+        if not isinstance(verification_id, str) or not verification_id.startswith("ver_"):
+            raise ClerkBackendError("Clerk email verification response did not contain a verification ID")
+        if verification.get("status") != "unverified":
+            raise ClerkBackendError("Clerk email verification was not prepared as unverified")
+        if verification.get("strategy") != "email_code":
+            raise ClerkBackendError("Clerk email verification did not use email_code")
+        return verification_id
 
-    def attempt_email_verification(self, email_address_id: str, code: str) -> bool:
+    def attempt_email_verification(
+        self,
+        email_address_id: str,
+        verification_id: str,
+        code: str,
+    ) -> bool:
         try:
             data = self._request_object(
                 "POST",
                 f"/email_addresses/{email_address_id}/attempt_verification",
-                json={"code": code},
+                json={"verification_id": verification_id, "code": code},
             )
         except ClerkBackendError as exc:
             if exc.status_code in {400, 401, 403, 409, 422}:
                 return False
             raise
-        verification = data.get("verification")
-        return isinstance(verification, dict) and verification.get("status") == "verified"
+        verification = self._verification_payload(data)
+        return verification.get("status") == "verified"
+
+    def finalize_pending_email_user(
+        self,
+        *,
+        clerk_user_id: str,
+        email_address_id: str,
+        expected_email: str,
+    ) -> None:
+        """Promote the verified applicant email and remove only our temporary placeholder.
+
+        This is intentionally idempotent so Security can safely resume after an OTP succeeded at
+        Clerk but a later Security database commit failed. It never unbans the Clerk user; Admin
+        approval remains the only path that activates the provider identity.
+        """
+
+        expected = expected_email.strip().lower()
+        user = self.get_user(clerk_user_id)
+        if user.get("banned") is not True:
+            raise ClerkBackendError("Pending Clerk user must remain banned during email verification")
+
+        applicant = self._email_item(user, expected)
+        if applicant.get("id") != email_address_id:
+            raise ClerkBackendError("Signup email address ID changed during verification")
+        verification = applicant.get("verification")
+        if not isinstance(verification, dict) or verification.get("status") != "verified":
+            raise ClerkBackendError("Signup email is not verified at Clerk")
+
+        if user.get("primary_email_address_id") != email_address_id:
+            self._request_object(
+                "PATCH",
+                f"/email_addresses/{email_address_id}",
+                json={"primary": True, "verified": True},
+            )
+
+        # Re-read before deletion so we never remove an unexpected address. Only placeholders
+        # generated by this adapter are eligible for cleanup.
+        user = self.get_user(clerk_user_id)
+        if user.get("banned") is not True:
+            raise ClerkBackendError("Pending Clerk user became usable during email finalization")
+        if user.get("primary_email_address_id") != email_address_id:
+            raise ClerkBackendError("Verified signup email was not promoted to primary")
+
+        extras: list[dict[str, Any]] = []
+        values = user.get("email_addresses")
+        if not isinstance(values, list):
+            raise ClerkBackendError("Clerk user response did not contain email addresses")
+        for item in values:
+            if not isinstance(item, dict) or item.get("id") == email_address_id:
+                continue
+            value = item.get("email_address")
+            if not isinstance(value, str) or not self._is_pending_placeholder(value):
+                raise ClerkBackendError("Pending Clerk user contains an unexpected extra email address")
+            extras.append(item)
+
+        for item in extras:
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                self._request_json(
+                    "DELETE",
+                    f"/email_addresses/{item_id}",
+                    allow_empty=True,
+                )
+
+        final = self.get_user(clerk_user_id)
+        if final.get("banned") is not True:
+            raise ClerkBackendError("Pending Clerk user must remain banned after email finalization")
+        if final.get("primary_email_address_id") != email_address_id:
+            raise ClerkBackendError("Final Clerk primary email does not match the signup email")
+        values = final.get("email_addresses")
+        if not isinstance(values, list) or len(values) != 1:
+            raise ClerkBackendError("Pending Clerk user retained unexpected email addresses")
+        applicant = self._email_item(final, expected)
+        if applicant.get("id") != email_address_id:
+            raise ClerkBackendError("Final Clerk signup email address ID changed")
+        verification = applicant.get("verification")
+        if not isinstance(verification, dict) or verification.get("status") != "verified":
+            raise ClerkBackendError("Final Clerk signup email is not verified")
 
     def find_user(self, identifier: str) -> ClerkBackendUser | None:
         normalized = identifier.strip()
@@ -358,26 +480,36 @@ class ClerkBackendClient:
         )
 
     @staticmethod
-    def _email_address_id(user: dict[str, Any], expected_email: str) -> str:
+    def _verification_payload(data: dict[str, Any]) -> dict[str, Any]:
+        nested = data.get("verification")
+        return nested if isinstance(nested, dict) else data
+
+    @staticmethod
+    def _email_item(user: dict[str, Any], expected_email: str) -> dict[str, Any]:
         expected = expected_email.strip().lower()
         values = user.get("email_addresses")
         if not isinstance(values, list):
             raise ClerkBackendError("Clerk user response did not contain email addresses")
-        primary_id = user.get("primary_email_address_id")
         for item in values:
             if not isinstance(item, dict):
                 continue
             value = item.get("email_address")
-            item_id = item.get("id")
-            if (
-                isinstance(value, str)
-                and value.strip().lower() == expected
-                and isinstance(item_id, str)
-                and item_id
-                and (primary_id is None or item_id == primary_id)
-            ):
-                return item_id
-        raise ClerkBackendError("Clerk user response did not contain the signup email address ID")
+            if isinstance(value, str) and value.strip().lower() == expected:
+                return item
+        raise ClerkBackendError("Clerk user response did not contain the expected email address")
+
+    @classmethod
+    def _email_address_id(cls, user: dict[str, Any], expected_email: str) -> str:
+        item = cls._email_item(user, expected_email)
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            raise ClerkBackendError("Clerk user response did not contain the email address ID")
+        return item_id
+
+    @staticmethod
+    def _is_pending_placeholder(value: str) -> bool:
+        normalized = value.strip().lower()
+        return normalized.startswith("verigence-pending-") and normalized.endswith("@example.com")
 
     @staticmethod
     def _matches_identifier(row: dict[str, Any], identifier: str) -> bool:
