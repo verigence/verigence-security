@@ -1,0 +1,123 @@
+name: UC-001 OTP Diagnostic
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-otp-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      SECURITY_SERVICE: security
+      DIAGNOSTIC_EMAIL: akanshchopra3@gmail.com
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+          npm install --global @railway/cli
+
+      - name: Resolve database and latest signup attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$MIGRATION_DATABASE_URL"
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo 'Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          row="$(psql "$database_url" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
+            SELECT signup_attempt_id,status,created_at_utc,expires_at_utc,
+                   coalesce(clerk_user_id,''),coalesce(clerk_email_address_id,'')
+            FROM security.platform_user_signup_attempts
+            WHERE lower(email)=lower('$DIAGNOSTIC_EMAIL')
+            ORDER BY created_at_utc DESC
+            LIMIT 1;
+          ")"
+          [ -n "$row" ] || { echo 'No signup attempt found'; exit 1; }
+          IFS='|' read -r attempt_id attempt_status created_at expires_at clerk_user_id clerk_email_id <<< "$row"
+          echo "ATTEMPT_ID=$attempt_id" >> "$GITHUB_ENV"
+          echo "ATTEMPT_STATUS=$attempt_status" >> "$GITHUB_ENV"
+          echo "ATTEMPT_CREATED=$created_at" >> "$GITHUB_ENV"
+          echo "ATTEMPT_EXPIRES=$expires_at" >> "$GITHUB_ENV"
+          echo "CLERK_USER_ID=$clerk_user_id" >> "$GITHUB_ENV"
+          echo "CLERK_EMAIL_ID=$clerk_email_id" >> "$GITHUB_ENV"
+
+      - name: Resolve Clerk secret from Railway runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway link --project "$PLATFORM_PROJECT_ID" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/dev/null
+          env -u RAILWAY_TOKEN railway variable list --service "$SECURITY_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/tmp/security-vars.json
+          clerk_secret="$(jq -r '.CLERK_SECRET_KEY // empty' /tmp/security-vars.json)"
+          [ -n "$clerk_secret" ] || { echo 'Missing Clerk secret'; exit 1; }
+          echo "::add-mask::$clerk_secret"
+          echo "CLERK_SECRET_KEY=$clerk_secret" >> "$GITHUB_ENV"
+
+      - name: Inspect Clerk email verification state
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            "https://api.clerk.com/v1/email_addresses/$CLERK_EMAIL_ID" >/tmp/email.json
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            "https://api.clerk.com/v1/users/$CLERK_USER_ID" >/tmp/user.json
+
+          email_status="$(jq -r '.verification.status // "null"' /tmp/email.json)"
+          email_strategy="$(jq -r '.verification.strategy // "null"' /tmp/email.json)"
+          email_attempts="$(jq -r '.verification.attempts // "null"' /tmp/email.json)"
+          email_expire_at="$(jq -r '.verification.expire_at // .verification.expireAt // "null"' /tmp/email.json)"
+          user_email_status="$(jq -r --arg id "$CLERK_EMAIL_ID" '[.email_addresses[] | select(.id == $id) | .verification.status] | first // "missing"' /tmp/user.json)"
+          banned="$(jq -r '.banned // false' /tmp/user.json)"
+
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_OTP_DIAGNOSTIC.md <<EOF
+          # UC-001 OTP Diagnostic
+
+          - source_sha: $GITHUB_SHA
+          - signup_attempt_id: $ATTEMPT_ID
+          - signup_attempt_status: $ATTEMPT_STATUS
+          - signup_created_at: $ATTEMPT_CREATED
+          - signup_expires_at: $ATTEMPT_EXPIRES
+          - clerk_user_id: $CLERK_USER_ID
+          - clerk_email_address_id: $CLERK_EMAIL_ID
+          - clerk_email_verification_status: $email_status
+          - clerk_email_verification_strategy: $email_strategy
+          - clerk_email_verification_attempts: $email_attempts
+          - clerk_email_verification_expire_at: $email_expire_at
+          - clerk_user_email_verification_status: $user_email_status
+          - clerk_user_banned: $banned
+          EOF
+
+      - name: Commit diagnostic evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_OTP_DIAGNOSTIC.md
+          git commit -m 'docs(dev): record UC-001 OTP diagnostic' || exit 0
+          git push origin HEAD:dev
