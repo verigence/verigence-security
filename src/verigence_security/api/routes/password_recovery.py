@@ -100,6 +100,26 @@ def resend_password_reset_code(
         raise _provider_failure(exc) from exc
 
 
+@router.post("/{passwordResetAttemptId}/cancel")
+def cancel_password_reset(
+    passwordResetAttemptId: str,
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> dict[str, str]:
+    try:
+        return PasswordRecoveryService(session).cancel(
+            attempt_id=passwordResetAttemptId,
+            clerk=_clerk(settings),
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password reset request is invalid or expired.",
+        ) from exc
+    except ClerkBackendError as exc:
+        raise _provider_failure(exc) from exc
+
+
 @router.post("/{passwordResetAttemptId}/complete")
 def complete_password_reset(
     passwordResetAttemptId: str,
