@@ -1,0 +1,398 @@
+name: UC-001 OTP Final Deploy Proof
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-otp-final-deploy-proof.yml
+      - src/verigence_security/adapters/clerk_backend.py
+      - src/verigence_security/services/phase1_self_onboarding.py
+      - migrations/0022_uc001_clerk_otp_verification_bridge.sql
+      - tests/unit/test_clerk_backend_facade_v148.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: security-uc001-otp-final-deploy-proof
+  cancel-in-progress: false
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+  SECURITY_URL: https://security-dev.up.railway.app
+  WEB_URL: https://verigence-web-dev.jbrconsulting-it.workers.dev
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+  ONBOARDING_KEY: VGN-8273105
+
+jobs:
+  validate-migrate-deploy-live-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Record source and proof identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          suffix="$(printf '%09d' $((GITHUB_RUN_ID % 1000000000)))"
+          proof_email="verigence-otp+clerk_test_${GITHUB_RUN_ID}@example.com"
+          proof_mobile="9${suffix}"
+          proof_password="VgnOtp!${GITHUB_RUN_ID}Aa9#"
+          echo "PROOF_EMAIL=$proof_email" >> "$GITHUB_ENV"
+          echo "PROOF_MOBILE=$proof_mobile" >> "$GITHUB_ENV"
+          echo "PROOF_PASSWORD=$proof_password" >> "$GITHUB_ENV"
+          echo "::add-mask::$proof_password"
+
+      - name: Install validation and deployment tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip >/dev/null
+          python -m pip install -e '.[dev]' >/dev/null
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli >/dev/null
+
+      - name: Validate OTP implementation and targeted tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests
+          grep -q 'clerk_email_verification_id' src/verigence_security/services/phase1_self_onboarding.py
+          grep -q 'verification_id.*code' src/verigence_security/adapters/clerk_backend.py
+          grep -q 'verigence-pending-' src/verigence_security/adapters/clerk_backend.py
+          grep -q 'finalize_pending_email_user' src/verigence_security/services/phase1_self_onboarding.py
+          ruff check \
+            src/verigence_security/adapters/clerk_backend.py \
+            src/verigence_security/services/phase1_self_onboarding.py \
+            tests/unit/test_clerk_backend_facade_v148.py \
+            tests/unit/test_clerk_backend_phase1.py
+          pytest -q \
+            tests/unit/test_clerk_backend_facade_v148.py \
+            tests/unit/test_clerk_backend_phase1.py \
+            tests/unit/test_uc001_identity_reuse_contract.py \
+            tests/unit/test_uc001_signup_restart.py
+          echo 'SOURCE_CONTRACT=PASS' >> "$GITHUB_ENV"
+          echo 'TARGETED_TESTS=PASS' >> "$GITHUB_ENV"
+
+      - name: Resolve DEV database and Railway service
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "DATABASE_URL_RESOLVED=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::RAILWAY_TOKEN missing'; exit 1; }
+          [ -n "${CLERK_SECRET_KEY:-}" ] || { echo '::error::CLERK_SECRET_KEY missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" '[.[] | select(.name==$service)] | first | .id // empty' /tmp/services.json)"
+          [ -n "$service_id" ] || { echo '::error::Security Railway service not found'; exit 1; }
+          echo "RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
+
+      - name: Apply and verify Clerk verification-id migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 \
+            -f migrations/0022_uc001_clerk_otp_verification_bridge.sql >/dev/null
+          column_count="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM information_schema.columns
+            WHERE table_schema='security'
+              AND table_name='platform_user_signup_attempts'
+              AND column_name='clerk_email_verification_id'
+              AND data_type='character varying';")"
+          [ "$column_count" = 1 ] || { echo '::error::Verification ID column missing'; exit 1; }
+          index_count="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='security'
+              AND c.relname='uq_platform_user_signup_attempt_clerk_verification';")"
+          [ "$index_count" = 1 ] || { echo '::error::Verification ID index missing'; exit 1; }
+          echo 'DATABASE_MIGRATION=PASS' >> "$GITHUB_ENV"
+
+      - name: Snapshot current Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error -X POST \
+            -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" 'https://backboard.railway.com/graphql/v2')"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || exit 1
+          previous="$(printf '%s' "$response" | jq -r --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId==$service)] | first | .latestDeployment.id // empty')"
+          echo "PREVIOUS_DEPLOYMENT_ID=$previous" >> "$GITHUB_ENV"
+
+      - name: Deploy current Security DEV source
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway up \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --detach
+          echo 'SOURCE_UPLOAD=PASS' >> "$GITHUB_ENV"
+
+      - name: Wait for new successful Railway deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          new_id=''
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error -X POST \
+              -H "Project-Access-Token: $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+              --data "$body" 'https://backboard.railway.com/graphql/v2')"
+            node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId==$service)] | first // {}')"
+            deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+            deployment_status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+            if [ -z "$deployment_id" ] || [ "$deployment_id" = "${PREVIOUS_DEPLOYMENT_ID:-}" ]; then
+              sleep 5
+              continue
+            fi
+            echo "Security deployment $deployment_id status=$deployment_status"
+            case "$deployment_status" in
+              SUCCESS) new_id="$deployment_id"; break ;;
+              FAILED|CRASHED|REMOVED|SKIPPED) echo "::error::Deployment ended $deployment_status"; exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+          [ -n "$new_id" ] || { echo '::error::No successful new deployment observed'; exit 1; }
+          echo "NEW_DEPLOYMENT_ID=$new_id" >> "$GITHUB_ENV"
+          echo 'DEPLOYMENT=PASS' >> "$GITHUB_ENV"
+
+      - name: Verify Security readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error -o /tmp/ready.json -w '%{http_code}' "$SECURITY_URL/health/ready" || true)"
+            if [ "$code" = 200 ]; then
+              echo 'READINESS=PASS' >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::Security readiness failed'
+          exit 1
+
+      - name: Prove complete registration and OTP through Cloudflare Web proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn \
+            --arg email "$PROOF_EMAIL" \
+            --arg mobile "$PROOF_MOBILE" \
+            --arg password "$PROOF_PASSWORD" \
+            '{firstName:"OTP",lastName:"Proof",email:$email,mobile:$mobile,password:$password}')"
+          start_code="$(curl --silent --show-error -D /tmp/start.headers -o /tmp/start.json -w '%{http_code}' \
+            -X POST "$WEB_URL/security/v1/onboarding/users" \
+            -H 'Content-Type: application/json' \
+            -H "X-Onboarding-Key: $ONBOARDING_KEY" \
+            --data "$payload" || true)"
+          if [ "$start_code" != 202 ]; then
+            echo "::error::Signup start HTTP $start_code"
+            cat /tmp/start.json || true
+            exit 1
+          fi
+          grep -qi '^x-verigence-proxy: security' /tmp/start.headers || { echo '::error::Signup did not traverse Security Web proxy'; exit 1; }
+          [ "$(jq -r '.status // empty' /tmp/start.json)" = EMAIL_VERIFICATION_REQUIRED ] || { cat /tmp/start.json; exit 1; }
+          attempt_id="$(jq -r '.signupAttemptId // empty' /tmp/start.json)"
+          [ -n "$attempt_id" ] || { echo '::error::Signup attempt ID missing'; exit 1; }
+          echo "PROOF_ATTEMPT_ID=$attempt_id" >> "$GITHUB_ENV"
+
+          row="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -At -F '|' \
+            -v attempt="$attempt_id" -c "
+              SELECT status,coalesce(clerk_user_id,''),coalesce(clerk_email_address_id,''),
+                     coalesce(clerk_email_verification_id,'')
+              FROM security.platform_user_signup_attempts
+              WHERE signup_attempt_id=:'attempt'::uuid;")"
+          IFS='|' read -r attempt_status clerk_user_id email_address_id verification_id <<< "$row"
+          [ "$attempt_status" = AUTHORIZED_FOR_CLERK ] || { echo "::error::Attempt status $attempt_status"; exit 1; }
+          [[ "$clerk_user_id" == user_* ]] || { echo '::error::Clerk user ID missing'; exit 1; }
+          [ -n "$email_address_id" ] || { echo '::error::Clerk email address ID missing'; exit 1; }
+          [[ "$verification_id" == ver_* ]] || { echo '::error::Clerk verification ID missing'; exit 1; }
+          echo "PROOF_CLERK_USER_ID=$clerk_user_id" >> "$GITHUB_ENV"
+          echo "PROOF_EMAIL_ADDRESS_ID=$email_address_id" >> "$GITHUB_ENV"
+          echo "PROOF_VERIFICATION_ID=$verification_id" >> "$GITHUB_ENV"
+          echo 'START_AND_PERSIST=PASS' >> "$GITHUB_ENV"
+
+          clerk_before="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            "https://api.clerk.com/v1/users/$clerk_user_id")"
+          [ "$(printf '%s' "$clerk_before" | jq -r '.banned // false')" = true ] || { echo '::error::Pending Clerk user not banned'; exit 1; }
+          [ "$(printf '%s' "$clerk_before" | jq -r '.email_addresses | length')" = 2 ] || { echo '::error::Expected applicant plus placeholder emails'; exit 1; }
+          placeholder_count="$(printf '%s' "$clerk_before" | jq -r '[.email_addresses[] | select(.email_address | startswith("verigence-pending-") and endswith("@example.com")) | select(.verification.status=="verified")] | length')"
+          applicant_count="$(printf '%s' "$clerk_before" | jq -r --arg email "$PROOF_EMAIL" '[.email_addresses[] | select((.email_address|ascii_downcase)==($email|ascii_downcase))] | length')"
+          [ "$placeholder_count" = 1 ] || { echo '::error::Verified placeholder invariant missing'; exit 1; }
+          [ "$applicant_count" = 1 ] || { echo '::error::Applicant email missing at Clerk'; exit 1; }
+          echo 'PRE_OTP_CLERK_STATE=PASS' >> "$GITHUB_ENV"
+
+          verify_code="$(curl --silent --show-error -D /tmp/verify.headers -o /tmp/verify.json -w '%{http_code}' \
+            -X POST "$WEB_URL/security/v1/onboarding/users/$attempt_id/verify-email" \
+            -H 'Content-Type: application/json' \
+            --data '{"code":"424242"}' || true)"
+          if [ "$verify_code" != 201 ]; then
+            echo "::error::OTP verify HTTP $verify_code"
+            cat /tmp/verify.json || true
+            exit 1
+          fi
+          grep -qi '^x-verigence-proxy: security' /tmp/verify.headers || { echo '::error::OTP did not traverse Security Web proxy'; exit 1; }
+          [ "$(jq -r '.status // empty' /tmp/verify.json)" = PENDING_ADMIN_APPROVAL ] || { cat /tmp/verify.json; exit 1; }
+          echo 'OTP_ENDPOINT=PASS' >> "$GITHUB_ENV"
+
+          db_final="$(psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -At -F '|' \
+            -v attempt="$attempt_id" -v clerk="$clerk_user_id" -c "
+              SELECT a.status,u.status,r.status,e.status,u.user_id
+              FROM security.platform_user_signup_attempts a
+              JOIN security.platform_user_onboarding_requests r ON r.clerk_user_id=a.clerk_user_id
+              JOIN security.users u ON u.user_id=r.user_id
+              JOIN security.external_identities e
+                ON e.user_id=u.user_id AND e.provider='CLERK' AND e.provider_subject=:'clerk'
+              WHERE a.signup_attempt_id=:'attempt'::uuid;")"
+          IFS='|' read -r final_attempt final_user final_request final_identity security_user_id <<< "$db_final"
+          [ "$final_attempt|$final_user|$final_request|$final_identity" = 'COMPLETED|PENDING|PENDING_ADMIN_APPROVAL|ACTIVE' ] || {
+            echo "::error::Final Security state $db_final"; exit 1;
+          }
+          echo "PROOF_SECURITY_USER_ID=$security_user_id" >> "$GITHUB_ENV"
+          echo 'SECURITY_FINAL_STATE=PASS' >> "$GITHUB_ENV"
+
+          clerk_final="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            "https://api.clerk.com/v1/users/$clerk_user_id")"
+          [ "$(printf '%s' "$clerk_final" | jq -r '.banned // false')" = true ] || { echo '::error::Verified pending Clerk user was unbanned'; exit 1; }
+          [ "$(printf '%s' "$clerk_final" | jq -r '.email_addresses | length')" = 1 ] || { echo '::error::Placeholder was not removed'; printf '%s\n' "$clerk_final" | jq -c '{primary_email_address_id,email_addresses}'; exit 1; }
+          final_email_id="$(printf '%s' "$clerk_final" | jq -r '.email_addresses[0].id // empty')"
+          final_email="$(printf '%s' "$clerk_final" | jq -r '.email_addresses[0].email_address // empty')"
+          final_verification="$(printf '%s' "$clerk_final" | jq -r '.email_addresses[0].verification.status // empty')"
+          final_primary="$(printf '%s' "$clerk_final" | jq -r '.primary_email_address_id // empty')"
+          [ "$final_email_id" = "$email_address_id" ] || { echo '::error::Applicant email ID changed'; exit 1; }
+          [ "${final_email,,}" = "${PROOF_EMAIL,,}" ] || { echo '::error::Final applicant email mismatch'; exit 1; }
+          [ "$final_verification" = verified ] || { echo "::error::Final email verification=$final_verification"; exit 1; }
+          [ "$final_primary" = "$email_address_id" ] || { echo '::error::Applicant email is not primary'; exit 1; }
+          echo 'CLERK_FINAL_STATE=PASS' >> "$GITHUB_ENV"
+          echo 'LIVE_E2E=PASS' >> "$GITHUB_ENV"
+
+      - name: Retire live proof identity safely
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL_RESOLVED:-}" ] || [ -z "${PROOF_EMAIL:-}" ]; then
+            echo 'CLEANUP=NOT_REQUIRED' >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          clerk_user_id="${PROOF_CLERK_USER_ID:-}"
+          if [ -z "$clerk_user_id" ]; then
+            clerk_user_id="$(psql "$DATABASE_URL_RESOLVED" -X -At -v email="$PROOF_EMAIL" -c "
+              SELECT coalesce(clerk_user_id,'') FROM security.platform_user_signup_attempts
+              WHERE lower(email)=lower(:'email') ORDER BY created_at_utc DESC LIMIT 1;" || true)"
+          fi
+
+          psql "$DATABASE_URL_RESOLVED" -X -v ON_ERROR_STOP=1 -v email="$PROOF_EMAIL" <<'SQL'
+          UPDATE security.platform_user_onboarding_requests r
+          SET status='CANCELLED',
+              review_reason='Automated UC-001 OTP live proof cleanup'
+          FROM security.users u
+          WHERE r.user_id=u.user_id
+            AND lower(u.primary_email)=lower(:'email')
+            AND r.status IN ('PENDING_ADMIN_APPROVAL','PENDING_CLERK','CLERK_INVITED','CLERK_PROVISIONING_FAILED');
+
+          UPDATE security.external_identities e
+          SET status='REVOKED'
+          FROM security.users u
+          WHERE e.user_id=u.user_id
+            AND e.provider='CLERK'
+            AND e.status='ACTIVE'
+            AND lower(u.primary_email)=lower(:'email')
+            AND u.status NOT IN ('ACTIVE','SUSPENDED');
+
+          UPDATE security.users
+          SET status='EXITED',updated_at_utc=CURRENT_TIMESTAMP
+          WHERE lower(primary_email)=lower(:'email')
+            AND status NOT IN ('ACTIVE','SUSPENDED');
+
+          UPDATE security.security_principals p
+          SET status='DISABLED',updated_at_utc=CURRENT_TIMESTAMP
+          FROM security.users u
+          WHERE p.principal_id=u.user_id
+            AND p.actor_type='USER'
+            AND lower(u.primary_email)=lower(:'email')
+            AND u.status='EXITED';
+          SQL
+
+          if [ -n "$clerk_user_id" ] && [ -n "${CLERK_SECRET_KEY:-}" ]; then
+            delete_code="$(curl --silent --show-error -o /tmp/clerk-delete.json -w '%{http_code}' \
+              -X DELETE -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+              "https://api.clerk.com/v1/users/$clerk_user_id" || true)"
+            case "$delete_code" in
+              200|204|404) ;;
+              *) echo "::error::Clerk proof-user delete HTTP $delete_code"; cat /tmp/clerk-delete.json || true; exit 1 ;;
+            esac
+          fi
+          echo 'CLEANUP=PASS' >> "$GITHUB_ENV"
+
+      - name: Record final OTP deployment proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_OTP_FINAL_DEPLOY_PROOF.md <<EOF
+          # UC-001 OTP Final Deploy Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - source_sha: ${SOURCE_SHA:-unknown}
+          - source_contract: ${SOURCE_CONTRACT:-not_reached}
+          - targeted_tests: ${TARGETED_TESTS:-not_reached}
+          - database_migration: ${DATABASE_MIGRATION:-not_reached}
+          - previous_railway_deployment_id: ${PREVIOUS_DEPLOYMENT_ID:-unknown}
+          - new_railway_deployment_id: ${NEW_DEPLOYMENT_ID:-unknown}
+          - source_upload: ${SOURCE_UPLOAD:-not_reached}
+          - deployment: ${DEPLOYMENT:-not_reached}
+          - readiness: ${READINESS:-not_reached}
+          - web_signup_start_and_verification_id_persisted: ${START_AND_PERSIST:-not_reached}
+          - pre_otp_clerk_invariant: ${PRE_OTP_CLERK_STATE:-not_reached}
+          - web_otp_endpoint: ${OTP_ENDPOINT:-not_reached}
+          - security_pending_approval_state: ${SECURITY_FINAL_STATE:-not_reached}
+          - clerk_banned_verified_primary_state: ${CLERK_FINAL_STATE:-not_reached}
+          - live_registration_otp_e2e: ${LIVE_E2E:-not_reached}
+          - proof_identity_cleanup: ${CLEANUP:-not_reached}
+          - job_status: ${{ job.status }}
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_OTP_FINAL_DEPLOY_PROOF.md
+          git commit -m 'docs(dev): record final UC-001 OTP deploy proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
