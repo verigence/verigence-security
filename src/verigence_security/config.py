@@ -40,11 +40,14 @@ class Settings(BaseSettings):
     security_bootstrap_enabled: bool = False
     security_bootstrap_super_admin_clerk_user_id: str = ""
 
-    # Increment-B local bootstrap configuration is retained only as migration debt.
+    # Increment-B local bootstrap configuration is retained only as migration debt. The token TTL
+    # is also used by the active global human login endpoint, so it must have a safe service default
+    # instead of making authentication depend on an optional deployment variable. Fifteen minutes
+    # matches the documented DEV/UAT configuration in .env.example.
     platform_bootstrap_enabled: bool = False
     platform_bootstrap_login: str = ""
     platform_bootstrap_password: str = ""
-    platform_admin_token_ttl_minutes: int | None = Field(default=None, gt=0)
+    platform_admin_token_ttl_minutes: int = Field(default=15, gt=0)
 
     dev_mock_auth_enabled: bool = False
     dev_mock_signing_secret: str = ""
