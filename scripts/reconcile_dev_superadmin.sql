@@ -1,0 +1,2 @@
+\set ON_ERROR_STOP on
+\i migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
