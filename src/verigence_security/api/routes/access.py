@@ -178,6 +178,7 @@ def credential_login(
         "accessToken": token,
         "expiresAtUtc": expires_at,
         "actorType": ActorType.USER.value,
+        "isSuperAdmin": actor.is_super_admin,
     }
 
 
