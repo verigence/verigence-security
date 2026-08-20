@@ -1,0 +1,1 @@
+Clerk `user_...` identifiers are stable for a specific Clerk user record. They change only when the application is using a different Clerk user record, such as after delete/recreate or when pointing at a different Clerk instance/environment. DEV SuperAdmin canonical subject: `user_3I7FdD5Pkmydsp23OfjH9hBMxpN`.
