@@ -1,0 +1,129 @@
+name: UC-001 SuperAdmin Live Login Proof
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-superadmin-live-login-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+  SUPERADMIN_EMAIL: jbrconsulting.it@gmail.com
+  SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+  SECURITY_URL: https://security-dev.up.railway.app
+  WEB_URL: https://verigence-web-dev.jbrconsulting-it.workers.dev
+
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Generate final temporary DEV password
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' > /tmp/superadmin-live-password.txt
+          import secrets
+          import string
+          alphabet = string.ascii_letters + string.digits + '!@#%_-'
+          while True:
+              value = ''.join(secrets.choice(alphabet) for _ in range(22))
+              if (any(c.islower() for c in value)
+                  and any(c.isupper() for c in value)
+                  and any(c.isdigit() for c in value)
+                  and any(c in '!@#%_-' for c in value)):
+                  print(value)
+                  break
+          PY
+          password="$(cat /tmp/superadmin-live-password.txt)"
+          echo "::add-mask::$password"
+          echo "TEMP_PASSWORD=$password" >> "$GITHUB_ENV"
+          chmod 600 /tmp/superadmin-live-password.txt
+
+      - name: Assign password to canonical Clerk SuperAdmin
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error -X PATCH \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -cn --arg password "$TEMP_PASSWORD" '{password:$password,sign_out_of_other_sessions:true}')" \
+            "https://api.clerk.com/v1/users/$SUPERADMIN_CLERK_ID")"
+          [ "$(printf '%s' "$response" | jq -r '.id // empty')" = "$SUPERADMIN_CLERK_ID" ]
+          [ "$(printf '%s' "$response" | jq -r '.banned // false')" = false ]
+          [ "$(printf '%s' "$response" | jq -r '.locked // false')" = false ]
+          echo 'CLERK_RESET=PASS' >> "$GITHUB_ENV"
+
+      - name: Prove direct Security login
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg identifier "$SUPERADMIN_EMAIL" --arg password "$TEMP_PASSWORD" '{identifier:$identifier,password:$password}')"
+          code="$(curl --silent --show-error -D /tmp/security-headers.txt -o /tmp/security-login.json -w '%{http_code}' \
+            -X POST "$SECURITY_URL/security/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "$payload")"
+          [ "$code" = 200 ] || { echo "::error::Direct Security login returned HTTP $code"; cat /tmp/security-login.json; exit 1; }
+          [ "$(jq -r '.actorType // empty' /tmp/security-login.json)" = USER ] || { echo '::error::Unexpected actorType'; exit 1; }
+          [ "$(jq -r '.isSuperAdmin // false' /tmp/security-login.json)" = true ] || { echo '::error::Security did not classify canonical user as SuperAdmin'; exit 1; }
+          [ -n "$(jq -r '.accessToken // empty' /tmp/security-login.json)" ] || { echo '::error::Security returned no access token'; exit 1; }
+          rm -f /tmp/security-login.json
+          echo 'SECURITY_LOGIN=PASS' >> "$GITHUB_ENV"
+
+      - name: Prove Cloudflare Web proxy login
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg identifier "$SUPERADMIN_EMAIL" --arg password "$TEMP_PASSWORD" '{identifier:$identifier,password:$password}')"
+          code="$(curl --silent --show-error -D /tmp/web-headers.txt -o /tmp/web-login.json -w '%{http_code}' \
+            -X POST "$WEB_URL/security/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "$payload")"
+          [ "$code" = 200 ] || { echo "::error::Web proxy login returned HTTP $code"; cat /tmp/web-login.json; exit 1; }
+          grep -qi '^x-verigence-proxy: security' /tmp/web-headers.txt || { echo '::error::Web response did not come through Security proxy'; exit 1; }
+          [ "$(jq -r '.isSuperAdmin // false' /tmp/web-login.json)" = true ] || { echo '::error::Web proxy login did not return SuperAdmin'; exit 1; }
+          rm -f /tmp/web-login.json
+          echo 'WEB_PROXY_LOGIN=PASS' >> "$GITHUB_ENV"
+
+      - name: Upload proven temporary password
+        uses: actions/upload-artifact@v4
+        with:
+          name: superadmin-live-password-${{ github.run_id }}
+          path: /tmp/superadmin-live-password.txt
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Record non-secret live proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_SUPERADMIN_LIVE_LOGIN_PROOF.md <<EOF
+          # UC-001 SuperAdmin Live Login Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - source_sha: $GITHUB_SHA
+          - superadmin_email: $SUPERADMIN_EMAIL
+          - superadmin_clerk_id: $SUPERADMIN_CLERK_ID
+          - clerk_password_reset: ${CLERK_RESET:-not_reached}
+          - direct_security_login: ${SECURITY_LOGIN:-not_reached}
+          - cloudflare_proxy_login: ${WEB_PROXY_LOGIN:-not_reached}
+          - job_status: ${{ job.status }}
+          - password_artifact: superadmin-live-password-$GITHUB_RUN_ID
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_SUPERADMIN_LIVE_LOGIN_PROOF.md
+          git commit -m 'docs(dev): record SuperAdmin live login proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
