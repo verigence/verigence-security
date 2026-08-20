@@ -1,0 +1,103 @@
+name: UC-001 Human Identity Diagnostic
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/uc001-human-identity-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Resolve database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "DB=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+      - name: Capture identity candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          {
+            echo '# UC-001 Human Identity Diagnostic'
+            echo
+            echo '## Canonical subject mappings'
+            psql "$DB" -X -v ON_ERROR_STOP=1 -P pager=off -F ' | ' -Atc "
+              SELECT e.provider_subject,u.user_id,u.display_name,coalesce(u.primary_email,''),u.status,e.status
+              FROM security.external_identities e
+              JOIN security.users u ON u.user_id=e.user_id
+              WHERE e.provider='CLERK'
+                AND e.provider_subject IN (
+                  'user_3I7FdD5Pkmydsp23OfjH9hBMxpN',
+                  'user_3I7HFuZZiFC9K2muiweXFRoeoud'
+                )
+              ORDER BY e.provider_subject;
+            "
+            echo
+            echo '## Active Platform SuperAdmin'
+            psql "$DB" -X -v ON_ERROR_STOP=1 -P pager=off -F ' | ' -Atc "
+              SELECT a.user_id,u.display_name,coalesce(u.primary_email,''),coalesce(e.provider_subject,''),u.status
+              FROM security.user_admin_role_assignments a
+              JOIN security.users u ON u.user_id=a.user_id
+              LEFT JOIN security.external_identities e
+                ON e.user_id=u.user_id AND e.provider='CLERK' AND e.status='ACTIVE'
+              WHERE a.role_key='SuperAdmin'
+                AND a.scope_type='PLATFORM'
+                AND a.scope_id IS NULL
+                AND a.status='ACTIVE';
+            "
+            echo
+            echo '## Phase1 Test Identity singleton'
+            psql "$DB" -X -v ON_ERROR_STOP=1 -P pager=off -F ' | ' -Atc "
+              SELECT pti.user_id,u.display_name,coalesce(u.primary_email,''),coalesce(e.provider_subject,''),pti.status
+              FROM security.phase1_test_identity pti
+              JOIN security.users u ON u.user_id=pti.user_id
+              LEFT JOIN security.external_identities e
+                ON e.user_id=u.user_id AND e.provider='CLERK' AND e.status='ACTIVE';
+            "
+            echo
+            echo '## Current DEV USER registry'
+            psql "$DB" -X -v ON_ERROR_STOP=1 -P pager=off -F ' | ' -Atc "
+              SELECT u.user_id,u.display_name,coalesce(u.primary_email,''),u.status,
+                     coalesce(string_agg(e.provider_subject,',' ORDER BY e.provider_subject) FILTER (WHERE e.provider='CLERK'),'')
+              FROM security.users u
+              LEFT JOIN security.external_identities e ON e.user_id=u.user_id
+              GROUP BY u.user_id,u.display_name,u.primary_email,u.status
+              ORDER BY u.created_at_utc;
+            "
+          } > docs/deploy-evidence/UC001_HUMAN_IDENTITY_DIAGNOSTIC.md
+
+      - name: Commit diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_HUMAN_IDENTITY_DIAGNOSTIC.md
+          git commit -m 'docs(dev): record UC-001 identity diagnostic [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
