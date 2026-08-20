@@ -19,6 +19,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "AUTH_TOKEN_INVALID": (401, "Authentication token is invalid"),
     "AUTH_TOKEN_EXPIRED": (401, "Authentication token has expired"),
     "USER_NOT_ONBOARDED": (403, "User is not onboarded"),
+    "USER_PENDING_APPROVAL": (403, "User activation is pending administrator approval"),
     "USER_NOT_ACTIVE": (403, "User is not active"),
     "TENANT_NOT_ACTIVE": (403, "Tenant is not active"),
     "TENANT_SECURITY_NOT_READY": (403, "Tenant security configuration is not ready"),
