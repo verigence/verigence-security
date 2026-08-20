@@ -11,23 +11,24 @@
 
 DO $$
 DECLARE
-  actor_user_id uuid;
+  audit_user_id uuid;
   desired_key text := 'VGN-8273105';
   desired_hash text := '$argon2id$v=19$m=65536,t=3,p=4$GAITwj01ARjxdOR1eYOzYw$dzeYbCn3UwnFcd6XnxpCDqX8ILguM+FpolrSD3lSFAE';
   current_hash text;
   current_plaintext text;
   current_status text;
 BEGIN
-  SELECT e.user_id
-    INTO actor_user_id
-  FROM security.external_identities e
-  WHERE e.provider='CLERK'
-    AND e.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
-    AND e.status='ACTIVE'
+  -- Direct DEV database provisioning is intentionally independent of SuperAdmin login/state.
+  -- The schema requires USER foreign keys for audit columns, so reuse any existing ACTIVE USER.
+  SELECT user_id
+    INTO audit_user_id
+  FROM security.users
+  WHERE status='ACTIVE'
+  ORDER BY created_at_utc,user_id
   LIMIT 1;
 
-  IF actor_user_id IS NULL THEN
-    RAISE EXCEPTION 'Approved Phase-1 SuperAdmin must be provisioned before onboarding-key setup';
+  IF audit_user_id IS NULL THEN
+    RAISE EXCEPTION 'At least one ACTIVE Security USER is required for onboarding-key audit columns';
   END IF;
 
   SELECT key_hash,key_ciphertext,status
@@ -43,7 +44,7 @@ BEGIN
      created_by_user_id,created_at_utc,updated_by_user_id,updated_at_utc)
     VALUES
     (1,desired_hash,desired_key,1,'ACTIVE',
-     actor_user_id,CURRENT_TIMESTAMP,actor_user_id,CURRENT_TIMESTAMP)
+     audit_user_id,CURRENT_TIMESTAMP,audit_user_id,CURRENT_TIMESTAMP)
     ON CONFLICT (singleton_id) DO UPDATE SET
       key_hash=EXCLUDED.key_hash,
       key_ciphertext=EXCLUDED.key_ciphertext,
