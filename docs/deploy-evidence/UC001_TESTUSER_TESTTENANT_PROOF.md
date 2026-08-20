@@ -1,19 +1,23 @@
 # UC-001 TestUser / TestTenant DB Proof
 
-- run_id: 32364086883
-- source_sha: fbd1dca0ac0a42efdb603f9ffd48e7c6cfec9e8c
+- run_id: 32364189056
+- source_sha: edcc12164567e15068f308f1135716cb445af34e
 - testuser_email: gigsinopensource@gmail.com
 - testuser_clerk_subject: user_3I7HFuZZiFC9K2muiweXFRoeoud
 - testuser_security_user_id: 018a40c1-f946-dc4c-4a52-0766b59ccf2d
-- testuser_status: not_reached
-- testuser_principal_status: not_reached
-- testuser_external_identity_status: not_reached
-- testtenant_id: not_reached
-- testtenant_code: not_reached
-- testtenant_name: not_reached
-- testtenant_status: not_reached
-- phase1_test_binding_status: not_reached
-- tenant_membership_status: not_reached
-- TestUser_role_definition: not_reached
-- di.document.upload_permission_catalog_status: not_reached
-- job_status: failure
+- testuser_status: ACTIVE
+- testuser_principal_status: ACTIVE
+- testuser_external_identity_status: ACTIVE
+- phase1_test_binding_status: MISSING
+- bound_testtenant_id: NONE
+- bound_testtenant_code: NONE
+- bound_testtenant_name: NONE
+- bound_testtenant_status: NONE
+- tenant_membership_count: 0
+- tenant_memberships: NONE
+- testtenant_candidate_count: 1
+- testtenant_candidates: 9de3af49-260f-4b15-8263-07c93dcc04d2|test-project|TestProject|ACTIVE
+- phase1_singleton_row: NONE
+- TestUser_role_definition: ACTIVE
+- di.document.upload_permission_catalog_status: ACTIVE
+- job_status: success
