@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   provision:
@@ -24,6 +24,9 @@ jobs:
     steps:
       - name: Check out Security dev
         uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
 
       - name: Install PostgreSQL client
         shell: bash
@@ -89,25 +92,54 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT count(*)
+          row="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -AtF '|' -c "
+            SELECT u.user_id,e.provider_subject,e.status,u.status,p.status,
+                   count(a.assignment_id) FILTER (
+                     WHERE a.role_key='SuperAdmin'
+                       AND a.scope_type='PLATFORM'
+                       AND a.scope_id IS NULL
+                       AND a.status='ACTIVE'
+                   )
             FROM security.external_identities e
             JOIN security.users u ON u.user_id=e.user_id
             JOIN security.security_principals p ON p.principal_id=u.user_id
-            JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+            LEFT JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
             WHERE e.provider='CLERK'
               AND e.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
-              AND e.status='ACTIVE'
-              AND u.status='ACTIVE'
-              AND p.actor_type='USER'
-              AND p.status='ACTIVE'
-              AND a.role_key='SuperAdmin'
-              AND a.scope_type='PLATFORM'
-              AND a.scope_id IS NULL
-              AND a.status='ACTIVE';
+            GROUP BY u.user_id,e.provider_subject,e.status,u.status,p.status;
           ")"
-          [ "$ready" = "1" ] || {
-            echo "::error::SUPERADMIN_DB_MAPPING=FAIL ($ready active canonical mappings)"
+          [ -n "$row" ] || {
+            echo "::error::SUPERADMIN_DB_MAPPING=FAIL (canonical subject missing)"
             exit 1
           }
+          IFS='|' read -r security_user_id provider_subject identity_status user_status principal_status admin_count <<< "$row"
+          [ "$provider_subject" = 'user_3I7FdD5Pkmydsp23OfjH9hBMxpN' ] || { echo '::error::Canonical Clerk subject mismatch'; exit 1; }
+          [ "$identity_status" = 'ACTIVE' ] || { echo "::error::External identity is $identity_status"; exit 1; }
+          [ "$user_status" = 'ACTIVE' ] || { echo "::error::Security USER is $user_status"; exit 1; }
+          [ "$principal_status" = 'ACTIVE' ] || { echo "::error::Security principal is $principal_status"; exit 1; }
+          [ "$admin_count" = '1' ] || { echo "::error::Expected exactly one active SuperAdmin assignment; found $admin_count"; exit 1; }
+          echo "SUPERADMIN_SECURITY_USER_ID=$security_user_id" >> "$GITHUB_ENV"
           echo "SUPERADMIN_DB_MAPPING=PASS"
+
+      - name: Record SuperAdmin DB proof
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/deploy-evidence
+          cat > docs/deploy-evidence/UC001_SUPERADMIN_DB_PROOF.md <<EOF
+          # UC-001 SuperAdmin DB Proof
+
+          - run_id: $GITHUB_RUN_ID
+          - workflow_source_sha: $GITHUB_SHA
+          - canonical_clerk_subject: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+          - security_user_id: ${SUPERADMIN_SECURITY_USER_ID:-unknown}
+          - job_status: ${{ job.status }}
+          - reconciliation_mode: DIRECT_DATABASE_ONLY
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/UC001_SUPERADMIN_DB_PROOF.md
+          git commit -m 'docs(dev): record UC-001 SuperAdmin DB proof [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
