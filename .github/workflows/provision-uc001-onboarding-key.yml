@@ -1,0 +1,67 @@
+name: Provision UC-001 DEV onboarding key
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - migrations/0018_uc001_direct_onboarding_key.sql
+      - .github/workflows/provision-uc001-onboarding-key.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    name: Provision onboarding key directly in Security DEV DB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Check out Security dev
+        uses: actions/checkout@v6
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+
+      - name: Resolve DEV migration database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo "::error::MIGRATION_DATABASE_URL is not configured."; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo "::error::MIGRATION_DATABASE_URL is not PostgreSQL."; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "SECURITY_MIGRATION_DATABASE_URL=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+      - name: Provision UC-001 onboarding key directly
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -f migrations/0018_uc001_direct_onboarding_key.sql
+
+          state="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT status || ':' || key_version
+            FROM security.platform_user_onboarding_settings
+            WHERE singleton_id=1;
+          ")"
+          case "$state" in
+            ACTIVE:*) echo "UC001_ONBOARDING_KEY_DB=PASS ($state)" ;;
+            *) echo "::error::UC-001 onboarding key is not ACTIVE after direct DB provisioning ($state)."; exit 1 ;;
+          esac
