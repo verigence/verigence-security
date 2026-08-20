@@ -23,7 +23,7 @@ def _settings() -> Settings:
     )
 
 
-def test_pending_user_is_banned_unverified_then_email_code_is_prepared() -> None:
+def test_pending_user_is_banned_reserved_then_email_code_is_prepared() -> None:
     calls: list[tuple[str, str, dict[str, object]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -37,17 +37,12 @@ def test_pending_user_is_banned_unverified_then_email_code_is_prepared() -> None
                     "banned": True,
                     "primary_email_address_id": "idn_signup",
                     "email_addresses": [
-                        {"id": "idn_signup", "email_address": "amit@example.com"}
+                        {
+                            "id": "idn_signup",
+                            "email_address": "amit@example.com",
+                            "verification": {"status": "unverified"},
+                        }
                     ],
-                },
-            )
-        if request.method == "PATCH":
-            return httpx.Response(
-                200,
-                json={
-                    "id": "idn_signup",
-                    "email_address": "amit@example.com",
-                    "verification": {"status": "unverified"},
                 },
             )
         return httpx.Response(
@@ -74,16 +69,13 @@ def test_pending_user_is_banned_unverified_then_email_code_is_prepared() -> None
     assert calls[0][0:2] == ("POST", "https://api.clerk.test/v1/users")
     assert calls[0][2]["banned"] is True
     assert calls[0][2]["email_address"] == ["amit@example.com"]
+    assert calls[0][2]["email_address_identification_status"] == ["reserved"]
     assert calls[1] == (
-        "PATCH",
-        "https://api.clerk.test/v1/email_addresses/idn_signup",
-        {"verified": False},
-    )
-    assert calls[2] == (
         "POST",
         "https://api.clerk.test/v1/email_addresses/idn_signup/prepare_verification",
         {"strategy": "email_code"},
     )
+    assert len(calls) == 2
 
 
 def test_attempt_email_verification_uses_user_supplied_code() -> None:
