@@ -12,9 +12,18 @@ from verigence_security.config import Settings
 class ClerkBackendError(RuntimeError):
     """Clerk Backend API operation failed or returned an unusable response."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        provider_code: str | None = None,
+        provider_detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.provider_code = provider_code
+        self.provider_detail = provider_detail
 
     @property
     def retryable(self) -> bool:
@@ -54,11 +63,12 @@ class ClerkBackendClient:
         email: str,
         password: str,
     ) -> tuple[str, str]:
-        """Create a banned Clerk user, force its primary email unverified, and send email OTP.
+        """Create a banned Clerk user with a reserved email and send an email OTP.
 
-        Clerk Backend createUser automatically marks supplied emails verified. Creating the user
-        banned first prevents that transient provider state from granting access. We immediately
-        set the email address back to verified=false before preparing email-code verification.
+        Current Clerk Backend API supports creating email identifiers with status ``reserved``.
+        That keeps the address unverified from the first provider write and removes the previous
+        create-verified-then-patch-back-to-unverified transition. The user is also created banned,
+        so no provider session can become usable before Verigence Security activates the USER.
         """
 
         data = self._request_object(
@@ -68,6 +78,7 @@ class ClerkBackendClient:
                 "first_name": first_name,
                 "last_name": last_name,
                 "email_address": [email],
+                "email_address_identification_status": ["reserved"],
                 "password": password,
                 "banned": True,
             },
@@ -78,11 +89,6 @@ class ClerkBackendClient:
         email_address_id = self._email_address_id(data, email)
 
         try:
-            self._request_object(
-                "PATCH",
-                f"/email_addresses/{email_address_id}",
-                json={"verified": False},
-            )
             self.prepare_email_verification(email_address_id)
         except Exception:
             # Best-effort compensation. A failed onboarding preparation must not leave a usable
@@ -300,9 +306,12 @@ class ClerkBackendClient:
                 **kwargs,
             )
             if response.status_code < 200 or response.status_code >= 300:
+                provider_code, provider_detail = self._provider_error(response)
                 raise ClerkBackendError(
                     f"Clerk Backend API returned HTTP {response.status_code} for {method} {path}",
                     status_code=response.status_code,
+                    provider_code=provider_code,
+                    provider_detail=provider_detail,
                 )
             if allow_empty and not response.content:
                 return None
@@ -317,6 +326,32 @@ class ClerkBackendClient:
         finally:
             if owns_client:
                 client.close()
+
+    @staticmethod
+    def _provider_error(response: httpx.Response) -> tuple[str | None, str | None]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return None, None
+
+        candidate: object = payload
+        if isinstance(payload, dict) and isinstance(payload.get("errors"), list) and payload["errors"]:
+            candidate = payload["errors"][0]
+        if not isinstance(candidate, dict):
+            return None, None
+
+        code = candidate.get("code")
+        detail = (
+            candidate.get("long_message")
+            or candidate.get("longMessage")
+            or candidate.get("message")
+            or candidate.get("short_message")
+            or candidate.get("shortMessage")
+        )
+        return (
+            code if isinstance(code, str) and code else None,
+            detail if isinstance(detail, str) and detail else None,
+        )
 
     @staticmethod
     def _email_address_id(user: dict[str, Any], expected_email: str) -> str:
