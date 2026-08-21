@@ -1,0 +1,26 @@
+# Password Recovery Live Diagnostic
+
+- diagnostic_source_sha: 617f244a1ec4cce725e1ab797cebacfce6773a91
+- attempt_id_sha256: b50c342cc0018d09d80133a885bde0fe3078a97793fb051277725339a50d1551
+- user_id_sha256: 895681796fddb7b882ef48ebf64fd60fd9a5ab3afed94b34f32220c28e7d9fad
+- clerk_user_id_sha256: 39ea8f1ee50db8d830fc2adbcdbcbb6c202cc1617448b303ab7a0db07f5c0647
+- clerk_email_address_id_sha256: a9b0deadc8c7c5e720f0b97670db194248b73468a70aed93288f062062016e19
+- correlation_id_sha256: 5e512c80110ea9e9ce0caee07893d1418c0aa8ea9b176747ce1c26934a833ad1
+- attempt_status: COMPLETED
+- attempt_created_at: 2026-08-21 12:15:31.553415+00
+- attempt_expires_at: 2026-08-21 12:30:31.553415+00
+- attempt_completed_at: 2026-08-21 12:22:14.496134+00
+- pending_attempt_count_for_user: 0
+- recent_attempt_statuses: COMPLETED
+- stored_verification_id_sha256: 8ac1bcba8d75a0937f1eaed4b8bc1afe1916ded89ae0948753d427acf3063362
+- provider_verification_id_sha256: none
+- stored_provider_verification_id_match: false
+- provider_email_verification_status: verified
+- provider_email_verification_strategy: email_code
+- provider_email_verification_attempts: 2
+- provider_email_verification_expire_at: 1787315435804
+- provider_user_email_verification_status: verified
+- provider_primary_email_matches_attempt: true
+- recovery_placeholder_count: 0
+- pending_placeholder_count: 0
+- provider_user_banned: false
