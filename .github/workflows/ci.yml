@@ -210,7 +210,16 @@ jobs:
             migrations/0012_v2_super_admin_reconciliation.sql \
             migrations/0013_v2_operating_role_defaults.sql \
             migrations/0014_phase1_test_identity.sql \
-            migrations/0015_v2_user_lifecycle_and_deletion.sql
+            migrations/0015_v2_user_lifecycle_and_deletion.sql \
+            migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql \
+            migrations/0017_di_permission_catalogue_sync.sql \
+            migrations/0018_uc001_direct_onboarding_key.sql \
+            migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql \
+            migrations/0020_uc001_identity_reuse.sql \
+            migrations/0021_dev_canonical_human_identities.sql \
+            migrations/0022_uc001_clerk_otp_verification_bridge.sql \
+            migrations/0023_password_recovery.sql \
+            migrations/0024_uc02_tenant_hard_delete.sql
           do
             echo "Applying $(basename "$migration")"
             psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
@@ -235,10 +244,11 @@ jobs:
               AND to_regclass('security.user_admin_role_assignments') IS NOT NULL
               AND to_regclass('security.phase1_test_identity') IS NOT NULL
               AND to_regclass('security.user_deletion_requests') IS NOT NULL
-              AND to_regclass('security.deleted_user_tombstones') IS NOT NULL;
+              AND to_regclass('security.deleted_user_tombstones') IS NOT NULL
+              AND to_regclass('security.password_reset_attempts') IS NOT NULL;
           ")"
           [ "$v2_tables_ready" = "t" ] || {
-            echo "::error::Security v2 foundation/lifecycle migration verification failed."
+            echo "::error::Security current foundation/lifecycle/recovery migrations are incomplete."
             exit 1
           }
 
@@ -292,54 +302,87 @@ jobs:
             exit 1
           }
 
-          obsolete_super_admin_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT
-              (SELECT count(*)
-               FROM security.platform_user_role_assignments pura
-               JOIN security.external_identities ei ON ei.user_id=pura.user_id
-               WHERE ei.provider='CLERK'
-                 AND ei.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
-                 AND pura.role_key='platform.super_admin')
-              +
-              (SELECT count(*)
-               FROM security.user_admin_role_assignments uara
-               JOIN security.external_identities ei ON ei.user_id=uara.user_id
-               WHERE ei.provider='CLERK'
-                 AND ei.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
-                 AND uara.role_key='SuperAdmin');
+          canonical_super_admin_v2_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.external_identities ei
+            JOIN security.users u ON u.user_id=ei.user_id
+            JOIN security.security_principals sp ON sp.principal_id=u.user_id
+            JOIN security.user_admin_role_assignments a ON a.user_id=u.user_id
+            WHERE ei.provider='CLERK'
+              AND ei.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
+              AND ei.status='ACTIVE'
+              AND lower(u.primary_email)='jbrconsulting.it@gmail.com'
+              AND u.status='ACTIVE'
+              AND sp.actor_type='USER'
+              AND sp.status='ACTIVE'
+              AND a.role_key='SuperAdmin'
+              AND a.scope_type='PLATFORM'
+              AND a.scope_id IS NULL
+              AND a.status='ACTIVE';
           ")"
-          [ "$obsolete_super_admin_count" = "0" ] || {
-            echo "::error::Obsolete TestUser SuperAdmin assignment still exists after migration 0012."
+          [ "$canonical_super_admin_v2_count" = "1" ] || {
+            echo "::error::Canonical DEV SuperAdmin v2 identity/role chain is not exactly one ACTIVE assignment."
             exit 1
           }
 
-          approved_super_admin_user_id="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT ei.user_id
+          canonical_super_admin_legacy_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
             FROM security.external_identities ei
+            JOIN security.platform_user_role_assignments a ON a.user_id=ei.user_id
+            WHERE ei.provider='CLERK'
+              AND ei.provider_subject='user_3I7FdD5Pkmydsp23OfjH9hBMxpN'
+              AND ei.status='ACTIVE'
+              AND a.role_key='platform.super_admin'
+              AND a.status='ACTIVE';
+          ")"
+          [ "$canonical_super_admin_legacy_count" = "1" ] || {
+            echo "::error::Canonical DEV SuperAdmin legacy compatibility assignment is not exactly one ACTIVE assignment."
+            exit 1
+          }
+
+          canonical_test_user_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.external_identities ei
+            JOIN security.users u ON u.user_id=ei.user_id
+            JOIN security.security_principals sp ON sp.principal_id=u.user_id
             WHERE ei.provider='CLERK'
               AND ei.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
               AND ei.status='ACTIVE'
-            LIMIT 1;
+              AND lower(u.primary_email)='gigsinopensource@gmail.com'
+              AND u.status='ACTIVE'
+              AND sp.actor_type='USER'
+              AND sp.status='ACTIVE';
           ")"
-          if [ -n "$approved_super_admin_user_id" ]; then
-            canonical_super_admin_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-              SELECT count(*)
-              FROM security.user_admin_role_assignments
-              WHERE user_id='$approved_super_admin_user_id'::uuid
-                AND role_key='SuperAdmin'
-                AND scope_type='PLATFORM'
-                AND scope_id IS NULL
-                AND status='ACTIVE';
-            ")"
-            [ "$canonical_super_admin_count" = "1" ] || {
-              echo "::error::Approved Clerk SuperAdmin was not reconciled to the canonical v2 assignment."
-              exit 1
-            }
-          else
-            echo "Approved Clerk SuperAdmin is not yet provisioned as a Security USER; migration 0012 did not fabricate one."
-          fi
+          [ "$canonical_test_user_count" = "1" ] || {
+            echo "::error::Canonical DEV TestUser identity chain is not exactly one ACTIVE USER."
+            exit 1
+          }
+
+          test_user_super_admin_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT
+              (SELECT count(*)
+               FROM security.user_admin_role_assignments a
+               JOIN security.external_identities ei ON ei.user_id=a.user_id
+               WHERE ei.provider='CLERK'
+                 AND ei.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+                 AND a.role_key='SuperAdmin'
+                 AND a.status='ACTIVE')
+              +
+              (SELECT count(*)
+               FROM security.platform_user_role_assignments a
+               JOIN security.external_identities ei ON ei.user_id=a.user_id
+               WHERE ei.provider='CLERK'
+                 AND ei.provider_subject='user_3I7HFuZZiFC9K2muiweXFRoeoud'
+                 AND a.role_key='platform.super_admin'
+                 AND a.status='ACTIVE');
+          ")"
+          [ "$test_user_super_admin_count" = "0" ] || {
+            echo "::error::Canonical DEV TestUser must not hold any SuperAdmin assignment."
+            exit 1
+          }
 
           echo "SECURITY_V2_MIGRATIONS=PASS"
+          echo "SECURITY_CANONICAL_DEV_IDENTITIES=PASS"
           echo "SECURITY_MIGRATIONS=PASS"
 
       - name: Link and verify approved shared Railway DEV target
