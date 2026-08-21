@@ -241,6 +241,24 @@ class PlatformAdminRepository:
         ).mappings().first()
         return dict(row) if row else None
 
+    def tenant_hard_delete_receipt(self, tenant_id: str) -> dict[str, Any] | None:
+        row = self.s.execute(
+            text(
+                """
+                SELECT occurred_at_utc,before_state_json,after_state_json
+                FROM security.admin_change_records
+                WHERE operation_key='platform.tenant.hard_delete'
+                  AND outcome='SUCCESS'
+                  AND resource_type='tenant'
+                  AND resource_id=:tenant_id
+                ORDER BY occurred_at_utc DESC
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).mappings().first()
+        return dict(row) if row else None
+
     def create_tenant(
         self,
         *,
@@ -318,6 +336,62 @@ class PlatformAdminRepository:
                 """
             ),
             {"tenant_id": tenant_id, "now": now},
+        ).first()
+        return row is not None
+
+    def delete_tenant_scoped_state(self, tenant_id: str) -> bool:
+        params = {"tenant_id": tenant_id}
+        statements = (
+            "DELETE FROM security.access_context_evaluations WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.access_sessions WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.device_enrollment_requests WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.access_schedule_overrides WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.user_location_assignments WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.access_schedule_windows WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.role_template_bindings WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.group_role_assignments WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.group_memberships WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.privileged_access_requests WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_invitations WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.self_onboarding_requests WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.user_role_assignments WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.role_permissions WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.groups WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.roles WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.registered_devices WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_locations WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.access_schedules WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_memberships WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.principal_permission_grants WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.principal_tenant_scopes WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_security_policies WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.security_retention_policies WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_offboarding_requests WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_security_control_overrides WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_self_onboarding_settings WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.user_tenant_authorization_state WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.user_tenant_operating_roles WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.tenant_role_permissions WHERE tenant_id=:tenant_id",
+            "DELETE FROM security.phase1_test_identity WHERE tenant_id=:tenant_id",
+            """
+            DELETE FROM security.user_admin_role_assignments
+            WHERE role_key='TenantAdmin'
+              AND scope_type='TENANT'
+              AND scope_id=:tenant_id
+            """,
+        )
+        for statement in statements:
+            self.s.execute(text(statement), params)
+
+        row = self.s.execute(
+            text(
+                """
+                DELETE FROM security.tenants
+                WHERE tenant_id=:tenant_id
+                RETURNING tenant_id
+                """
+            ),
+            params,
         ).first()
         return row is not None
 
