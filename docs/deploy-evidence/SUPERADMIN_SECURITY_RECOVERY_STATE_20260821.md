@@ -12,4 +12,5 @@ e59cf94e-5add-4ada-858c-5b7a1d33ba02|user_3I7FdD5Pkmydsp23OfjH9hBMxpN|COMPLETED|
 
 ## Active SuperAdmin assignments
 ```text
+SuperAdmin|PLATFORM|NULL|ACTIVE|2026-08-21 13:43:27.78732+00
 ```
