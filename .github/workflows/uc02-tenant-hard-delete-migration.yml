@@ -96,9 +96,9 @@ jobs:
         run: |
           set +e
           TEST_DATABASE_URL="$SECURITY_MIGRATION_DATABASE_URL" \
-            pytest -q tests/integration/test_uc02_tenant_hard_delete.py 2>&1 | tee /tmp/uc02-proof.log
+            pytest -q --tb=line tests/integration/test_uc02_tenant_hard_delete.py 2>&1 | tee /tmp/uc02-proof.log
           code=${PIPESTATUS[0]}
-          summary="$(grep -E '^E +|IntegrityError|ForeignKeyViolation|ProgrammingError|AssertionError|RuntimeError' /tmp/uc02-proof.log | tail -n 1 | tr '\n' ' ' | cut -c1-120)"
+          summary="$(grep -E 'IntegrityError|ForeignKeyViolation|ProgrammingError|AssertionError|RuntimeError|sqlalchemy\.exc|psycopg\.' /tmp/uc02-proof.log | tail -n 1 | tr '\n' ' ' | cut -c1-120)"
           if [ -z "$summary" ]; then
             summary="$(grep -E 'FAILED|ERROR' /tmp/uc02-proof.log | tail -n 1 | tr '\n' ' ' | cut -c1-120)"
           fi
