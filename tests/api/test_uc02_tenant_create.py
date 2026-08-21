@@ -59,11 +59,13 @@ def test_uc02_tenant_create_generates_internal_code_server_side(
 
     response = client.post(
         "/security/v1/platform/tenants",
+        headers={"Idempotency-Key": "uc02-create-001"},
         json={"tenantName": "Hyundai West Audit Project"},
     )
 
     assert response.status_code == 201
     assert observed["tenant_name"] == "Hyundai West Audit Project"
+    assert observed["idempotency_key"] == "uc02-create-001"
     generated = str(observed["tenant_code"])
     assert re.fullmatch(r"tenant-[0-9a-f]{32}", generated)
     assert response.json()["tenantCode"] == generated
@@ -95,6 +97,7 @@ def test_uc02_caller_cannot_control_internal_tenant_code(
 
     response = client.post(
         "/security/v1/platform/tenants",
+        headers={"Idempotency-Key": "uc02-create-002"},
         json={
             "tenantName": "Hyundai West Audit Project",
             "tenantCode": "caller-controlled-code",
@@ -104,3 +107,12 @@ def test_uc02_caller_cannot_control_internal_tenant_code(
     assert response.status_code == 201
     assert observed["tenant_code"] != "caller-controlled-code"
     assert response.json()["tenantCode"] == observed["tenant_code"]
+
+
+def test_uc02_tenant_create_requires_idempotency_key() -> None:
+    response = client.post(
+        "/security/v1/platform/tenants",
+        json={"tenantName": "Hyundai West Audit Project"},
+    )
+
+    assert response.status_code == 422
