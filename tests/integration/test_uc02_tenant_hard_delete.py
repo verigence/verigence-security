@@ -191,32 +191,40 @@ def test_uc02_hard_delete_removes_tenant_scope_and_preserves_global_user_and_aud
             assert repeated is not None
             assert repeated.already_deleted is True
             assert repeated.deleted_at_utc == deleted.deleted_at_utc
+    except Exception as exc:
+        print(f"UC02_PROOF_EXCEPTION={type(exc).__name__}:{exc}")
+        raise
     finally:
-        with engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM security.security_events WHERE security_event_id=:id"),
-                {"id": event_id},
-            )
-            if tenant_id is not None:
+        try:
+            with engine.begin() as conn:
                 conn.execute(
-                    text(
-                        """
-                        DELETE FROM security.admin_change_records
-                        WHERE resource_id=:tenant_id OR tenant_id=:tenant_id
-                        """
-                    ),
-                    {"tenant_id": tenant_id},
+                    text("DELETE FROM security.security_events WHERE security_event_id=:id"),
+                    {"id": event_id},
+                )
+                if tenant_id is not None:
+                    conn.execute(
+                        text(
+                            """
+                            DELETE FROM security.admin_change_records
+                            WHERE resource_id=:tenant_id OR tenant_id=:tenant_id
+                            """
+                        ),
+                        {"tenant_id": tenant_id},
+                    )
+                    conn.execute(
+                        text("DELETE FROM security.tenants WHERE tenant_id=:id"),
+                        {"id": tenant_id},
+                    )
+                conn.execute(
+                    text("DELETE FROM security.users WHERE user_id=:id"),
+                    {"id": user_id},
                 )
                 conn.execute(
-                    text("DELETE FROM security.tenants WHERE tenant_id=:id"),
-                    {"id": tenant_id},
+                    text("DELETE FROM security.security_principals WHERE principal_id=:id"),
+                    {"id": user_id},
                 )
-            conn.execute(
-                text("DELETE FROM security.users WHERE user_id=:id"),
-                {"id": user_id},
-            )
-            conn.execute(
-                text("DELETE FROM security.security_principals WHERE principal_id=:id"),
-                {"id": user_id},
-            )
-        engine.dispose()
+        except Exception as cleanup_exc:
+            print(f"UC02_CLEANUP_EXCEPTION={type(cleanup_exc).__name__}:{cleanup_exc}")
+            raise
+        finally:
+            engine.dispose()
