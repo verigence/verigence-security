@@ -194,8 +194,10 @@ class OperatingRoleAssignmentService:
                 text("SELECT status FROM security.tenants WHERE tenant_id=:tenant_id"),
                 {"tenant_id": tenant_id},
             ).scalar_one()
-            if str(tenant_status) != "ACTIVE":
-                raise ValueError("Tenant must be ACTIVE for an operating-role assignment")
+            if str(tenant_status) not in {"CONFIGURING", "ACTIVE"}:
+                raise ValueError(
+                    "Tenant must be CONFIGURING or ACTIVE for an operating-role assignment"
+                )
             if not self.repository.lock_user(actor_user_id):
                 raise ValueError("Actor USER not found")
 
