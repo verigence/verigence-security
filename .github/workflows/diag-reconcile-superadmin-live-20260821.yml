@@ -1,0 +1,77 @@
+name: Reconcile live DEV SuperAdmin
+
+on:
+  push:
+    branches:
+      - diag/superadmin-login-runtime-20260821b
+    paths:
+      - .github/workflows/diag-reconcile-superadmin-live-20260821.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  SUPERADMIN_EMAIL: jbrconsulting.it@gmail.com
+  SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install PostgreSQL client
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Reconcile canonical DEV SuperAdmin
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::Unsupported DB URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          psql "$db" -X -v ON_ERROR_STOP=1 -f migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql
+          psql "$db" -X -v ON_ERROR_STOP=1 -f migrations/0021_dev_canonical_human_identities.sql
+
+          {
+            echo '# Live DEV SuperAdmin reconciliation proof'
+            echo
+            echo '```text'
+            psql "$db" -X -v ON_ERROR_STOP=1 -P pager=off -F '|' -Atc "
+              SELECT u.user_id,u.primary_email,u.status,p.status,e.provider_subject,e.status,
+                     a.role_key,a.scope_type,COALESCE(a.scope_id::text,'NULL'),a.status
+              FROM security.users u
+              JOIN security.security_principals p ON p.principal_id=u.user_id AND p.actor_type='USER'
+              JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK' AND e.status='ACTIVE'
+              LEFT JOIN security.user_admin_role_assignments a
+                ON a.user_id=u.user_id AND a.role_key='SuperAdmin' AND a.scope_type='PLATFORM'
+               AND a.scope_id IS NULL AND a.status='ACTIVE'
+              WHERE lower(u.primary_email)=lower('$SUPERADMIN_EMAIL')
+                AND e.provider_subject='$SUPERADMIN_CLERK_ID';
+            "
+            echo '```'
+          } > docs/deploy-evidence/SUPERADMIN_LIVE_RECONCILE_20260821.md
+          cat docs/deploy-evidence/SUPERADMIN_LIVE_RECONCILE_20260821.md
+      - name: Commit evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/SUPERADMIN_LIVE_RECONCILE_20260821.md
+          git commit -m 'docs(diag): prove live SuperAdmin reconciliation [skip ci]' || exit 0
+          git pull --rebase origin diag/superadmin-login-runtime-20260821b
+          git push origin HEAD:diag/superadmin-login-runtime-20260821b
