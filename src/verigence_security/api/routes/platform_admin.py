@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.platform_schemas import (
     PlatformTenantCreateRequest,
+    PlatformTenantHardDeleteResponse,
     PlatformTenantResponse,
     PlatformTenantUpdateRequest,
 )
@@ -160,6 +161,32 @@ def activate_tenant(
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return _tenant_response(tenant)
+
+
+@router.delete(
+    "/tenants/{tenantId}",
+    response_model=PlatformTenantHardDeleteResponse,
+)
+def hard_delete_tenant(
+    tenantId: str,
+    request: Request,
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    _require_super_admin(actor)
+    result = PlatformTenantService(session).hard_delete_tenant(
+        actor_user_id=actor.user_id,
+        tenant_id=tenantId,
+        correlation_id=request.state.correlation_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {
+        "tenantId": result.tenant_id,
+        "status": "DELETED",
+        "deletedAtUtc": result.deleted_at_utc,
+        "alreadyDeleted": result.already_deleted,
+    }
 
 
 def _tenant_response(row: dict[str, object]) -> dict[str, object]:
