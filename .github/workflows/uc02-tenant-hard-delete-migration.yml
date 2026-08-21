@@ -102,8 +102,13 @@ jobs:
           if [ -z "$summary" ]; then
             summary="$(tail -n 1 /tmp/uc02-proof.log | tr '\n' ' ' | cut -c1-120)"
           fi
+          slug="$(printf '%s' "$summary" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-70)"
+          if [ -z "$slug" ]; then
+            slug="unknown"
+          fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
           exit 0
 
       - name: Publish UC02 stage diagnostics
@@ -114,14 +119,14 @@ jobs:
             const proofCode = '${{ steps.proof.outputs.code }}';
             const proofState = proofCode === '0' ? 'success' : 'failure';
             const proofSummary = '${{ steps.proof.outputs.summary }}';
+            const proofSlug = '${{ steps.proof.outputs.slug }}' || 'unknown';
             const stages = [
-              ['install', '${{ steps.install.outcome }}', ''],
-              ['database', '${{ steps.database.outcome }}', ''],
-              ['migration', '${{ steps.migration.outcome }}', ''],
-              ['fkcheck', '${{ steps.fkcheck.outcome }}', ''],
-              ['proof', proofState === 'success' ? 'success' : 'failure', proofSummary],
+              ['install', '${{ steps.install.outcome }}'],
+              ['database', '${{ steps.database.outcome }}'],
+              ['migration', '${{ steps.migration.outcome }}'],
+              ['fkcheck', '${{ steps.fkcheck.outcome }}'],
             ];
-            for (const [name, outcome, detail] of stages) {
+            for (const [name, outcome] of stages) {
               const state = outcome === 'success' ? 'success' : 'failure';
               await github.rest.repos.createCommitStatus({
                 owner: context.repo.owner,
@@ -129,9 +134,19 @@ jobs:
                 sha: context.sha,
                 state,
                 context: `uc02/security-${name}`,
-                description: (detail || `${name} ${outcome}`).slice(0, 140)
+                description: `${name} ${outcome}`.slice(0, 140)
               });
             }
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: proofState,
+              context: proofState === 'success'
+                ? 'uc02/security-proof'
+                : `uc02/security-proof-error-${proofSlug}`.slice(0, 100),
+              description: (proofSummary || `proof ${proofState}`).slice(0, 140)
+            });
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
