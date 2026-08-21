@@ -1,0 +1,142 @@
+name: Diagnose live SuperAdmin login state
+
+on:
+  push:
+    branches:
+      - diag/superadmin-login-20260821
+    paths:
+      - .github/workflows/diag-superadmin-live-state.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  SUPERADMIN_EMAIL: jbrconsulting.it@gmail.com
+  SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 1
+
+      - name: Resolve DEV database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::Unsupported database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          echo "DB=$db" >> "$GITHUB_ENV"
+          psql "$db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+      - name: Inspect Security identity and reset state
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== USERS / IDENTITIES ==='
+          psql "$DB" -X -v ON_ERROR_STOP=1 -P pager=off -F '|' -Atc "
+            SELECT u.user_id,u.primary_email,u.status,
+                   p.status AS principal_status,
+                   e.external_identity_id,e.provider_subject,e.status AS identity_status,
+                   coalesce((SELECT count(*) FROM security.user_admin_role_assignments a
+                             WHERE a.user_id=u.user_id
+                               AND a.role_key='SuperAdmin'
+                               AND a.scope_type='PLATFORM'
+                               AND a.scope_id IS NULL
+                               AND a.status='ACTIVE'),0) AS superadmin_count
+            FROM security.users u
+            LEFT JOIN security.security_principals p
+              ON p.principal_id=u.user_id AND p.actor_type='USER'
+            LEFT JOIN security.external_identities e
+              ON e.user_id=u.user_id AND e.provider='CLERK'
+            WHERE lower(u.primary_email)=lower('$SUPERADMIN_EMAIL')
+            ORDER BY u.user_id,e.linked_at_utc NULLS LAST;
+          "
+
+          echo '=== ACTIVE LOGIN ROW COUNT ==='
+          psql "$DB" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.users u
+            JOIN security.security_principals p
+              ON p.principal_id=u.user_id AND p.actor_type='USER'
+            JOIN security.external_identities e
+              ON e.user_id=u.user_id AND e.provider='CLERK'
+            WHERE lower(u.primary_email)=lower('$SUPERADMIN_EMAIL')
+              AND u.status='ACTIVE'
+              AND p.status='ACTIVE'
+              AND e.status='ACTIVE';
+          "
+
+          echo '=== LATEST PASSWORD RESET ATTEMPTS ==='
+          psql "$DB" -X -v ON_ERROR_STOP=1 -P pager=off -F '|' -Atc "
+            SELECT r.password_reset_attempt_id,r.user_id,r.clerk_user_id,r.status,
+                   r.created_at_utc,r.completed_at_utc,r.expires_at_utc
+            FROM security.password_reset_attempts r
+            JOIN security.users u ON u.user_id=r.user_id
+            WHERE lower(u.primary_email)=lower('$SUPERADMIN_EMAIL')
+            ORDER BY r.created_at_utc DESC
+            LIMIT 5;
+          "
+
+      - name: Inspect canonical Clerk account
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${CLERK_SECRET_KEY:-}" ] || { echo '::error::CLERK_SECRET_KEY missing'; exit 1; }
+          body="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            -H 'Content-Type: application/json' \
+            "https://api.clerk.com/v1/users/$SUPERADMIN_CLERK_ID")"
+          printf '%s' "$body" | jq '{id, banned, locked, password_enabled, primary_email_address_id, email_addresses:[.email_addresses[]? | {id,email_address,verification_status:(.verification.status // null)}]}'
+
+      - name: Capture recent Security runtime login lines
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @railway/cli >/dev/null 2>&1
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          set +e
+          env -u RAILWAY_TOKEN railway logs \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --lines 500 \
+            --json >/tmp/security.log 2>&1
+          rc=$?
+          set -e
+          echo "railway_logs_rc=$rc"
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('/tmp/security.log').read_text(errors='replace')
+          out=[]
+          for line in text.splitlines():
+              low=line.lower()
+              if ('/security/v1/auth/login' in low or 'auth_token_invalid' in low or
+                  'clerk' in low or 'credential' in low or 'traceback' in low or 'exception' in low):
+                  line=re.sub(r'(?i)(authorization|password|secret|token)\s*[:=]\s*[^ ,}]+', r'\1=<redacted>', line)
+                  out.append(line[:2000])
+          print('\n'.join(out[-160:]))
+          PY
