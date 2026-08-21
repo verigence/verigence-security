@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,8 @@ from verigence_security.config import Settings
 from verigence_security.core.errors import SecurityError, security_error
 from verigence_security.db.session import build_session_factory
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class ClerkCredentialResult:
@@ -27,6 +30,10 @@ class ClerkCredentialService:
     USER/principal with an ACTIVE Clerk mapping proceeds to Clerk password verification. A fully
     verified UC-001 USER that is still PENDING_ADMIN_APPROVAL receives the explicit pending
     lifecycle denial instead; its Clerk identity intentionally remains banned until approval.
+
+    Authentication denials intentionally remain generic at the API boundary. Server-side logs
+    record only a coarse failure stage so operators can distinguish Security state problems from
+    Clerk credential rejection without logging identifiers, passwords, OTPs or provider detail.
     """
 
     def __init__(self, settings: Settings, clerk: ClerkBackendClient | None = None) -> None:
@@ -41,31 +48,50 @@ class ClerkCredentialService:
     ) -> ClerkCredentialResult:
         normalized = identifier.strip().lower()
         if not normalized or not password:
+            self._log_denial("request_missing_identifier_or_password")
             raise security_error("AUTH_TOKEN_INVALID")
 
         expected_clerk_user_id = self._resolve_verigence_clerk_subject(normalized)
         if expected_clerk_user_id is None:
             # Keep all states generic except the deliberate UC-001 PENDING_ADMIN_APPROVAL
             # lifecycle signal emitted by _resolve_verigence_clerk_subject().
+            self._log_denial("security_identity_resolution_failed")
             raise security_error("AUTH_TOKEN_INVALID")
 
         try:
             user = self._clerk_user(expected_clerk_user_id)
             if user.banned or user.locked:
+                self._log_denial("clerk_account_blocked")
                 raise security_error("AUTH_TOKEN_INVALID")
             if not self.clerk.verify_password(
                 clerk_user_id=expected_clerk_user_id,
                 password=password,
             ):
+                self._log_denial("clerk_password_verification_rejected")
                 raise security_error("AUTH_TOKEN_INVALID")
+            logger.info("Human credential authentication accepted; stage=clerk_password_verified")
             return ClerkCredentialResult(clerk_user=user)
         except SecurityError:
             raise
         except ClerkBackendError as exc:
             if exc.retryable:
+                logger.warning(
+                    "Human credential authentication failed; stage=clerk_provider_unavailable status=%s code=%s",
+                    exc.status_code,
+                    exc.provider_code,
+                )
                 raise security_error("IDENTITY_PROVIDER_UNAVAILABLE") from exc
             # Do not expose identifier existence/provider details on authentication failures.
+            logger.warning(
+                "Human credential authentication denied; stage=clerk_provider_rejected status=%s code=%s",
+                exc.status_code,
+                exc.provider_code,
+            )
             raise security_error("AUTH_TOKEN_INVALID") from exc
+
+    @staticmethod
+    def _log_denial(stage: str) -> None:
+        logger.warning("Human credential authentication denied; stage=%s", stage)
 
     def _resolve_verigence_clerk_subject(self, normalized_email: str) -> str | None:
         factory = build_session_factory(self.settings)
@@ -117,6 +143,7 @@ class ClerkCredentialService:
                 # so Clerk cannot be used as the normal sign-in gate for this UX state. UC-001
                 # explicitly requires the channel to distinguish this completed, verified pending
                 # lifecycle from an invalid credential attempt. No access token is issued.
+                logger.info("Human credential authentication denied; stage=user_pending_admin_approval")
                 raise security_error("USER_PENDING_APPROVAL")
 
             if (
