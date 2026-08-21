@@ -206,7 +206,16 @@ def test_uc02_hard_delete_removes_tenant_scope_and_preserves_global_user_and_aud
                         text(
                             """
                             DELETE FROM security.admin_change_records
-                            WHERE resource_id=:tenant_id OR tenant_id=:tenant_id
+                            WHERE resource_id=:tenant_id
+                            """
+                        ),
+                        {"tenant_id": tenant_id},
+                    )
+                    conn.execute(
+                        text(
+                            """
+                            DELETE FROM security.admin_change_records
+                            WHERE tenant_id=CAST(:tenant_id AS uuid)
                             """
                         ),
                         {"tenant_id": tenant_id},
