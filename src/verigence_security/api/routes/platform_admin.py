@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -14,7 +15,10 @@ from verigence_security.api.platform_schemas import (
 )
 from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
-from verigence_security.services.platform_admin import PlatformTenantService
+from verigence_security.services.platform_admin import (
+    PlatformTenantService,
+    TenantCreateIdempotencyConflict,
+)
 from verigence_security.services.v2_human_actor import HumanActorContext
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
@@ -66,6 +70,7 @@ def _generated_tenant_code() -> str:
 def create_tenant(
     body: PlatformTenantCreateRequest,
     request: Request,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
     actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
@@ -76,7 +81,10 @@ def create_tenant(
             tenant_code=_generated_tenant_code(),
             tenant_name=body.tenantName,
             correlation_id=request.state.correlation_id,
+            idempotency_key=idempotency_key,
         )
+    except TenantCreateIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="Generated Tenant code already exists") from exc
     return _tenant_response(tenant)
