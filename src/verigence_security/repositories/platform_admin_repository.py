@@ -199,6 +199,48 @@ class PlatformAdminRepository:
             },
         )
 
+    def acquire_tenant_create_idempotency_lock(
+        self,
+        *,
+        actor_user_id: str,
+        idempotency_key: str,
+    ) -> None:
+        self.s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {
+                "lock_key": (
+                    f"security.platform.tenant.create:{actor_user_id}:{idempotency_key}"
+                )
+            },
+        )
+
+    def tenant_create_receipt(
+        self,
+        *,
+        actor_user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        row = self.s.execute(
+            text(
+                """
+                SELECT resource_id,
+                       after_state_json->>'tenantName' AS tenant_name
+                FROM security.admin_change_records
+                WHERE actor_user_id=:actor_user_id
+                  AND operation_key='platform.tenant.create'
+                  AND outcome='SUCCESS'
+                  AND after_state_json->>'idempotencyKey'=:idempotency_key
+                ORDER BY occurred_at_utc DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "actor_user_id": actor_user_id,
+                "idempotency_key": idempotency_key,
+            },
+        ).mappings().first()
+        return dict(row) if row else None
+
     def create_tenant(
         self,
         *,
