@@ -33,6 +33,18 @@ class PlatformMeResponse(BaseModel):
     mustChangePassword: bool
 
 
+class PlatformAdminScopeResponse(BaseModel):
+    roleKey: str
+    scopeType: str
+    scopeId: str | None
+
+
+class PlatformHumanAdminContextResponse(BaseModel):
+    userId: UUID
+    isSuperAdmin: bool
+    adminScopes: list[PlatformAdminScopeResponse]
+
+
 class PlatformTenantCreateRequest(BaseModel):
     tenantName: str = Field(min_length=1, max_length=240)
 
