@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.platform_schemas import (
+    PlatformHumanAdminContextResponse,
     PlatformTenantCreateRequest,
     PlatformTenantHardDeleteResponse,
     PlatformTenantResponse,
@@ -61,6 +62,32 @@ def _generated_tenant_code() -> str:
     # tenant_code column accepts short hyphenated strings; UUID hex keeps the value
     # unique, internal, and within the existing 80-character storage contract.
     return f"tenant-{uuid4().hex}"
+
+
+@router.get("/admin-context", response_model=PlatformHumanAdminContextResponse)
+def human_admin_context(
+    actor: HumanActorContext = Depends(security_human_actor),
+) -> dict[str, object]:
+    """Return live Security-owned human administrator classification.
+
+    Audit Core uses this UC02 control-plane endpoint to attest the initiating human
+    administrator before orchestrating Project administration. The authenticated
+    USER is resolved from the Security human JWT and all scopes come from live
+    Security state; callers cannot supply or override the actor/scopes.
+    """
+
+    return {
+        "userId": actor.user_id,
+        "isSuperAdmin": actor.is_super_admin,
+        "adminScopes": [
+            {
+                "roleKey": scope.role_key,
+                "scopeType": scope.scope_type,
+                "scopeId": scope.scope_id,
+            }
+            for scope in actor.admin_scopes
+        ],
+    }
 
 
 @router.post(
