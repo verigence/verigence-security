@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+from time import sleep
 from typing import Any
 from uuid import uuid4
 
 import httpx
 
 from verigence_security.config import Settings
+
+_EMAIL_VERIFICATION_RECONCILE_ATTEMPTS = 4
+_EMAIL_VERIFICATION_RECONCILE_DELAY_SECONDS = 0.25
 
 
 class ClerkBackendError(RuntimeError):
@@ -187,11 +191,16 @@ class ClerkBackendClient:
                 json={"verification_id": verification_id, "code": code},
             )
         except ClerkBackendError as exc:
-            if exc.status_code in {400, 401, 403, 409, 422}:
-                return False
-            raise
+            if exc.status_code not in {400, 401, 403, 409, 422}:
+                raise
+            # A valid OTP can race with Clerk's read model or a duplicate browser submission. Do
+            # not consume another OTP attempt. Re-read the same EmailAddress briefly and accept only
+            # provider-confirmed verified state; a genuinely invalid/expired code remains unverified.
+            return self._reconcile_email_verification(email_address_id)
         verification = self._verification_payload(data)
-        return verification.get("status") == "verified"
+        if verification.get("status") == "verified":
+            return True
+        return self._reconcile_email_verification(email_address_id)
 
     def finalize_pending_email_user(
         self,
@@ -403,6 +412,23 @@ class ClerkBackendClient:
 
     def unban_user(self, clerk_user_id: str) -> None:
         self._request_object("POST", f"/users/{clerk_user_id}/unban")
+
+    def _reconcile_email_verification(self, email_address_id: str) -> bool:
+        """Observe Clerk's EmailAddress state without spending another OTP attempt."""
+
+        for attempt in range(_EMAIL_VERIFICATION_RECONCILE_ATTEMPTS):
+            try:
+                data = self._request_object("GET", f"/email_addresses/{email_address_id}")
+            except ClerkBackendError as exc:
+                if exc.status_code in {400, 401, 403, 404, 409, 422}:
+                    return False
+                raise
+            verification = self._verification_payload(data)
+            if verification.get("status") == "verified":
+                return True
+            if attempt + 1 < _EMAIL_VERIFICATION_RECONCILE_ATTEMPTS:
+                sleep(_EMAIL_VERIFICATION_RECONCILE_DELAY_SECONDS)
+        return False
 
     def _request_object(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         body = self._request_json(method, path, **kwargs)
