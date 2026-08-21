@@ -62,3 +62,10 @@ class PlatformTenantResponse(BaseModel):
     status: str
     createdAtUtc: datetime
     updatedAtUtc: datetime
+
+
+class PlatformTenantHardDeleteResponse(BaseModel):
+    tenantId: UUID
+    status: str
+    deletedAtUtc: datetime
+    alreadyDeleted: bool
