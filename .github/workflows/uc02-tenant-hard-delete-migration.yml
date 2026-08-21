@@ -94,23 +94,34 @@ jobs:
         id: proof
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           TEST_DATABASE_URL="$SECURITY_MIGRATION_DATABASE_URL" \
-            pytest -q tests/integration/test_uc02_tenant_hard_delete.py
+            pytest -q tests/integration/test_uc02_tenant_hard_delete.py 2>&1 | tee /tmp/uc02-proof.log
+          code=${PIPESTATUS[0]}
+          summary="$(grep -E 'FAILED|ERROR|E +sqlalchemy|E +psycopg|E +AssertionError' /tmp/uc02-proof.log | tail -n 1 | tr '\n' ' ' | cut -c1-120)"
+          if [ -z "$summary" ]; then
+            summary="$(tail -n 1 /tmp/uc02-proof.log | tr '\n' ' ' | cut -c1-120)"
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Publish UC02 stage diagnostics
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
+            const proofCode = '${{ steps.proof.outputs.code }}';
+            const proofState = proofCode === '0' ? 'success' : 'failure';
+            const proofSummary = '${{ steps.proof.outputs.summary }}';
             const stages = [
-              ['install', '${{ steps.install.outcome }}'],
-              ['database', '${{ steps.database.outcome }}'],
-              ['migration', '${{ steps.migration.outcome }}'],
-              ['fkcheck', '${{ steps.fkcheck.outcome }}'],
-              ['proof', '${{ steps.proof.outcome }}'],
+              ['install', '${{ steps.install.outcome }}', ''],
+              ['database', '${{ steps.database.outcome }}', ''],
+              ['migration', '${{ steps.migration.outcome }}', ''],
+              ['fkcheck', '${{ steps.fkcheck.outcome }}', ''],
+              ['proof', proofState === 'success' ? 'success' : 'failure', proofSummary],
             ];
-            for (const [name, outcome] of stages) {
+            for (const [name, outcome, detail] of stages) {
               const state = outcome === 'success' ? 'success' : 'failure';
               await github.rest.repos.createCommitStatus({
                 owner: context.repo.owner,
@@ -118,17 +129,22 @@ jobs:
                 sha: context.sha,
                 state,
                 context: `uc02/security-${name}`,
-                description: `${name} ${outcome}`.slice(0, 140)
+                description: (detail || `${name} ${outcome}`).slice(0, 140)
               });
             }
-            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: context.sha,
-              state,
+              state: proofState,
               context: 'uc02/security-tenant-delete-proof',
-              description: state === 'success'
+              description: proofState === 'success'
                 ? 'Migration and PostgreSQL hard-delete proof passed'
-                : 'Migration or PostgreSQL hard-delete proof failed'
+                : (proofSummary || 'PostgreSQL hard-delete proof failed').slice(0, 140)
             });
+
+      - name: Fail job when PostgreSQL proof failed
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.proof.outputs.code }}" = "0"
