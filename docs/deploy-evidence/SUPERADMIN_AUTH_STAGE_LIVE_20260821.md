@@ -634,5 +634,6 @@
 
 ## Sanitized auth-stage logs
 ```text
-
+{"timestamp":"2026-08-21T13:45:54.661237617Z","message":"Human credential authentication denied; stage=clerk_password_verification_rejected","level":"error"}
+{"timestamp":"2026-08-21T13:45:54.661244164Z","message":"INFO:     100.64.0.2:18930 - \"POST /security/v1/auth/login HTTP/1.1\" 401 Unauthorized","level":"info"}
 ```
