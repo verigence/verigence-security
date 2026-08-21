@@ -6,7 +6,7 @@ from verigence_security.services.onboarding_key import require_onboarding_key_sh
 
 
 def test_onboarding_key_shape_normalizes_prefix_case() -> None:
-    assert require_onboarding_key_shape(" vgn12345678 ") == "VGN12345678"
+    assert require_onboarding_key_shape(" vgn-1234567 ") == "VGN-1234567"
 
 
 @pytest.mark.parametrize(
