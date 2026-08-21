@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Install Railway CLI
         run: npm install --global @railway/cli
       - name: Capture sanitized recent Security auth traces
@@ -35,15 +37,11 @@ jobs:
             --project "$PLATFORM_PROJECT_ID" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
             --json >/tmp/railway-link.json
-          set +e
           env -u RAILWAY_TOKEN railway logs \
             --service "$SECURITY_SERVICE" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
             --lines 1000 \
             --json > /tmp/security-runtime.log 2>&1
-          rc=$?
-          set -e
-          [ "$rc" -eq 0 ] || { cat /tmp/security-runtime.log; exit "$rc"; }
           python - <<'PY'
           from pathlib import Path
           import re
@@ -64,5 +62,18 @@ jobs:
                   line = re.sub(r'(?i)(authorization|password|secret|token)\s*[:=]\s*[^ ,}\"]+', r'\1=<redacted>', line)
                   line = re.sub(r'Bearer\s+[A-Za-z0-9._~-]+', 'Bearer <redacted>', line, flags=re.I)
                   keep.append(line[:3000])
-          print('\n'.join(keep[-250:]))
+          evidence = '# SuperAdmin runtime auth trace — sanitized\n\n```text\n' + '\n'.join(keep[-250:]) + '\n```\n'
+          Path('docs/deploy-evidence/SUPERADMIN_RUNTIME_AUTH_TRACE_20260821.md').write_text(evidence)
+          print(evidence)
           PY
+      - name: Commit diagnostic evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/SUPERADMIN_RUNTIME_AUTH_TRACE_20260821.md
+          git commit -m 'docs(diag): record sanitized SuperAdmin runtime auth trace [skip ci]' || exit 0
+          git pull --rebase origin diag/superadmin-login-runtime-20260821b
+          git push origin HEAD:diag/superadmin-login-runtime-20260821b
