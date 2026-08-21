@@ -34,6 +34,13 @@ class PlatformLoginResult:
     must_change_password: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TenantHardDeleteResult:
+    tenant_id: str
+    deleted_at_utc: datetime
+    already_deleted: bool
+
+
 class TenantCreateIdempotencyConflict(ValueError):
     pass
 
@@ -333,6 +340,73 @@ class PlatformTenantService:
         if tenant is None:
             raise RuntimeError("Activated Tenant could not be reloaded")
         return tenant
+
+    def hard_delete_tenant(
+        self,
+        *,
+        actor_user_id: str,
+        tenant_id: str,
+        correlation_id: str,
+    ) -> TenantHardDeleteResult | None:
+        prior = self.repository.tenant_hard_delete_receipt(tenant_id)
+        if prior is not None:
+            return TenantHardDeleteResult(
+                tenant_id=tenant_id,
+                deleted_at_utc=prior["occurred_at_utc"],
+                already_deleted=True,
+            )
+
+        before = self.repository.tenant_by_id(tenant_id)
+        if before is None:
+            return None
+
+        now = datetime.now(UTC)
+        try:
+            if not self.repository.delete_tenant_scoped_state(tenant_id):
+                raise RuntimeError("Tenant hard-delete state changed concurrently")
+            self.repository.insert_admin_change(
+                correlation_id=correlation_id,
+                actor_user_id=actor_user_id,
+                operation_key="platform.tenant.hard_delete",
+                resource_type="tenant",
+                resource_id=tenant_id,
+                outcome="SUCCESS",
+                tenant_id=tenant_id,
+                before_state_json=json.dumps(_json_tenant(before)),
+                after_state_json=json.dumps(
+                    {"tenantId": tenant_id, "status": "DELETED"}
+                ),
+                now=now,
+            )
+            self.repository.commit()
+        except Exception:
+            self.repository.rollback()
+            failure_time = datetime.now(UTC)
+            try:
+                self.repository.insert_admin_change(
+                    correlation_id=correlation_id,
+                    actor_user_id=actor_user_id,
+                    operation_key="platform.tenant.hard_delete",
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    outcome="FAILED",
+                    tenant_id=tenant_id,
+                    before_state_json=json.dumps(_json_tenant(before)),
+                    after_state_json=json.dumps(
+                        {"tenantId": tenant_id, "status": "DELETE_FAILED"}
+                    ),
+                    now=failure_time,
+                )
+                self.repository.commit()
+            except Exception:
+                self.repository.rollback()
+            raise
+
+        return TenantHardDeleteResult(
+            tenant_id=tenant_id,
+            deleted_at_utc=now,
+            already_deleted=False,
+        )
 
     def _seed_v2_tenant_role_defaults(
         self,
