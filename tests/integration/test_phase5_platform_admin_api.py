@@ -95,8 +95,6 @@ def test_clerk_bootstrap_platform_login_and_direct_tenant_api() -> None:
     settings = _test_settings(database_url, clerk_public_pem)
     clerk_token = _clerk_token(clerk_private_pem, CLERK_SUPER_ADMIN_SUBJECT)
     wrong_clerk_token = _clerk_token(clerk_private_pem, "user_wrong_bootstrap_subject")
-    onboarding_token = f"onboarding-{uuid4()}"
-    tenant_code = f"API-{uuid4()}"[:80]
     admin_user_id: str | None = None
     tenant_id: str | None = None
 
@@ -156,16 +154,18 @@ def test_clerk_bootstrap_platform_login_and_direct_tenant_api() -> None:
 
             created = client.post(
                 "/security/v1/platform/tenants",
-                headers={"Authorization": f"Bearer {platform_token}"},
-                json={
-                    "tenantCode": tenant_code,
-                    "tenantName": "Platform API Tenant",
-                    "selfOnboarding": {"enabled": True, "token": onboarding_token},
+                headers={
+                    "Authorization": f"Bearer {platform_token}",
+                    "Idempotency-Key": f"platform-api-{uuid4()}",
                 },
+                json={"tenantName": "Platform API Tenant"},
             )
             assert created.status_code == 201
             created_body = created.json()
             tenant_id = created_body["tenantId"]
+            tenant_code = created_body["tenantCode"]
+            assert tenant_code.startswith("tenant-")
+            assert len(tenant_code) == 39
             assert created_body["status"] == "CONFIGURING"
 
             fetched = client.get(
@@ -227,20 +227,6 @@ def test_clerk_bootstrap_platform_login_and_direct_tenant_api() -> None:
             )
             assert roles == {role.role_key for role in STANDARD_TENANT_ADMIN_ROLES}
 
-            onboarding = conn.execute(
-                text(
-                    """
-                    SELECT token_hash,status,token_version
-                    FROM security.tenant_self_onboarding_settings
-                    WHERE tenant_id=:tenant_id
-                    """
-                ),
-                {"tenant_id": tenant_id},
-            ).mappings().one()
-            assert onboarding["status"] == "ACTIVE"
-            assert onboarding["token_version"] == 1
-            assert onboarding["token_hash"] != onboarding_token
-
             operations = frozenset(
                 str(value)
                 for value in conn.execute(
@@ -270,7 +256,7 @@ def test_clerk_bootstrap_platform_login_and_direct_tenant_api() -> None:
                     conn.execute(
                         text(
                             """
-                            DELETE FROM security.tenant_self_onboarding_settings
+                            DELETE FROM security.tenant_role_permissions
                             WHERE tenant_id=:id
                             """
                         ),
