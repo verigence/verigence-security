@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr
 
 
 class PlatformLoginRequest(BaseModel):
@@ -34,27 +34,21 @@ class PlatformMeResponse(BaseModel):
 
 
 class PlatformTenantCreateRequest(BaseModel):
-    tenantCode: str = Field(min_length=1, max_length=80)
     tenantName: str = Field(min_length=1, max_length=240)
 
-    @model_validator(mode="after")
-    def normalize_required_values(self) -> PlatformTenantCreateRequest:
-        self.tenantCode = self.tenantCode.strip()
+    def model_post_init(self, __context: object) -> None:
         self.tenantName = self.tenantName.strip()
-        if not self.tenantCode or not self.tenantName:
-            raise ValueError("Tenant code and name cannot be blank")
-        return self
+        if not self.tenantName:
+            raise ValueError("Tenant name cannot be blank")
 
 
 class PlatformTenantUpdateRequest(BaseModel):
     tenantName: str = Field(min_length=1, max_length=240)
 
-    @model_validator(mode="after")
-    def normalize_name(self) -> PlatformTenantUpdateRequest:
+    def model_post_init(self, __context: object) -> None:
         self.tenantName = self.tenantName.strip()
         if not self.tenantName:
             raise ValueError("Tenant name cannot be blank")
-        return self
 
 
 class PlatformTenantResponse(BaseModel):
