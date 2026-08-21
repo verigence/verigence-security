@@ -14,9 +14,13 @@ permissions:
 env:
   RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
   RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+  CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
   PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
   PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
   SECURITY_SERVICE: security
+  SUPERADMIN_EMAIL: jbrconsulting.it@gmail.com
+  SUPERADMIN_CLERK_ID: user_3I7FdD5Pkmydsp23OfjH9hBMxpN
 
 jobs:
   inspect:
@@ -26,8 +30,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install Railway CLI
-        run: npm install --global @railway/cli
+      - name: Install tools
+        run: |
+          npm install --global @railway/cli
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
       - name: Capture sanitized recent Security auth traces
         shell: bash
         run: |
@@ -40,7 +49,7 @@ jobs:
           env -u RAILWAY_TOKEN railway logs \
             --service "$SECURITY_SERVICE" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
-            --lines 1000 \
+            --lines 1200 \
             --json > /tmp/security-runtime.log 2>&1
           python - <<'PY'
           from pathlib import Path
@@ -66,6 +75,108 @@ jobs:
           Path('docs/deploy-evidence/SUPERADMIN_RUNTIME_AUTH_TRACE_20260821.md').write_text(evidence)
           print(evidence)
           PY
+      - name: Inspect Security identity and recovery state
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::Unsupported DB URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          {
+            echo '# SuperAdmin Security + password recovery state'
+            echo
+            echo '## Security identity rows'
+            echo '```text'
+            psql "$db" -X -v ON_ERROR_STOP=1 -P pager=off -F '|' -Atc "
+              SELECT u.user_id,u.primary_email,u.status,p.status,
+                     e.provider_subject,e.status
+              FROM security.users u
+              JOIN security.security_principals p
+                ON p.principal_id=u.user_id AND p.actor_type='USER'
+              LEFT JOIN security.external_identities e
+                ON e.user_id=u.user_id AND e.provider='CLERK'
+              WHERE lower(u.primary_email)=lower('$SUPERADMIN_EMAIL')
+              ORDER BY e.status,e.linked_at_utc;
+            "
+            echo '```'
+            echo
+            echo '## Recent password-reset attempts'
+            echo '```text'
+            psql "$db" -X -v ON_ERROR_STOP=1 -P pager=off -F '|' -Atc "
+              SELECT password_reset_attempt_id,clerk_user_id,status,
+                     created_at_utc,expires_at_utc,completed_at_utc
+              FROM security.password_reset_attempts
+              WHERE user_id=(SELECT user_id FROM security.users WHERE lower(primary_email)=lower('$SUPERADMIN_EMAIL') LIMIT 1)
+              ORDER BY created_at_utc DESC
+              LIMIT 10;
+            "
+            echo '```'
+            echo
+            echo '## Active SuperAdmin assignments'
+            echo '```text'
+            psql "$db" -X -v ON_ERROR_STOP=1 -P pager=off -F '|' -Atc "
+              SELECT role_key,scope_type,COALESCE(scope_id::text,'NULL'),status,assigned_at_utc
+              FROM security.user_admin_role_assignments
+              WHERE user_id=(SELECT user_id FROM security.users WHERE lower(primary_email)=lower('$SUPERADMIN_EMAIL') LIMIT 1)
+              ORDER BY assigned_at_utc DESC;
+            "
+            echo '```'
+          } > docs/deploy-evidence/SUPERADMIN_SECURITY_RECOVERY_STATE_20260821.md
+          cat docs/deploy-evidence/SUPERADMIN_SECURITY_RECOVERY_STATE_20260821.md
+      - name: Inspect safe Clerk account state
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${CLERK_SECRET_KEY:-}" ] || { echo '::error::CLERK_SECRET_KEY missing'; exit 1; }
+          body="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            -H 'Content-Type: application/json' \
+            "https://api.clerk.com/v1/users/$SUPERADMIN_CLERK_ID")"
+          by_email="$(curl --fail-with-body --silent --show-error --get \
+            -H "Authorization: Bearer $CLERK_SECRET_KEY" \
+            --data-urlencode "email_address=$SUPERADMIN_EMAIL" \
+            'https://api.clerk.com/v1/users')"
+          jq -n \
+            --argjson user "$body" \
+            --argjson matches "$by_email" \
+            '{
+              canonical: {
+                id: $user.id,
+                password_enabled: $user.password_enabled,
+                banned: $user.banned,
+                locked: $user.locked,
+                last_sign_in_at: $user.last_sign_in_at,
+                created_at: $user.created_at,
+                updated_at: $user.updated_at,
+                primary_email_address_id: $user.primary_email_address_id,
+                emails: [ $user.email_addresses[]? | {
+                  id: .id,
+                  email_address: .email_address,
+                  verification_status: (.verification.status // null)
+                }]
+              },
+              users_matching_email: [ $matches[]? | {
+                id: .id,
+                password_enabled: .password_enabled,
+                banned: .banned,
+                locked: .locked,
+                primary_email_address_id: .primary_email_address_id
+              }]
+            }' > /tmp/clerk-safe.json
+          {
+            echo '# SuperAdmin Clerk state — safe fields only'
+            echo
+            echo '```json'
+            cat /tmp/clerk-safe.json
+            echo '```'
+          } > docs/deploy-evidence/SUPERADMIN_CLERK_STATE_20260821.md
+          cat docs/deploy-evidence/SUPERADMIN_CLERK_STATE_20260821.md
       - name: Commit diagnostic evidence
         if: always()
         shell: bash
@@ -73,7 +184,7 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add docs/deploy-evidence/SUPERADMIN_RUNTIME_AUTH_TRACE_20260821.md
-          git commit -m 'docs(diag): record sanitized SuperAdmin runtime auth trace [skip ci]' || exit 0
+          git add docs/deploy-evidence/SUPERADMIN_*_20260821.md
+          git commit -m 'docs(diag): record sanitized SuperAdmin auth state [skip ci]' || exit 0
           git pull --rebase origin diag/superadmin-login-runtime-20260821b
           git push origin HEAD:diag/superadmin-login-runtime-20260821b
