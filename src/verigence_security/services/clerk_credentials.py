@@ -93,12 +93,16 @@ class ClerkCredentialService:
                     JOIN security.external_identities e
                       ON e.user_id=u.user_id
                      AND e.provider='CLERK'
+                     AND e.status='ACTIVE'
                     WHERE lower(u.primary_email)=:email
                     LIMIT 2
                     """
                 ),
                 {"email": normalized_email},
             ).mappings().all()
+            # Historical REVOKED Clerk identities are deliberately retained for auditability and
+            # must not make an otherwise valid active account look ambiguous. Multiple ACTIVE
+            # mappings still fail closed via this exact-one requirement.
             if len(rows) != 1:
                 return None
 

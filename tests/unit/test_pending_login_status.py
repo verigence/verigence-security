@@ -31,6 +31,36 @@ class _Session:
         self.closed = True
 
 
+class _FilterSensitiveSession:
+    """Model one active Clerk mapping plus one retained revoked historical mapping."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.sql = ""
+
+    def execute(self, statement: object, *_args: object, **_kwargs: object) -> _Rows:
+        self.sql = " ".join(str(statement).split())
+        active = {
+            "provider_subject": "user_active",
+            "user_status": "ACTIVE",
+            "principal_status": "ACTIVE",
+            "identity_status": "ACTIVE",
+            "pending_admin_approval": False,
+        }
+        revoked = {
+            "provider_subject": "user_historical",
+            "user_status": "ACTIVE",
+            "principal_status": "ACTIVE",
+            "identity_status": "REVOKED",
+            "pending_admin_approval": False,
+        }
+        rows = [active] if "e.status='ACTIVE'" in self.sql else [active, revoked]
+        return _Rows(rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _NeverClerk:
     def get_user(self, _clerk_user_id: str) -> dict[str, object]:
         raise AssertionError("Pending approval login must not call Clerk")
@@ -72,4 +102,22 @@ def test_pending_admin_approval_returns_explicit_lifecycle_denial_before_clerk(
 
     assert exc_info.value.code == "USER_PENDING_APPROVAL"
     assert exc_info.value.status_code == 403
+    assert session.closed
+
+
+def test_login_resolution_ignores_revoked_historical_clerk_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FilterSensitiveSession()
+    monkeypatch.setattr(
+        clerk_credentials,
+        "build_session_factory",
+        lambda _settings: lambda: session,
+    )
+    service = ClerkCredentialService(_settings(), clerk=_NeverClerk())  # type: ignore[arg-type]
+
+    subject = service._resolve_verigence_clerk_subject("superadmin@example.com")
+
+    assert subject == "user_active"
+    assert "e.status='ACTIVE'" in session.sql
     assert session.closed
