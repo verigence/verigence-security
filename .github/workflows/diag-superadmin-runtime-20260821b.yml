@@ -188,3 +188,5 @@ jobs:
           git commit -m 'docs(diag): record sanitized SuperAdmin auth state [skip ci]' || exit 0
           git pull --rebase origin diag/superadmin-login-runtime-20260821b
           git push origin HEAD:diag/superadmin-login-runtime-20260821b
+
+# rerun-trigger: 2026-08-21T19:17:00+05:30
