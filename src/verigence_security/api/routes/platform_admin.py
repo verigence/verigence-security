@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -49,6 +51,13 @@ def _require_tenant_update_access(actor: HumanActorContext, tenant_id: str) -> N
     raise security_error("PERMISSION_DENIED")
 
 
+def _generated_tenant_code() -> str:
+    # UC02 keeps Tenant Code as an opaque Security-owned identifier. The existing
+    # tenant_code column accepts short hyphenated strings; UUID hex keeps the value
+    # unique, internal, and within the existing 80-character storage contract.
+    return f"tenant-{uuid4().hex}"
+
+
 @router.post(
     "/tenants",
     response_model=PlatformTenantResponse,
@@ -64,12 +73,12 @@ def create_tenant(
     try:
         tenant = PlatformTenantService(session).create_tenant(
             actor_user_id=actor.user_id,
-            tenant_code=body.tenantCode,
+            tenant_code=_generated_tenant_code(),
             tenant_name=body.tenantName,
             correlation_id=request.state.correlation_id,
         )
     except IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="Tenant code already exists") from exc
+        raise HTTPException(status_code=409, detail="Generated Tenant code already exists") from exc
     return _tenant_response(tenant)
 
 
