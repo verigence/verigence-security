@@ -27,9 +27,25 @@ class V2UserDirectoryService:
         if normalized_search == "":
             normalized_search = None
 
+        conditions: list[str] = []
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if normalized_status is not None:
+            conditions.append("u.status=:status")
+            params["status"] = normalized_status
+        if normalized_search is not None:
+            conditions.append(
+                """(
+                    lower(u.display_name) LIKE '%' || :search || '%'
+                    OR lower(COALESCE(u.primary_email,'')) LIKE '%' || :search || '%'
+                    OR lower(COALESCE(u.primary_mobile,'')) LIKE '%' || :search || '%'
+                )"""
+            )
+            params["search"] = normalized_search
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = self.s.execute(
             text(
-                """
+                f"""
                 SELECT u.user_id,u.display_name,u.primary_email,u.primary_mobile,u.status,
                        u.created_at_utc,u.updated_at_utc,
                        e.provider_subject AS clerk_subject,
@@ -39,23 +55,12 @@ class V2UserDirectoryService:
                   ON e.user_id=u.user_id AND e.provider='CLERK' AND e.status='ACTIVE'
                 LEFT JOIN security.platform_user_onboarding_requests r
                   ON r.user_id=u.user_id
-                WHERE (:status IS NULL OR u.status=:status)
-                  AND (
-                    :search IS NULL
-                    OR lower(u.display_name) LIKE '%' || :search || '%'
-                    OR lower(COALESCE(u.primary_email,'')) LIKE '%' || :search || '%'
-                    OR lower(COALESCE(u.primary_mobile,'')) LIKE '%' || :search || '%'
-                  )
+                {where_clause}
                 ORDER BY u.created_at_utc DESC,u.user_id
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            {
-                "status": normalized_status,
-                "search": normalized_search,
-                "limit": limit,
-                "offset": offset,
-            },
+            params,
         ).mappings()
         return [dict(row) for row in rows]
 
