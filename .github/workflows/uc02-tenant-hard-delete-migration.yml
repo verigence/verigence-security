@@ -1,0 +1,77 @@
+name: UC02 Tenant Hard Delete Migration
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrate-uc02-tenant-delete:
+    name: Apply and verify UC02 Tenant delete migration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v6
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+
+      - name: Resolve migration database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || {
+            echo "::error::MIGRATION_DATABASE_URL is not configured."
+            exit 1
+          }
+          case "$raw" in
+            postgresql+psycopg://*) database_url="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) database_url="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) database_url="$raw" ;;
+            *) echo "::error::MIGRATION_DATABASE_URL is not PostgreSQL."; exit 1 ;;
+          esac
+          echo "::add-mask::$database_url"
+          echo "SECURITY_MIGRATION_DATABASE_URL=$database_url" >> "$GITHUB_ENV"
+          psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+      - name: Apply UC02 migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -f migrations/0024_uc02_tenant_hard_delete.sql
+
+      - name: Verify historical audit Tenant FKs are detached
+        shell: bash
+        run: |
+          set -euo pipefail
+          remaining="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM pg_constraint con
+            JOIN pg_class tbl ON tbl.oid=con.conrelid
+            JOIN pg_namespace ns ON ns.oid=tbl.relnamespace
+            WHERE con.contype='f'
+              AND con.confrelid='security.tenants'::regclass
+              AND ns.nspname='security'
+              AND tbl.relname IN ('admin_change_records','security_events');
+          ")"
+          [ "$remaining" = "0" ] || {
+            echo "::error::UC02 audit-history Tenant FK detachment failed."
+            exit 1
+          }
+          echo "UC02_TENANT_DELETE_MIGRATION=PASS"
