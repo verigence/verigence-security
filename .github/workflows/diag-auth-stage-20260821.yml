@@ -1,0 +1,101 @@
+name: Diagnose live auth stage
+
+on:
+  push:
+    branches:
+      - diag/superadmin-login-runtime-20260821b
+    paths:
+      - .github/workflows/diag-auth-stage-20260821.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+      - name: Capture deployment and safe auth-stage logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+
+          set +e
+          env -u RAILWAY_TOKEN railway deployment list \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json > /tmp/deployments.json 2>/tmp/deployments.err
+          deployment_rc=$?
+          set -e
+
+          env -u RAILWAY_TOKEN railway logs \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --lines 1600 \
+            --json > /tmp/security-runtime.log 2>&1
+
+          python - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          deploy_rc = int('''${deployment_rc}''')
+          deployment_text = Path('/tmp/deployments.json').read_text(errors='replace') if deploy_rc == 0 else Path('/tmp/deployments.err').read_text(errors='replace')
+          try:
+              deployments = json.loads(deployment_text) if deploy_rc == 0 else deployment_text
+          except Exception:
+              deployments = deployment_text
+
+          src = Path('/tmp/security-runtime.log').read_text(errors='replace')
+          keep = []
+          keys = (
+              '/security/v1/auth/login',
+              'Human credential authentication',
+              'clerk_password_verified',
+              'clerk_password_verification_rejected',
+              'clerk_provider_rejected',
+              'clerk_provider_unavailable',
+              'security_identity_resolution_failed',
+              'clerk_account_blocked',
+          )
+          for line in src.splitlines():
+              if any(k.lower() in line.lower() for k in keys):
+                  line = re.sub(r'(?i)(authorization|password|secret|token)\s*[:=]\s*[^ ,}\"]+', r'\1=<redacted>', line)
+                  line = re.sub(r'Bearer\s+[A-Za-z0-9._~-]+', 'Bearer <redacted>', line, flags=re.I)
+                  keep.append(line[:3000])
+
+          out = ['# Live Security auth-stage diagnostic', '']
+          out += ['## Railway deployments', '```json', json.dumps(deployments, indent=2)[:20000] if not isinstance(deployments, str) else deployments[:20000], '```', '']
+          out += ['## Sanitized auth-stage logs', '```text', '\n'.join(keep[-300:]), '```', '']
+          evidence = '\n'.join(out)
+          Path('docs/deploy-evidence/SUPERADMIN_AUTH_STAGE_LIVE_20260821.md').write_text(evidence)
+          print(evidence)
+          PY
+      - name: Commit evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/deploy-evidence/SUPERADMIN_AUTH_STAGE_LIVE_20260821.md
+          git commit -m 'docs(diag): capture live Security auth stage [skip ci]' || exit 0
+          git pull --rebase origin diag/superadmin-login-runtime-20260821b
+          git push origin HEAD:diag/superadmin-login-runtime-20260821b
