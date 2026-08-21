@@ -45,6 +45,7 @@ jobs:
             --json > /tmp/deployments.json 2>/tmp/deployments.err
           deployment_rc=$?
           set -e
+          export DEPLOYMENT_RC="$deployment_rc"
 
           env -u RAILWAY_TOKEN railway logs \
             --service "$SECURITY_SERVICE" \
@@ -54,9 +55,9 @@ jobs:
 
           python - <<'PY'
           from pathlib import Path
-          import json, re
+          import json, os, re
 
-          deploy_rc = int('''${deployment_rc}''')
+          deploy_rc = int(os.environ.get('DEPLOYMENT_RC', '1'))
           deployment_text = Path('/tmp/deployments.json').read_text(errors='replace') if deploy_rc == 0 else Path('/tmp/deployments.err').read_text(errors='replace')
           try:
               deployments = json.loads(deployment_text) if deploy_rc == 0 else deployment_text
