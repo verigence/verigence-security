@@ -1,0 +1,68 @@
+name: Diagnose SuperAdmin runtime login
+
+on:
+  push:
+    branches:
+      - diag/superadmin-login-runtime-20260821b
+    paths:
+      - .github/workflows/diag-superadmin-runtime-20260821b.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+      - name: Capture sanitized recent Security auth traces
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/railway-link.json
+          set +e
+          env -u RAILWAY_TOKEN railway logs \
+            --service "$SECURITY_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --lines 1000 \
+            --json > /tmp/security-runtime.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -eq 0 ] || { cat /tmp/security-runtime.log; exit "$rc"; }
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          src = Path('/tmp/security-runtime.log').read_text(errors='replace')
+          keep = []
+          keys = (
+              '/security/v1/auth/login',
+              '/security/v1/platform/users',
+              'AUTH_TOKEN_INVALID',
+              'USER_NOT_ACTIVE',
+              'USER_NOT_ONBOARDED',
+              'PERMISSION_DENIED',
+              'ClerkCredential',
+              'HumanActor',
+          )
+          for line in src.splitlines():
+              if any(k.lower() in line.lower() for k in keys):
+                  line = re.sub(r'(?i)(authorization|password|secret|token)\s*[:=]\s*[^ ,}\"]+', r'\1=<redacted>', line)
+                  line = re.sub(r'Bearer\s+[A-Za-z0-9._~-]+', 'Bearer <redacted>', line, flags=re.I)
+                  keep.append(line[:3000])
+          print('\n'.join(keep[-250:]))
+          PY
