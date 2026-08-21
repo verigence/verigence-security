@@ -34,6 +34,10 @@ class PlatformLoginResult:
     must_change_password: bool
 
 
+class TenantCreateIdempotencyConflict(ValueError):
+    pass
+
+
 class PlatformBootstrapService:
     def __init__(self, session: Session, settings: Settings) -> None:
         self.repository = PlatformAdminRepository(session)
@@ -158,12 +162,38 @@ class PlatformTenantService:
         tenant_code: str,
         tenant_name: str,
         correlation_id: str,
+        idempotency_key: str | None = None,
         self_onboarding_enabled: bool = False,
         self_onboarding_token: str | None = None,
     ) -> dict[str, object]:
         now = datetime.now(UTC)
-        tenant_id = str(uuid4())
         try:
+            if idempotency_key is not None:
+                self.repository.acquire_tenant_create_idempotency_lock(
+                    actor_user_id=actor_user_id,
+                    idempotency_key=idempotency_key,
+                )
+                prior = self.repository.tenant_create_receipt(
+                    actor_user_id=actor_user_id,
+                    idempotency_key=idempotency_key,
+                )
+                if prior is not None:
+                    if str(prior["tenant_name"]) != tenant_name:
+                        raise TenantCreateIdempotencyConflict(
+                            "Idempotency-Key was already used for a different Tenant create request"
+                        )
+                    prior_tenant_id = prior["resource_id"]
+                    if prior_tenant_id is None:
+                        raise RuntimeError("Tenant create receipt has no Tenant identifier")
+                    tenant = self.repository.tenant_by_id(str(prior_tenant_id))
+                    if tenant is None:
+                        raise RuntimeError(
+                            "Tenant create receipt exists but the Tenant cannot be reloaded"
+                        )
+                    self.repository.commit()
+                    return tenant
+
+            tenant_id = str(uuid4())
             self.repository.create_tenant(
                 tenant_id=tenant_id,
                 tenant_code=tenant_code,
@@ -185,6 +215,15 @@ class PlatformTenantService:
                     actor_user_id=actor_user_id,
                     now=now,
                 )
+            after_state: dict[str, object] = {
+                "tenantId": tenant_id,
+                "tenantCode": tenant_code,
+                "tenantName": tenant_name,
+                "status": "CONFIGURING",
+                "selfOnboardingConfigured": self_onboarding_token is not None,
+            }
+            if idempotency_key is not None:
+                after_state["idempotencyKey"] = idempotency_key
             self.repository.insert_admin_change(
                 correlation_id=correlation_id,
                 actor_user_id=actor_user_id,
@@ -193,15 +232,7 @@ class PlatformTenantService:
                 resource_id=tenant_id,
                 outcome="SUCCESS",
                 tenant_id=tenant_id,
-                after_state_json=json.dumps(
-                    {
-                        "tenantId": tenant_id,
-                        "tenantCode": tenant_code,
-                        "tenantName": tenant_name,
-                        "status": "CONFIGURING",
-                        "selfOnboardingConfigured": self_onboarding_token is not None,
-                    }
-                ),
+                after_state_json=json.dumps(after_state),
                 now=now,
             )
             self.repository.commit()
