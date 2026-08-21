@@ -47,6 +47,24 @@ def _use_actor(actor: HumanActorContext) -> None:
     app.dependency_overrides[security_human_actor] = lambda: actor
 
 
+def test_uc02_human_admin_context_returns_live_security_scopes() -> None:
+    _use_actor(
+        _actor(
+            AdminScope("SuperAdmin", "PLATFORM", None),
+            AdminScope("ModuleAdmin", "MODULE", "di"),
+        )
+    )
+    response = client.get("/security/v1/platform/admin-context")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["userId"] == ACTOR
+    assert body["isSuperAdmin"] is True
+    assert body["adminScopes"] == [
+        {"roleKey": "SuperAdmin", "scopeType": "PLATFORM", "scopeId": None},
+        {"roleKey": "ModuleAdmin", "scopeType": "MODULE", "scopeId": "di"},
+    ]
+
+
 def test_role_aligned_groups_are_read_only_and_legacy_mutation_routes_are_inactive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
