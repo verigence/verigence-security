@@ -961,7 +961,7 @@ jobs:
                            vpn_unknown_action,configuration_version,status,updated_by_user_id,updated_at_utc)
                           VALUES
                           (:tenant_id,:max_active_devices_per_user,:max_geo_accuracy_meters,:max_geo_age_seconds,
-                           :geo_revalidation_interval_seconds,:access_token_ttl_minutes,machine_token_ttl_minutes,
+                           :geo_revalidation_interval_seconds,:access_token_ttl_minutes,:machine_token_ttl_minutes,
                            :session_idle_timeout_minutes,:session_max_duration_minutes,:vpn_detected_action,
                            :vpn_unknown_action,:configuration_version,'ACTIVE',:updated_by_user_id,:updated_at_utc)
                           """
@@ -1096,7 +1096,7 @@ jobs:
           }
           missing = sorted(key for key in required if not values.get(key))
           if missing:
-            raise SystemExit('Required Security runtime variables are missing: ' + ', '.join(missing))
+              raise SystemExit('Required Security runtime variables are missing: ' + ', '.join(missing))
 
           database_url = str(values['DATABASE_URL'])
           engine = create_engine(database_url, pool_pre_ping=True)
@@ -1400,7 +1400,7 @@ jobs:
                       WHERE client_id='audit-core'
                       FOR UPDATE
                       """
-                  ),
+                  )
               ).mappings().first()
 
               if credential is None:
