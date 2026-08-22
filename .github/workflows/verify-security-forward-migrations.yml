@@ -1,0 +1,133 @@
+name: Verify Security Forward-Only DEV Release
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'verify/security-forward-migrations-dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_REVISION: ecdf081d2c7446a70aeaa2964976e0ac1f94f3ea
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      SECURITY_SERVICE: security
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+          npm install --global @railway/cli
+
+      - name: Verify migration ledger adoption
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$MIGRATION_DATABASE_URL"
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo 'Unsupported migration database URL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          psql "$db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+          count="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM security.schema_migrations
+            WHERE migration_name BETWEEN '0001_security_baseline_v1.3.sql'
+                                     AND '0024_uc02_tenant_hard_delete.sql';
+          ")"
+          [ "$count" = "24" ] || {
+            echo "::error::Expected 24 adopted Security migrations; found $count"
+            exit 1
+          }
+
+          wrong_revision="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*) FROM security.schema_migrations
+            WHERE migration_name BETWEEN '0001_security_baseline_v1.3.sql'
+                                     AND '0024_uc02_tenant_hard_delete.sql'
+              AND applied_by_revision <> '$EXPECTED_REVISION';
+          ")"
+          [ "$wrong_revision" = "0" ] || {
+            echo "::error::Historical Security migration adoption is not owned by expected DEV revision."
+            exit 1
+          }
+
+          ledger_total="$(psql "$db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT count(*) FROM security.schema_migrations;')"
+          [ "$ledger_total" -ge 24 ]
+          echo "SECURITY_LEDGER_ROWS_0001_0024=24"
+          echo "SECURITY_LEDGER_ADOPTION_REVISION=$EXPECTED_REVISION"
+          echo "SECURITY_FORWARD_ONLY_LEDGER=PASS"
+
+      - name: Verify Railway deployment and public health
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$RAILWAY_API_TOKEN" ]
+          [ -n "$RAILWAY_TOKEN" ]
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/link.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" '[.[] | select(.name == $service)] | first | .id // empty' /tmp/services.json)"
+          [ -n "$service_id" ]
+
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status createdAt } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || {
+            printf '%s\n' "$response" | jq -c '.errors'
+            exit 1
+          }
+          node="$(printf '%s' "$response" | jq -c --arg service "$service_id" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // {}')"
+          deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+          status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+          created_at="$(printf '%s' "$node" | jq -r '.latestDeployment.createdAt // empty')"
+          image="$(printf '%s' "$node" | jq -r '.source.image // empty')"
+          [ -n "$deployment_id" ]
+          [ "$status" = "SUCCESS" ] || {
+            echo "::error::Latest Security Railway deployment is $status"
+            exit 1
+          }
+          [ -n "$image" ]
+
+          domain_query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { domain } } }'
+          domain_variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$service_id" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          domain_body="$(jq -cn --arg query "$domain_query" --argjson variables "$domain_variables" '{query:$query,variables:$variables}')"
+          domain_response="$(curl --fail-with-body --silent --show-error \
+            --request POST --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' --data "$domain_body")"
+          domain="$(printf '%s' "$domain_response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          [ -n "$domain" ]
+          base="https://$domain"
+          curl --fail --silent --show-error "$base/health/ready" >/tmp/ready.json
+          curl --fail --silent --show-error "$base/health/live" >/tmp/live.json
+          curl --fail --silent --show-error "$base/.well-known/jwks.json" >/tmp/jwks.json
+          jq -e '.keys | type == "array" and length > 0' /tmp/jwks.json >/dev/null
+
+          echo "SECURITY_RAILWAY_DEPLOYMENT=$deployment_id"
+          echo "SECURITY_RAILWAY_CREATED_AT=$created_at"
+          echo "SECURITY_RAILWAY_IMAGE=$image"
+          echo "SECURITY_READINESS=PASS"
+          echo "SECURITY_LIVENESS=PASS"
+          echo "SECURITY_JWKS=PASS"
