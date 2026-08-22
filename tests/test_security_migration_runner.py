@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "apply_security_
 SPEC = importlib.util.spec_from_file_location("security_migration_runner", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 migration_runner = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = migration_runner
 SPEC.loader.exec_module(migration_runner)
 
 Migration = migration_runner.Migration
