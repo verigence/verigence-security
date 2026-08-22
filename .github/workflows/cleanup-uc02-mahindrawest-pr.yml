@@ -35,8 +35,10 @@ jobs:
           from verigence_security.services.platform_admin import PlatformTenantService
 
           raw=os.environ['MIGRATION_DATABASE_URL']
-          if raw.startswith('postgresql+psycopg://') or raw.startswith('postgresql+asyncpg://'):
-              raw='postgresql://' + raw.split('://',1)[1]
+          if raw.startswith('postgresql://'):
+              raw='postgresql+psycopg://' + raw.split('://',1)[1]
+          elif raw.startswith('postgres://'):
+              raw='postgresql+psycopg://' + raw.split('://',1)[1]
           engine=create_engine(raw)
           with Session(engine) as session:
               rows=session.execute(text("SELECT tenant_id,status FROM security.tenants WHERE tenant_name=:n ORDER BY created_at_utc,tenant_id"), {'n':'MahindraWest'}).mappings().all()
