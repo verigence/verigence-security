@@ -52,6 +52,7 @@ class ServiceIntegrationTokenService:
                 ServiceTokenClaims(
                     subject=credential.integration_key,
                     audience=target,
+                    issued_at=now,
                     expires_at=expires_at,
                 )
             )
