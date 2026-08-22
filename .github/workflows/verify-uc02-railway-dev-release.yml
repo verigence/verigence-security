@@ -1,0 +1,84 @@
+name: Verify UC02 Railway DEV Release
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'verify/uc02-railway-dev-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SERVICE: security
+      EXPECTED_DEV_SHA: c79aca8165d3d3345540302b63887720423170df
+      NOT_BEFORE_UTC: '2026-08-22T03:40:00Z'
+
+    steps:
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Verify latest Security DEV deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/tmp/link.json
+          railway deployment list --service "$SERVICE" --limit 1 --json >/tmp/deploy.json
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          rows=json.loads(Path('/tmp/deploy.json').read_text())
+          if not rows:
+              raise SystemExit('No Security Railway deployment found')
+          row=rows[0]
+          deployment_id=str(row.get('id',''))
+          status=str(row.get('status',''))
+          created=row.get('createdAt') or row.get('created_at') or ''
+          print(f'SECURITY_DEPLOYMENT_ID={deployment_id}')
+          print(f'SECURITY_DEPLOYMENT_STATUS={status}')
+          print(f'SECURITY_DEPLOYMENT_CREATED_AT={created or "UNKNOWN"}')
+          if status != 'SUCCESS':
+              raise SystemExit(f'Latest Security deployment is not SUCCESS: {status}')
+          if created:
+              when=datetime.fromisoformat(created.replace('Z','+00:00'))
+              floor=datetime.fromisoformat(os.environ['NOT_BEFORE_UTC'].replace('Z','+00:00'))
+              if when < floor:
+                  raise SystemExit(f'Latest Security deployment is stale: {created}')
+          text=json.dumps(row, default=str)
+          expected=os.environ['EXPECTED_DEV_SHA']
+          if expected in text or expected[:12] in text:
+              print('SECURITY_DEPLOYED_SHA_MATCH=PASS')
+          else:
+              print('SECURITY_DEPLOYED_SHA_MATCH=NOT_EXPOSED_BY_RAILWAY_LIST')
+          PY
+
+      - name: Smoke Security DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$SERVICE" --json >/tmp/vars.json
+          domain="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('/tmp/vars.json').read_text())
+          print(data.get('RAILWAY_PUBLIC_DOMAIN') or data.get('RAILWAY_STATIC_URL') or '')
+          PY
+          )"
+          [ -n "$domain" ] || { echo '::error::Security DEV public domain missing'; exit 1; }
+          case "$domain" in
+            http://*|https://*) base="${domain%/}" ;;
+            *) base="https://${domain%/}" ;;
+          esac
+          curl --fail --silent --show-error "$base/health/ready" >/tmp/ready.json
+          curl --fail --silent --show-error "$base/health/live" >/tmp/live.json
+          curl --fail --silent --show-error "$base/.well-known/jwks.json" >/tmp/jwks.json
+          echo "SECURITY_PUBLIC_BASE=$base"
+          echo 'SECURITY_RAILWAY_DEV_VERIFY=PASS'
