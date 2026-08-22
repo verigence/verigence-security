@@ -55,30 +55,31 @@ jobs:
           psql "$db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
           echo 'SECURITY_MIGRATION_DATABASE=PASS'
 
-      - name: Apply current Security migrations in approved order
+      - name: Reconcile current Security migration state after historical replay
         shell: bash
         run: |
           set -euo pipefail
-          table_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT count(*)
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE n.nspname='security' AND c.relkind IN ('r','p');
-          ")"
+          tenants_exists="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('security.tenants') IS NOT NULL;")"
+          [ "$tenants_exists" = "t" ] || { echo '::error::Security schema drift'; exit 1; }
 
-          if [ "$table_count" = "0" ]; then
-            expected="175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d"
-            actual="$(sha256sum migrations/0001_security_baseline_v1.3.sql | awk '{print $1}')"
-            [ "$actual" = "$expected" ] || { echo '::error::Approved Security baseline digest mismatch'; exit 1; }
-            psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0001_security_baseline_v1.3.sql
-          else
-            tenants_exists="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('security.tenants') IS NOT NULL;")"
-            [ "$tenants_exists" = "t" ] || { echo '::error::Security schema drift'; exit 1; }
-          fi
+          # 0002 was already replayed by the failed release attempt and committed its v1.4
+          # static bundles. Replay 0003+ to restore current state, but do not allow 0003 to
+          # narrow the USER lifecycle back below the later v2 REJECTED-capable constraint.
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('migrations/0003_global_user_onboarding_v1.4.2.sql').read_text()
+          old = "CHECK (status IN ('PENDING','INVITED','ACTIVE','SUSPENDED','DISABLED','EXITED'));"
+          new = "CHECK (status IN ('PENDING','REJECTED','ACTIVE','SUSPENDED','DISABLED','INVITED','EXITED'));"
+          if old not in src:
+              raise SystemExit('Expected v1.4.2 USER status constraint was not found for replay patch')
+          Path('/tmp/0003_replay_compatible.sql').write_text(src.replace(old, new, 1))
+          PY
+
+          echo 'Applying 0003_global_user_onboarding_v1.4.2.sql with current lifecycle replay compatibility'
+          psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f /tmp/0003_replay_compatible.sql
 
           for migration in \
-            migrations/0002_security_admin_control_plane_v1.4.sql \
-            migrations/0003_global_user_onboarding_v1.4.2.sql \
             migrations/0004_v142_security_event_outcome_width.sql \
             migrations/0005_super_admin_full_authority.sql \
             migrations/0006_phase1_self_onboarding_v1.4.5.sql \
@@ -104,7 +105,33 @@ jobs:
             echo "Applying $(basename "$migration")"
             psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
           done
-          echo 'SECURITY_MIGRATIONS=PASS'
+
+          rejected_status_ready="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT EXISTS (
+              SELECT 1
+              FROM pg_constraint c
+              JOIN pg_class t ON t.oid=c.conrelid
+              JOIN pg_namespace n ON n.oid=t.relnamespace
+              WHERE n.nspname='security'
+                AND t.relname='users'
+                AND c.contype='c'
+                AND pg_get_constraintdef(c.oid) LIKE '%REJECTED%'
+            );
+          ")"
+          [ "$rejected_status_ready" = "t" ] || { echo '::error::Current USER lifecycle constraint not restored'; exit 1; }
+
+          active_permission_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM security.permissions WHERE status='ACTIVE';")"
+          super_admin_permission_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM security.platform_role_permissions prp
+            JOIN security.permissions p ON p.permission_key=prp.permission_key
+            WHERE prp.role_key='platform.super_admin' AND p.status='ACTIVE';
+          ")"
+          [ "$super_admin_permission_count" = "$active_permission_count" ] || {
+            echo "::error::Super Admin full-authority invariant was not restored ($super_admin_permission_count/$active_permission_count)."
+            exit 1
+          }
+          echo 'SECURITY_MIGRATION_RECONCILIATION=PASS'
 
       - name: Link and verify approved Railway DEV target
         shell: bash
