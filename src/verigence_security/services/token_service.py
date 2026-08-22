@@ -47,6 +47,7 @@ class ServiceTokenClaims:
     subject: str
     audience: str
     expires_at: datetime
+    issued_at: datetime | None = None
 
 
 def _validate_actor_claim_shape(claims: AccessTokenClaims) -> None:
@@ -148,7 +149,7 @@ class TokenService:
         if not claims.subject.strip() or not claims.audience.strip():
             raise ValueError("Service token subject and audience are required")
 
-        now = datetime.now(UTC)
+        now = claims.issued_at or datetime.now(UTC)
         payload: dict[str, Any] = {
             "iss": self.settings.security_token_issuer,
             "sub": claims.subject,
