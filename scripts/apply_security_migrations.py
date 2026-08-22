@@ -208,8 +208,24 @@ def adopt_existing_schema(
 
     verify_legacy_schema_ready_for_adoption(database_url)
     adopted = migrations[: target_index + 1]
-    for migration in adopted:
-        record_migration(database_url, migration, revision)
+    values = ",\n".join(
+        "("
+        f"{sql_literal(migration.name)},"
+        f"{sql_literal(migration.sha256)},"
+        f"{sql_literal(revision)}"
+        ")"
+        for migration in adopted
+    )
+    run_psql(
+        database_url,
+        sql=(
+            "BEGIN;\n"
+            f"INSERT INTO {LEDGER_TABLE} "
+            "(migration_name,sha256,applied_by_revision) VALUES\n"
+            f"{values};\n"
+            "COMMIT;"
+        ),
+    )
     return len(adopted)
 
 
