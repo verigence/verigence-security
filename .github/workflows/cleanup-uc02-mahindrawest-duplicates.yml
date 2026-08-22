@@ -1,0 +1,104 @@
+name: Cleanup UC02 MahindraWest duplicate tenants
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    if: github.head_ref == 'cleanup/uc02-mahindrawest-duplicates'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Security
+        run: python -m pip install -e .
+      - name: Guard and hard-delete exactly six duplicate DEV tenants
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${MIGRATION_DATABASE_URL:-}" ] || { echo 'MIGRATION_DATABASE_URL is not configured'; exit 1; }
+          python - <<'PY'
+          import os
+          from uuid import uuid4
+
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.orm import Session
+
+          from verigence_security.services.platform_admin import PlatformTenantService
+
+          raw = os.environ['MIGRATION_DATABASE_URL']
+          for prefix in ('postgresql+psycopg://', 'postgresql+asyncpg://'):
+              if raw.startswith(prefix):
+                  raw = 'postgresql://' + raw.split('://', 1)[1]
+                  break
+          engine = create_engine(raw)
+          with Session(engine) as session:
+              targets = session.execute(
+                  text(
+                      """
+                      SELECT tenant_id, status
+                      FROM security.tenants
+                      WHERE tenant_name=:tenant_name
+                      ORDER BY created_at_utc, tenant_id
+                      """
+                  ),
+                  {'tenant_name': 'MahindraWest'},
+              ).mappings().all()
+              if len(targets) != 6:
+                  raise SystemExit(f'Cleanup guard failed: expected exactly 6 MahindraWest tenants, found {len(targets)}')
+              if any(str(row['status']) != 'CONFIGURING' for row in targets):
+                  raise SystemExit('Cleanup guard failed: every target must still be CONFIGURING')
+
+              actor_by_tenant = {}
+              for row in targets:
+                  tenant_id = str(row['tenant_id'])
+                  actor_id = session.execute(
+                      text(
+                          """
+                          SELECT actor_user_id
+                          FROM security.admin_changes
+                          WHERE operation_key='platform.tenant.create'
+                            AND resource_type='tenant'
+                            AND resource_id=:tenant_id
+                            AND outcome='SUCCESS'
+                          ORDER BY occurred_at_utc DESC
+                          LIMIT 1
+                          """
+                      ),
+                      {'tenant_id': tenant_id},
+                  ).scalar_one_or_none()
+                  if actor_id is None:
+                      raise SystemExit('Cleanup guard failed: a target has no successful Tenant-create audit actor')
+                  actor_by_tenant[tenant_id] = str(actor_id)
+
+              deleted = 0
+              for row in targets:
+                  tenant_id = str(row['tenant_id'])
+                  result = PlatformTenantService(session).hard_delete_tenant(
+                      actor_user_id=actor_by_tenant[tenant_id],
+                      tenant_id=tenant_id,
+                      correlation_id=f'uc02-duplicate-cleanup-{uuid4()}',
+                  )
+                  if result is None:
+                      raise SystemExit('Supported hard-delete unexpectedly returned not-found for a guarded target')
+                  deleted += 1
+
+              remaining = session.execute(
+                  text("SELECT count(*) FROM security.tenants WHERE tenant_name=:tenant_name"),
+                  {'tenant_name': 'MahindraWest'},
+              ).scalar_one()
+              if int(remaining) != 0:
+                  raise SystemExit(f'Cleanup verification failed: {remaining} MahindraWest tenants remain')
+              print(f'SECURITY_UC02_DUPLICATE_TENANTS_DELETED={deleted}')
+              print('SECURITY_UC02_DUPLICATE_TENANTS_REMAINING=0')
+          engine.dispose()
+          PY
