@@ -1,0 +1,256 @@
+name: Repair Security DEV Release
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  repair-release:
+    if: github.head_ref == 'verify/uc02-railway-dev-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      DEPLOY_SHA: 3e8e8f01d27dce2ab9794d0882caf7699b6c48dd
+      IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      SECURITY_SERVICE: security
+    steps:
+      - name: Check out exact current Security DEV SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Install PostgreSQL client and Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+
+      - name: Resolve Security migration database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::MIGRATION_DATABASE_URL is not PostgreSQL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          echo "SECURITY_MIGRATION_DATABASE_URL=$db" >> "$GITHUB_ENV"
+          psql "$db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+          echo 'SECURITY_MIGRATION_DATABASE=PASS'
+
+      - name: Apply current Security migrations in approved order
+        shell: bash
+        run: |
+          set -euo pipefail
+          table_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT count(*)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='security' AND c.relkind IN ('r','p');
+          ")"
+
+          if [ "$table_count" = "0" ]; then
+            expected="175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d"
+            actual="$(sha256sum migrations/0001_security_baseline_v1.3.sql | awk '{print $1}')"
+            [ "$actual" = "$expected" ] || { echo '::error::Approved Security baseline digest mismatch'; exit 1; }
+            psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/0001_security_baseline_v1.3.sql
+          else
+            tenants_exists="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('security.tenants') IS NOT NULL;")"
+            [ "$tenants_exists" = "t" ] || { echo '::error::Security schema drift'; exit 1; }
+          fi
+
+          for migration in \
+            migrations/0002_security_admin_control_plane_v1.4.sql \
+            migrations/0003_global_user_onboarding_v1.4.2.sql \
+            migrations/0004_v142_security_event_outcome_width.sql \
+            migrations/0005_super_admin_full_authority.sql \
+            migrations/0006_phase1_self_onboarding_v1.4.5.sql \
+            migrations/0007_clerk_email_otp_onboarding_v1.4.6.sql \
+            migrations/0008_privileged_access_maker_checker_v1.4.7.sql \
+            migrations/0009_backend_email_otp_facade_v1.4.8.sql \
+            migrations/0010_audit_core_di_permissions.sql \
+            migrations/0011_security_v2_role_foundation.sql \
+            migrations/0012_v2_super_admin_reconciliation.sql \
+            migrations/0013_v2_operating_role_defaults.sql \
+            migrations/0014_phase1_test_identity.sql \
+            migrations/0015_v2_user_lifecycle_and_deletion.sql \
+            migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql \
+            migrations/0017_di_permission_catalogue_sync.sql \
+            migrations/0018_uc001_direct_onboarding_key.sql \
+            migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql \
+            migrations/0020_uc001_identity_reuse.sql \
+            migrations/0021_dev_canonical_human_identities.sql \
+            migrations/0022_uc001_clerk_otp_verification_bridge.sql \
+            migrations/0023_password_recovery.sql \
+            migrations/0024_uc02_tenant_hard_delete.sql
+          do
+            echo "Applying $(basename "$migration")"
+            psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
+          done
+          echo 'SECURITY_MIGRATIONS=PASS'
+
+      - name: Link and verify approved Railway DEV target
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::RAILWAY_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --json >/tmp/link.json
+          env -u RAILWAY_TOKEN railway status --json >/tmp/status.json
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+          [ "$(jq -r '.id // empty' /tmp/status.json)" = "$PLATFORM_PROJECT_ID" ] || { echo '::error::Wrong Railway project'; exit 1; }
+          service_id="$(jq -r --arg service "$SECURITY_SERVICE" '[.[] | select(.name == $service)] | first | .id // empty' /tmp/services.json)"
+          [ -n "$service_id" ] || { echo '::error::Security service missing'; exit 1; }
+          echo "RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
+          echo 'SECURITY_RAILWAY_TARGET=PASS'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish exact immutable Security image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ env.DEPLOY_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.DEPLOY_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      - name: Validate published image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE_REPOSITORY}@${{ steps.build.outputs.digest }}"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          docker manifest inspect "$image_ref" >/dev/null
+          echo "SECURITY_IMAGE_REF=$image_ref"
+          echo 'SECURITY_IMMUTABLE_IMAGE=PASS'
+
+      - name: Snapshot current Security deployment
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || exit 1
+          node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // {}')"
+          echo "id=$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')" >> "$GITHUB_OUTPUT"
+
+      - name: Attach exact image to Security service
+        shell: bash
+        run: |
+          set -euo pipefail
+          mutation='mutation EnvironmentPatchCommit($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }'
+          patch="$(jq -cn --arg service "$RAILWAY_SERVICE_ID" --arg image "${{ steps.image.outputs.image_ref }}" '{services:{($service):{source:{image:$image}}}}')"
+          variables="$(jq -cn --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg message "Deploy verigence-security DEV ${DEPLOY_SHA}" --argjson patch "$patch" '{environmentId:$environment,patch:$patch,commitMessage:$message}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || {
+            printf '%s\n' "$response" | jq -c '.errors' || true
+            exit 1
+          }
+          echo 'SECURITY_ONLY_IMAGE_MUTATION=PASS'
+
+      - name: Wait for fresh Security deployment
+        shell: bash
+        env:
+          PREVIOUS_DEPLOYMENT_ID: ${{ steps.before.outputs.id }}
+          EXPECTED_IMAGE: ${{ steps.image.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Project-Access-Token: $RAILWAY_TOKEN" \
+              --header 'Content-Type: application/json' --data "$body")"
+            [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "false" ] || exit 1
+            node="$(printf '%s' "$response" | jq -c --arg service "$RAILWAY_SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // {}')"
+            image="$(printf '%s' "$node" | jq -r '.source.image // empty')"
+            deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+            status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+            if [[ "$image" != "$EXPECTED_IMAGE" || -z "$deployment_id" || "$deployment_id" == "${PREVIOUS_DEPLOYMENT_ID:-}" ]]; then
+              sleep 5
+              continue
+            fi
+            echo "SECURITY_DEPLOYMENT_ID=$deployment_id"
+            echo "SECURITY_DEPLOYMENT_STATUS=$status"
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED|SKIPPED) exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+          echo '::error::Timed out waiting for Security deployment'; exit 1
+
+      - name: Smoke Security DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway variable list --service "$SECURITY_SERVICE" --json >/tmp/vars.json
+          domain="$(jq -r '.RAILWAY_PUBLIC_DOMAIN // .RAILWAY_STATIC_URL // empty' /tmp/vars.json)"
+          [ -n "$domain" ] || { echo '::error::Security public domain missing'; exit 1; }
+          case "$domain" in
+            http://*|https://*) base="${domain%/}" ;;
+            *) base="https://${domain%/}" ;;
+          esac
+          for attempt in $(seq 1 30); do
+            ready="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$base/health/ready" || true)"
+            live="$(curl --silent --show-error --output /tmp/live.json --write-out '%{http_code}' "$base/health/live" || true)"
+            jwks="$(curl --silent --show-error --output /tmp/jwks.json --write-out '%{http_code}' "$base/.well-known/jwks.json" || true)"
+            if [[ "$ready" == "200" && "$live" == "200" && "$jwks" == "200" ]] && jq -e '.keys | type == "array" and length > 0' /tmp/jwks.json >/dev/null; then
+              echo "SECURITY_PUBLIC_BASE=$base"
+              echo 'SECURITY_READINESS=PASS'
+              echo 'SECURITY_LIVENESS=PASS'
+              echo 'SECURITY_JWKS=PASS'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::Security public smoke checks failed'; exit 1
