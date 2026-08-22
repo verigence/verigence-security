@@ -49,7 +49,7 @@ jobs:
               actors={}
               for r in rows:
                   tid=str(r['tenant_id'])
-                  actor=session.execute(text("SELECT actor_user_id FROM security.admin_changes WHERE operation_key='platform.tenant.create' AND resource_type='tenant' AND resource_id=:tid AND outcome='SUCCESS' ORDER BY occurred_at_utc DESC LIMIT 1"), {'tid':tid}).scalar_one_or_none()
+                  actor=session.execute(text("SELECT actor_user_id FROM security.admin_change_records WHERE operation_key='platform.tenant.create' AND resource_type='tenant' AND resource_id=:tid AND outcome='SUCCESS' ORDER BY occurred_at_utc DESC LIMIT 1"), {'tid':tid}).scalar_one_or_none()
                   if actor is None:
                       raise SystemExit('guard found target without successful create audit actor')
                   actors[tid]=str(actor)
