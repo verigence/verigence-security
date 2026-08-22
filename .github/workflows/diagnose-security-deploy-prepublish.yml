@@ -1,0 +1,90 @@
+name: Diagnose Security DEV Prepublish
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'verify/uc02-railway-dev-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_DEV_SHA: 3e8e8f01d27dce2ab9794d0882caf7699b6c48dd
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      SECURITY_SERVICE: security
+    steps:
+      - name: Check out exact Security DEV SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.EXPECTED_DEV_SHA }}
+
+      - name: Install PostgreSQL client and Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+
+      - name: Verify Security migration DB connectivity
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL missing'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) db="$raw" ;;
+            *) echo '::error::MIGRATION_DATABASE_URL is not PostgreSQL'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          psql "$db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+          echo 'SECURITY_DIAG_DATABASE=PASS'
+
+      - name: Verify Railway target and persisted runtime config
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link \
+            --project "$PLATFORM_PROJECT_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --service "$SECURITY_SERVICE" \
+            --json >/tmp/link.json
+          env -u RAILWAY_TOKEN railway status --json >/tmp/status.json
+          env -u RAILWAY_TOKEN railway variable list --service "$SECURITY_SERVICE" --json >/tmp/vars.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          status=json.loads(Path('/tmp/status.json').read_text())
+          values=json.loads(Path('/tmp/vars.json').read_text())
+          if status.get('id') != os.environ['PLATFORM_PROJECT_ID']:
+              raise SystemExit('Wrong Railway project')
+          required={
+              'DATABASE_URL','CLERK_SECRET_KEY','SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY',
+              'SECURITY_KEY_ID','SECURITY_PRIVATE_KEY_PEM','SECURITY_PUBLIC_KEY_PEM',
+          }
+          missing=sorted(key for key in required if not values.get(key))
+          if missing:
+              raise SystemExit('Missing Security Railway vars: '+','.join(missing))
+          print('SECURITY_DIAG_RAILWAY_CONFIG=PASS')
+          PY
+
+      - name: Build exact Security Docker image locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --tag security-dev-diagnostic .
+          docker run --rm security-dev-diagnostic python --version
+          echo 'SECURITY_DIAG_DOCKER_BUILD=PASS'
