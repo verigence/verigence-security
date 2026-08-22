@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-from scripts.apply_security_migrations import (
-    Migration,
-    adopt_existing_schema,
-    apply_pending_migrations,
-    sql_literal,
-    validate_recorded_migrations,
-)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "apply_security_migrations.py"
+SPEC = importlib.util.spec_from_file_location("security_migration_runner", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
+
+Migration = MODULE.Migration
 
 
-def migration(tmp_path: Path, name: str, checksum: str) -> Migration:
+def migration(tmp_path: Path, name: str, checksum: str):
     path = tmp_path / name
     path.write_text("SELECT 1;\n", encoding="utf-8")
     return Migration(name=name, path=path, sha256=checksum)
@@ -40,24 +44,14 @@ def test_apply_pending_skips_recorded_migrations(
             executed.append(file.name)
         return ""
 
-    def fake_record(
-        database_url: str,
-        item: Migration,
-        revision: str,
-    ) -> None:
+    def fake_record(database_url: str, item, revision: str) -> None:
         del database_url, revision
         recorded.append(item.name)
 
-    monkeypatch.setattr(
-        "scripts.apply_security_migrations.run_psql",
-        fake_run_psql,
-    )
-    monkeypatch.setattr(
-        "scripts.apply_security_migrations.record_migration",
-        fake_record,
-    )
+    monkeypatch.setattr(MODULE, "run_psql", fake_run_psql)
+    monkeypatch.setattr(MODULE, "record_migration", fake_record)
 
-    applied = apply_pending_migrations(
+    applied = MODULE.apply_pending_migrations(
         "postgresql://example",
         [first, second],
         {first.name: first.sha256},
@@ -73,14 +67,14 @@ def test_recorded_checksum_change_is_rejected(tmp_path: Path) -> None:
     item = migration(tmp_path, "0001_security_baseline_v1.3.sql", "a" * 64)
 
     with pytest.raises(RuntimeError, match="checksum changed"):
-        validate_recorded_migrations([item], {item.name: "b" * 64})
+        MODULE.validate_recorded_migrations([item], {item.name: "b" * 64})
 
 
 def test_unknown_ledger_entry_is_rejected(tmp_path: Path) -> None:
     item = migration(tmp_path, "0001_security_baseline_v1.3.sql", "a" * 64)
 
     with pytest.raises(RuntimeError, match="not present"):
-        validate_recorded_migrations(
+        MODULE.validate_recorded_migrations(
             [item],
             {"0999_removed.sql": "c" * 64},
         )
@@ -96,24 +90,18 @@ def test_legacy_adoption_records_only_through_target(
     recorded: list[str] = []
 
     monkeypatch.setattr(
-        "scripts.apply_security_migrations.verify_legacy_schema_ready_for_adoption",
+        MODULE,
+        "verify_legacy_schema_ready_for_adoption",
         lambda database_url: None,
     )
 
-    def fake_record(
-        database_url: str,
-        item: Migration,
-        revision: str,
-    ) -> None:
+    def fake_record(database_url: str, item, revision: str) -> None:
         del database_url, revision
         recorded.append(item.name)
 
-    monkeypatch.setattr(
-        "scripts.apply_security_migrations.record_migration",
-        fake_record,
-    )
+    monkeypatch.setattr(MODULE, "record_migration", fake_record)
 
-    adopted = adopt_existing_schema(
+    adopted = MODULE.adopt_existing_schema(
         "postgresql://example",
         [first, second, third],
         second.name,
@@ -125,4 +113,8 @@ def test_legacy_adoption_records_only_through_target(
 
 
 def test_sql_literal_escapes_single_quotes() -> None:
-    assert sql_literal("release'42") == "'release''42'"
+    assert MODULE.sql_literal("release'42") == "'release''42'"
+
+
+def test_script_loaded_as_module() -> None:
+    assert isinstance(MODULE, ModuleType)
