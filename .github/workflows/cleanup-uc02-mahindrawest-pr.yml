@@ -1,0 +1,64 @@
+name: Guarded UC02 MahindraWest cleanup
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup-six-mahindrawest-tenants:
+    if: github.event.pull_request.head.ref == 'cleanup/uc02-mahindrawest-duplicates'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e .
+      - name: Delete and verify exactly six duplicate tenants
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${MIGRATION_DATABASE_URL:-}" ] || { echo 'MIGRATION_DATABASE_URL missing'; exit 1; }
+          python - <<'PY'
+          import os
+          from uuid import uuid4
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.orm import Session
+          from verigence_security.services.platform_admin import PlatformTenantService
+
+          raw=os.environ['MIGRATION_DATABASE_URL']
+          if raw.startswith('postgresql+psycopg://') or raw.startswith('postgresql+asyncpg://'):
+              raw='postgresql://' + raw.split('://',1)[1]
+          engine=create_engine(raw)
+          with Session(engine) as session:
+              rows=session.execute(text("SELECT tenant_id,status FROM security.tenants WHERE tenant_name=:n ORDER BY created_at_utc,tenant_id"), {'n':'MahindraWest'}).mappings().all()
+              if len(rows)!=6:
+                  raise SystemExit(f'guard expected 6 rows, found {len(rows)}')
+              if any(str(r['status'])!='CONFIGURING' for r in rows):
+                  raise SystemExit('guard requires all six tenants to be CONFIGURING')
+              actors={}
+              for r in rows:
+                  tid=str(r['tenant_id'])
+                  actor=session.execute(text("SELECT actor_user_id FROM security.admin_changes WHERE operation_key='platform.tenant.create' AND resource_type='tenant' AND resource_id=:tid AND outcome='SUCCESS' ORDER BY occurred_at_utc DESC LIMIT 1"), {'tid':tid}).scalar_one_or_none()
+                  if actor is None:
+                      raise SystemExit('guard found target without successful create audit actor')
+                  actors[tid]=str(actor)
+              for r in rows:
+                  tid=str(r['tenant_id'])
+                  result=PlatformTenantService(session).hard_delete_tenant(actor_user_id=actors[tid], tenant_id=tid, correlation_id=f'uc02-cleanup-{uuid4()}')
+                  if result is None:
+                      raise SystemExit('supported hard-delete returned not-found')
+              remaining=int(session.execute(text("SELECT count(*) FROM security.tenants WHERE tenant_name=:n"), {'n':'MahindraWest'}).scalar_one())
+              if remaining!=0:
+                  raise SystemExit(f'verification failed: {remaining} MahindraWest tenants remain')
+          engine.dispose()
+          print('CLEANUP_RESULT=6_DELETED_0_REMAINING')
+          PY
