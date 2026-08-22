@@ -1,0 +1,32 @@
+name: Verify Security Image Publish
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-image:
+    if: github.head_ref == 'verify/uc02-railway-dev-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      EXPECTED_DEV_SHA: df2bcec3426c1d04c6dca029e1fdc6e921ae8b3d
+      IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
+    steps:
+      - name: Check exact DEV image tag in GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE_REPOSITORY}:sha-${EXPECTED_DEV_SHA}"
+          if docker manifest inspect "$image" >/tmp/manifest.json 2>/tmp/manifest.err; then
+            echo "SECURITY_EXPECTED_IMAGE_TAG=FOUND|$image"
+            digest="$(docker manifest inspect --verbose "$image" 2>/dev/null | jq -r '.Descriptor.digest // empty' || true)"
+            echo "SECURITY_EXPECTED_IMAGE_DIGEST=${digest:-UNKNOWN}"
+          else
+            cat /tmp/manifest.err >&2 || true
+            echo "SECURITY_EXPECTED_IMAGE_TAG=MISSING|$image"
+            exit 1
+          fi
