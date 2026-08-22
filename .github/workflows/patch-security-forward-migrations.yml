@@ -1,0 +1,58 @@
+name: Patch Security Forward Migrations
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'fix/security-forward-only-migrations'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out fix branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Replace historical replay with forward-only runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ci.yml')
+          text = path.read_text(encoding='utf-8')
+          start_marker = '      - name: Apply current Security migrations in approved order\n'
+          keep_marker = '          permission_count="$(psql '
+          start = text.index(start_marker)
+          keep = text.index(keep_marker, start)
+          replacement = '''      - name: Apply pending Security migrations only
+        shell: bash
+        env:
+          SECURITY_MIGRATION_BOOTSTRAP_THROUGH: 0024_uc02_tenant_hard_delete.sql
+        run: |
+          set -euo pipefail
+          python scripts/apply_security_migrations.py \\
+            --database-url "$SECURITY_MIGRATION_DATABASE_URL" \\
+            --revision "$DEPLOY_SHA" \\
+            --bootstrap-existing-through "$SECURITY_MIGRATION_BOOTSTRAP_THROUGH"
+
+'''
+          path.write_text(text[:start] + replacement + text[keep:], encoding='utf-8')
+          PY
+
+      - name: Remove one-time patch workflow and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/patch-security-forward-migrations.yml
+          git config user.name 'Verigence-admin'
+          git config user.email 'jbrconsulting.it@gmail.com'
+          git add .github/workflows/ci.yml
+          git commit -m 'fix(ci): make Security migrations forward-only'
+          git push origin HEAD:${{ github.head_ref }}
