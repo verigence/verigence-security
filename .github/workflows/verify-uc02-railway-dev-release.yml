@@ -28,11 +28,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/tmp/link.json
-          railway deployment list --service "$SERVICE" --limit 1 --json >/tmp/deploy.json
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::Security RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/tmp/link.json
+          env -u RAILWAY_TOKEN railway deployment list --service "$SERVICE" --limit 1 --json >/tmp/deploy.json
           python - <<'PY'
           import json, os
-          from datetime import datetime, timezone
+          from datetime import datetime
           from pathlib import Path
 
           rows=json.loads(Path('/tmp/deploy.json').read_text())
@@ -64,7 +65,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          railway variable list --service "$SERVICE" --json >/tmp/vars.json
+          env -u RAILWAY_TOKEN railway variable list --service "$SERVICE" --json >/tmp/vars.json
           domain="$(python - <<'PY'
           import json
           from pathlib import Path
