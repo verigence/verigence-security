@@ -167,63 +167,16 @@ jobs:
           psql "$database_url" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
           echo "SECURITY_MIGRATION_DATABASE=PASS"
 
-      - name: Apply current Security migrations in approved order
+      - name: Apply pending Security migrations only
         shell: bash
+        env:
+          SECURITY_MIGRATION_BOOTSTRAP_THROUGH: 0024_uc02_tenant_hard_delete.sql
         run: |
           set -euo pipefail
-          table_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT count(*)
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE n.nspname='security' AND c.relkind IN ('r','p');
-          ")"
-
-          if [ "$table_count" = "0" ]; then
-            expected="175d10780659c54f402980b08ea209cd34139c9ad28df6c4a758d521c7ca606d"
-            actual="$(sha256sum migrations/0001_security_baseline_v1.3.sql | awk '{print $1}')"
-            [ "$actual" = "$expected" ] || {
-              echo "::error::Approved Security v1.3 baseline digest mismatch."
-              exit 1
-            }
-            psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
-              -f migrations/0001_security_baseline_v1.3.sql
-          else
-            tenants_exists="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
-              "SELECT to_regclass('security.tenants') IS NOT NULL;")"
-            [ "$tenants_exists" = "t" ] || {
-              echo "::error::Security schema is partially populated or drifted; refusing migration."
-              exit 1
-            }
-          fi
-
-          for migration in \
-            migrations/0002_security_admin_control_plane_v1.4.sql \
-            migrations/0003_global_user_onboarding_v1.4.2.sql \
-            migrations/0004_v142_security_event_outcome_width.sql \
-            migrations/0005_super_admin_full_authority.sql \
-            migrations/0006_phase1_self_onboarding_v1.4.5.sql \
-            migrations/0007_clerk_email_otp_onboarding_v1.4.6.sql \
-            migrations/0008_privileged_access_maker_checker_v1.4.7.sql \
-            migrations/0009_backend_email_otp_facade_v1.4.8.sql \
-            migrations/0010_audit_core_di_permissions.sql \
-            migrations/0011_security_v2_role_foundation.sql \
-            migrations/0012_v2_super_admin_reconciliation.sql \
-            migrations/0013_v2_operating_role_defaults.sql \
-            migrations/0014_phase1_test_identity.sql \
-            migrations/0015_v2_user_lifecycle_and_deletion.sql \
-            migrations/0016_v2_guarded_legacy_rbac_reconciliation.sql \
-            migrations/0017_di_permission_catalogue_sync.sql \
-            migrations/0018_uc001_direct_onboarding_key.sql \
-            migrations/0019_dev_superadmin_clerk_subject_reconciliation.sql \
-            migrations/0020_uc001_identity_reuse.sql \
-            migrations/0021_dev_canonical_human_identities.sql \
-            migrations/0022_uc001_clerk_otp_verification_bridge.sql \
-            migrations/0023_password_recovery.sql \
-            migrations/0024_uc02_tenant_hard_delete.sql
-          do
-            echo "Applying $(basename "$migration")"
-            psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
-          done
+          python scripts/apply_security_migrations.py \
+            --database-url "$SECURITY_MIGRATION_DATABASE_URL" \
+            --revision "$DEPLOY_SHA" \
+            --bootstrap-existing-through "$SECURITY_MIGRATION_BOOTSTRAP_THROUGH"
 
           permission_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
             SELECT count(*) FROM security.permissions
