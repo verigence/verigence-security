@@ -1,4 +1,5 @@
 name: Ops deploy and verify Project Administration Security fix
+# Retry after applying Ruff's exact import grouping.
 
 on:
   pull_request:
