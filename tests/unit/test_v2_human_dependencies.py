@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from verigence_security.api import v2_human_dependencies as dependencies
-from verigence_security.services.v2_human_actor import AdminScope, HumanActorContext
+from verigence_security.services.v2_human_actor import (
+    AdminScope,
+    HumanActorContext,
+)
 
 
 USER_ID = "00000000-0000-4000-8000-000000000001"
