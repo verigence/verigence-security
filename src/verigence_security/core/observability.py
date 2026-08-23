@@ -83,6 +83,14 @@ class StructuredJsonFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"), default=str)
 
 
+def attach_trusted_user_id(user_id: str) -> None:
+    """Attach an already-authenticated opaque Verigence user ID to the current trace."""
+
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute("verigence.user.id", user_id)
+
+
 def _service_version() -> str:
     return (
         os.getenv("VERIGENCE_GIT_SHA")
