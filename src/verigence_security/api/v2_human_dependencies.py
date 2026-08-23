@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
+from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.db.session import build_session_factory
 from verigence_security.services.token_service import TokenService
 from verigence_security.services.v2_human_actor import (
@@ -39,9 +40,11 @@ def security_human_user_id(
     if not isinstance(subject, str) or not subject.strip():
         raise security_error("AUTH_TOKEN_INVALID")
     try:
-        return str(UUID(subject))
+        user_id = str(UUID(subject))
     except ValueError as exc:
         raise security_error("AUTH_TOKEN_INVALID") from exc
+    attach_trusted_user_id(user_id)
+    return user_id
 
 
 def security_human_actor(
