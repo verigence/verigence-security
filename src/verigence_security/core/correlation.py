@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from uuid import uuid4
 
 from fastapi import Request
+from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
@@ -29,6 +30,12 @@ def current_correlation_id() -> str:
     return value or str(uuid4())
 
 
+def _attach_to_active_span(correlation_id: str) -> None:
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute("verigence.correlation_id", correlation_id)
+
+
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         supplied = request.headers.get(HEADER)
@@ -38,6 +45,7 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
             # out in IMPLEMENTATION_STATUS as a v1.3 contract clarification to baseline.
             cid = str(uuid4())
             request.state.correlation_id = cid
+            _attach_to_active_span(cid)
             error_response = JSONResponse(
                 status_code=400,
                 content={
@@ -55,6 +63,7 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
         cid = supplied or str(uuid4())
         token = correlation_id_ctx.set(cid)
         request.state.correlation_id = cid
+        _attach_to_active_span(cid)
         try:
             response = await call_next(request)
         finally:
