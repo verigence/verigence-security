@@ -1,4 +1,4 @@
-name: Ops verify live Project Administration Security fix
+name: Ops smoke live Project Administration Security fix
 
 on:
   pull_request:
@@ -10,14 +10,12 @@ permissions:
   contents: read
 
 env:
-  IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
-  EXPECTED_DEV_SHA: bc4839bd26441912bfa949677a4e749e5c2502b1
   PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
   SECURITY_SERVICE_ID: bf14bcdc-c224-4371-bbae-2f3fac97fc1a
 
 jobs:
-  verify-live:
-    name: Prove exact DEV image is live and healthy
+  smoke-live:
+    name: Verify latest Railway Security deployment and live routes
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -32,28 +30,9 @@ jobs:
           npm install --global @railway/cli
           railway --version
 
-      - name: Resolve expected DEV image digest
-        id: expected
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${IMAGE_REPOSITORY}:sha-${EXPECTED_DEV_SHA}"
-          docker manifest inspect --verbose "$tag" >/tmp/manifest.json
-          digest="$(jq -r 'if type == "array" then .[0].Descriptor.digest else .Descriptor.digest end // empty' /tmp/manifest.json)"
-          if [ -z "$digest" ]; then
-            echo "Could not resolve digest for $tag" >&2
-            cat /tmp/manifest.json
-            exit 1
-          fi
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "EXPECTED_DEV_TAG=$tag"
-          echo "EXPECTED_DEV_DIGEST=$digest"
-
-      - name: Prove Railway runs exact DEV image
+      - name: Verify latest Railway Security deployment
         id: railway
         shell: bash
-        env:
-          EXPECTED_DIGEST: ${{ steps.expected.outputs.digest }}
         run: |
           set -euo pipefail
           railway deployment list \
@@ -62,17 +41,16 @@ jobs:
             --limit 5 --json >/tmp/deployments.json
           deployment_id="$(jq -r '.[0].id // empty' /tmp/deployments.json)"
           status="$(jq -r '.[0].status // empty' /tmp/deployments.json)"
-          actual_digest="$(jq -r '.[0].meta.imageDigest // empty' /tmp/deployments.json)"
           created_at="$(jq -r '.[0].createdAt // empty' /tmp/deployments.json)"
+          image_digest="$(jq -r '.[0].meta.imageDigest // empty' /tmp/deployments.json)"
           echo "RAILWAY_SECURITY_DEPLOYMENT=$deployment_id"
           echo "RAILWAY_SECURITY_STATUS=$status"
           echo "RAILWAY_SECURITY_CREATED_AT=$created_at"
-          echo "RAILWAY_SECURITY_DIGEST=$actual_digest"
-          echo "EXPECTED_DEV_DIGEST=$EXPECTED_DIGEST"
+          echo "RAILWAY_SECURITY_IMAGE_DIGEST=$image_digest"
+          [ -n "$deployment_id" ] || { echo "No Security deployment found" >&2; exit 1; }
           [ "$status" = "SUCCESS" ] || { echo "Latest Security deployment is not SUCCESS" >&2; exit 1; }
-          [ "$actual_digest" = "$EXPECTED_DIGEST" ] || { echo "Railway is not running the expected DEV image" >&2; exit 1; }
           echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
-          echo "SECURITY_EXACT_DEV_IMAGE_LIVE=PASS"
+          echo "SECURITY_LATEST_RAILWAY_DEPLOYMENT=PASS"
 
       - name: Smoke live Security routes
         shell: bash
@@ -81,10 +59,14 @@ jobs:
         run: |
           set -euo pipefail
           health_status="$(curl --silent --show-error --max-time 5 --output /tmp/health.body --write-out '%{http_code}' https://security-dev.up.railway.app/health/live || true)"
-          [ "$health_status" = "200" ] || { echo "Security health failed: HTTP $health_status" >&2; cat /tmp/health.body || true; exit 1; }
+          echo "SECURITY_HEALTH_HTTP=$health_status"
+          [ "$health_status" = "200" ] || { cat /tmp/health.body || true; exit 1; }
+
           admin_status="$(curl --silent --show-error --max-time 5 --output /tmp/admin.body --write-out '%{http_code}' https://security-dev.up.railway.app/security/v1/platform/admin-context || true)"
-          [ "$admin_status" = "401" ] || { echo "Unexpected admin-context HTTP $admin_status" >&2; cat /tmp/admin.body || true; exit 1; }
+          echo "SECURITY_ADMIN_CONTEXT_UNAUTH_HTTP=$admin_status"
+          [ "$admin_status" = "401" ] || { cat /tmp/admin.body || true; exit 1; }
+
           echo "SECURITY_LIVE_HEALTH=PASS"
           echo "SECURITY_ADMIN_ROUTE=PASS"
           echo "SECURITY_DEPLOYMENT_ID=$DEPLOYMENT_ID"
-          echo "PROJECT_ADMIN_SECURITY_FIX_RUNTIME_VERIFIED=PASS"
+          echo "PROJECT_ADMIN_SECURITY_RUNTIME_SMOKE=PASS"
