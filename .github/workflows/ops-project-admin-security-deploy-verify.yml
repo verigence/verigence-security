@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           tag="${IMAGE_REPOSITORY}:sha-${EXPECTED_DEV_SHA}"
           docker manifest inspect --verbose "$tag" >/tmp/manifest.json
-          digest="$(jq -r '.Descriptor.digest // .descriptor.digest // empty' /tmp/manifest.json)"
+          digest="$(jq -r 'if type == "array" then .[0].Descriptor.digest else .Descriptor.digest end // empty' /tmp/manifest.json)"
           if [ -z "$digest" ]; then
             echo "Could not resolve digest for $tag" >&2
             cat /tmp/manifest.json
