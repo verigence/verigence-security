@@ -87,7 +87,7 @@ def test_security_human_actor_releases_database_session_when_resolution_fails(
     monkeypatch.setattr(
         dependencies,
         "build_session_factory",
-        lambda _settings: session,
+        lambda _settings: (lambda: session),
     )
     monkeypatch.setattr(
         dependencies,
