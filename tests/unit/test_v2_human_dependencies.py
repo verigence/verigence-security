@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 import verigence_security.api.v2_human_dependencies as dependencies
 import verigence_security.services.v2_human_actor as actor_types
 
