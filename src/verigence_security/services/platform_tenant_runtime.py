@@ -50,7 +50,8 @@ class PlatformTenantService(BasePlatformTenantService):
                 """
                 INSERT INTO security.tenant_role_permissions
                 (tenant_id,role_key,permission_key,assigned_by_user_id,assigned_at_utc)
-                SELECT :tenant_id,d.role_key,d.permission_key,:actor_user_id,:now
+                SELECT CAST(:tenant_id AS uuid),d.role_key,d.permission_key,
+                       CAST(:actor_user_id AS uuid),:now
                 FROM security.platform_role_permission_defaults d
                 JOIN security.permissions p
                   ON p.permission_key=d.permission_key
@@ -91,8 +92,8 @@ class PlatformTenantService(BasePlatformTenantService):
                 INSERT INTO security.roles
                 (role_id,tenant_id,role_key,role_name,description,status,
                  created_at_utc,updated_at_utc)
-                SELECT x.role_id::uuid,:tenant_id,x.role_key,x.role_name,x.description,
-                       'ACTIVE',:now,:now
+                SELECT x.role_id::uuid,CAST(:tenant_id AS uuid),x.role_key,x.role_name,
+                       x.description,'ACTIVE',:now,:now
                 FROM jsonb_to_recordset(CAST(:rows_json AS jsonb))
                      AS x(role_id text,role_key text,role_name text,description text)
                 """
@@ -109,7 +110,7 @@ class PlatformTenantService(BasePlatformTenantService):
                 """
                 INSERT INTO security.role_permissions
                 (tenant_id,role_id,permission_key,assigned_at_utc)
-                SELECT :tenant_id,x.role_id::uuid,x.permission_key,:now
+                SELECT CAST(:tenant_id AS uuid),x.role_id::uuid,x.permission_key,:now
                 FROM jsonb_to_recordset(CAST(:rows_json AS jsonb))
                      AS x(role_id text,permission_key text)
                 """
