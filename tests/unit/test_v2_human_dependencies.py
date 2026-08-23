@@ -7,6 +7,9 @@ import verigence_security.services.v2_human_actor as actor_types
 
 USER_ID = "00000000-0000-4000-8000-000000000001"
 
+# Regression guard for the DEV Project Administration path: the actor lookup must
+# release its DB session before the downstream platform-admin route opens another.
+
 
 def test_security_human_actor_releases_database_session_before_yield(
     monkeypatch: pytest.MonkeyPatch,
