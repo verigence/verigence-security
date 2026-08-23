@@ -1,5 +1,4 @@
-name: Ops deploy and verify Project Administration Security fix
-# Retry after applying Ruff's exact import grouping.
+name: Ops verify live Project Administration Security fix
 
 on:
   pull_request:
@@ -9,78 +8,23 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
-  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  EXPECTED_DEV_SHA: bc4839bd26441912bfa949677a4e749e5c2502b1
   PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
   SECURITY_SERVICE_ID: bf14bcdc-c224-4371-bbae-2f3fac97fc1a
 
 jobs:
-  deploy:
-    name: Validate, deploy to Railway, and smoke Security fix
+  verify-live:
+    name: Prove exact DEV image is live and healthy
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 10
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
 
     steps:
-      - name: Check out exact PR head
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: Validate focused Security fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
-          ruff check src/verigence_security/api/v2_human_dependencies.py tests/unit/test_v2_human_dependencies.py
-          mypy src/verigence_security/api/v2_human_dependencies.py
-          pytest -q \
-            tests/unit/test_v2_human_dependencies.py \
-            tests/api/test_uc02_tenant_create.py \
-            tests/api/test_v2_control_plane_routes.py
-          echo "SECURITY_PROJECT_ADMIN_FIX_VALIDATION=PASS"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and publish exact Security image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ env.SOURCE_SHA }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
-          provenance: false
-
-      - name: Verify image is Railway-pullable
-        shell: bash
-        run: |
-          set -euo pipefail
-          image_tag="${IMAGE_REPOSITORY}:sha-${SOURCE_SHA}"
-          docker logout ghcr.io >/dev/null 2>&1 || true
-          docker manifest inspect "$image_tag" >/dev/null
-          echo "SECURITY_IMAGE_PULLABLE=PASS"
-          echo "SECURITY_IMAGE_TAG=$image_tag"
-
       - name: Install Railway CLI
         shell: bash
         run: |
@@ -88,95 +32,59 @@ jobs:
           npm install --global @railway/cli
           railway --version
 
-      - name: Snapshot current Security deployment
-        id: before
+      - name: Resolve expected DEV image digest
+        id: expected
         shell: bash
+        run: |
+          set -euo pipefail
+          tag="${IMAGE_REPOSITORY}:sha-${EXPECTED_DEV_SHA}"
+          docker manifest inspect --verbose "$tag" >/tmp/manifest.json
+          digest="$(jq -r '.Descriptor.digest // .descriptor.digest // empty' /tmp/manifest.json)"
+          if [ -z "$digest" ]; then
+            echo "Could not resolve digest for $tag" >&2
+            cat /tmp/manifest.json
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "EXPECTED_DEV_TAG=$tag"
+          echo "EXPECTED_DEV_DIGEST=$digest"
+
+      - name: Prove Railway runs exact DEV image
+        id: railway
+        shell: bash
+        env:
+          EXPECTED_DIGEST: ${{ steps.expected.outputs.digest }}
         run: |
           set -euo pipefail
           railway deployment list \
             --service "$SECURITY_SERVICE_ID" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
-            --limit 5 --json >/tmp/before.json
-          cat /tmp/before.json
-          before_id="$(jq -r '.[0].id // empty' /tmp/before.json)"
-          echo "id=$before_id" >> "$GITHUB_OUTPUT"
-          echo "SECURITY_BEFORE_DEPLOYMENT=$before_id"
+            --limit 5 --json >/tmp/deployments.json
+          deployment_id="$(jq -r '.[0].id // empty' /tmp/deployments.json)"
+          status="$(jq -r '.[0].status // empty' /tmp/deployments.json)"
+          actual_digest="$(jq -r '.[0].meta.imageDigest // empty' /tmp/deployments.json)"
+          created_at="$(jq -r '.[0].createdAt // empty' /tmp/deployments.json)"
+          echo "RAILWAY_SECURITY_DEPLOYMENT=$deployment_id"
+          echo "RAILWAY_SECURITY_STATUS=$status"
+          echo "RAILWAY_SECURITY_CREATED_AT=$created_at"
+          echo "RAILWAY_SECURITY_DIGEST=$actual_digest"
+          echo "EXPECTED_DEV_DIGEST=$EXPECTED_DIGEST"
+          [ "$status" = "SUCCESS" ] || { echo "Latest Security deployment is not SUCCESS" >&2; exit 1; }
+          [ "$actual_digest" = "$EXPECTED_DIGEST" ] || { echo "Railway is not running the expected DEV image" >&2; exit 1; }
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "SECURITY_EXACT_DEV_IMAGE_LIVE=PASS"
 
-      - name: Point Security service at exact fixed image
-        shell: bash
-        run: |
-          set -euo pipefail
-          image_tag="${IMAGE_REPOSITORY}:sha-${SOURCE_SHA}"
-          railway service source connect \
-            --project "$PLATFORM_PROJECT_ID" \
-            --environment "$PLATFORM_ENVIRONMENT_ID" \
-            --service "$SECURITY_SERVICE_ID" \
-            --image "$image_tag" \
-            --json
-          echo "SECURITY_SOURCE_IMAGE_UPDATE=PASS"
-
-      - name: Force Railway deployment
-        shell: bash
-        run: |
-          set -euo pipefail
-          railway redeploy --service "$SECURITY_SERVICE_ID" --yes --json || true
-          echo "SECURITY_REDEPLOY_REQUESTED=PASS"
-
-      - name: Wait for replacement Security deployment
-        id: deployed
+      - name: Smoke live Security routes
         shell: bash
         env:
-          BEFORE_ID: ${{ steps.before.outputs.id }}
+          DEPLOYMENT_ID: ${{ steps.railway.outputs.deployment_id }}
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 120); do
-            if railway deployment list \
-              --service "$SECURITY_SERVICE_ID" \
-              --environment "$PLATFORM_ENVIRONMENT_ID" \
-              --limit 5 --json >/tmp/deployments.json 2>/tmp/deployments.err; then
-              deployment_id="$(jq -r '.[0].id // empty' /tmp/deployments.json)"
-              status="$(jq -r '.[0].status // empty' /tmp/deployments.json)"
-              echo "SECURITY_DEPLOY_WAIT|attempt=$attempt|id=$deployment_id|status=$status"
-              if [ -n "$deployment_id" ] && [ "$deployment_id" != "${BEFORE_ID:-}" ]; then
-                case "$status" in
-                  SUCCESS)
-                    echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
-                    echo "SECURITY_REPLACEMENT_DEPLOYMENT=PASS"
-                    exit 0
-                    ;;
-                  FAILED|CRASHED|REMOVED|SKIPPED)
-                    cat /tmp/deployments.json
-                    echo "Replacement Security deployment failed: $status" >&2
-                    exit 1
-                    ;;
-                esac
-              fi
-            else
-              echo "SECURITY_DEPLOY_POLL_TRANSIENT|attempt=$attempt|$(tr '\n' ' ' </tmp/deployments.err)"
-            fi
-            sleep 5
-          done
-          echo 'Timed out waiting for replacement Security deployment' >&2
-          railway deployment list --service "$SECURITY_SERVICE_ID" --environment "$PLATFORM_ENVIRONMENT_ID" --limit 10 --json || true
-          exit 1
-
-      - name: Smoke live Security service
-        shell: bash
-        env:
-          DEPLOYMENT_ID: ${{ steps.deployed.outputs.id }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 30); do
-            health_status="$(curl --silent --show-error --output /tmp/health.body --write-out '%{http_code}' https://security-dev.up.railway.app/health/live || true)"
-            if [ "$health_status" = "200" ]; then
-              break
-            fi
-            sleep 3
-          done
+          health_status="$(curl --silent --show-error --max-time 5 --output /tmp/health.body --write-out '%{http_code}' https://security-dev.up.railway.app/health/live || true)"
           [ "$health_status" = "200" ] || { echo "Security health failed: HTTP $health_status" >&2; cat /tmp/health.body || true; exit 1; }
-          admin_status="$(curl --silent --show-error --output /tmp/admin.body --write-out '%{http_code}' https://security-dev.up.railway.app/security/v1/platform/admin-context || true)"
+          admin_status="$(curl --silent --show-error --max-time 5 --output /tmp/admin.body --write-out '%{http_code}' https://security-dev.up.railway.app/security/v1/platform/admin-context || true)"
           [ "$admin_status" = "401" ] || { echo "Unexpected admin-context HTTP $admin_status" >&2; cat /tmp/admin.body || true; exit 1; }
           echo "SECURITY_LIVE_HEALTH=PASS"
           echo "SECURITY_ADMIN_ROUTE=PASS"
           echo "SECURITY_DEPLOYMENT_ID=$DEPLOYMENT_ID"
-          echo "PROJECT_ADMIN_CONNECTION_FIX_DEPLOYED=PASS"
+          echo "PROJECT_ADMIN_SECURITY_FIX_RUNTIME_VERIFIED=PASS"
