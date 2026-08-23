@@ -15,6 +15,7 @@ from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExp
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
@@ -28,6 +29,11 @@ from verigence_security.core.correlation import correlation_id_ctx
 
 _APP_LOGGER_NAME = "verigence_security"
 _HANDLER_MARKER = "_verigence_observability_handler"
+_REQUIRED_OTLP_ENDPOINTS = (
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+)
 
 
 class StructuredJsonFormatter(logging.Formatter):
@@ -100,6 +106,22 @@ def _service_version() -> str:
     )
 
 
+def _otlp_endpoints_configured() -> bool:
+    return all(os.getenv(name, "").strip() for name in _REQUIRED_OTLP_ENDPOINTS)
+
+
+def _bootstrap_warning(reason: str, exception_type: str | None = None) -> None:
+    payload = {
+        "severity": "WARNING",
+        "event_name": "observability_bootstrap_disabled",
+        "service_name": "verigence-security",
+        "reason": reason,
+    }
+    if exception_type:
+        payload["exception_type"] = exception_type
+    sys.stderr.write(json.dumps(payload, separators=(",", ":")) + "\n")
+
+
 def _configure_application_logging(settings: Settings, *, logger_provider: LoggerProvider | None) -> None:
     logger = logging.getLogger(_APP_LOGGER_NAME)
     logger.setLevel(settings.log_level.upper())
@@ -124,64 +146,83 @@ def _configure_application_logging(settings: Settings, *, logger_provider: Logge
 
 
 def configure_observability(app: FastAPI, settings: Settings) -> bool:
-    """Configure Phase-1 Security telemetry.
+    """Configure Phase-1 Security telemetry without making it a Security dependency.
 
     The feature is disabled by default. When enabled, all remote export uses OpenTelemetry batch
     processors/readers. No request handler performs a synchronous telemetry network call or flush.
     Standard OTLP environment variables configure signal-specific endpoints/headers, keeping this
     service vendor-neutral and secrets out of source code.
+
+    Missing or invalid telemetry configuration fails open: Security remains available and emits one
+    local bootstrap warning instead of failing application startup.
     """
 
     if not settings.observability_enabled:
         return False
+    if not _otlp_endpoints_configured():
+        _bootstrap_warning("missing_otlp_endpoint_configuration")
+        return False
 
-    resource = Resource.create(
-        {
-            "service.namespace": "verigence",
-            "service.name": settings.app_name,
-            "service.version": _service_version(),
-            "deployment.environment.name": settings.app_env.value,
-        }
-    )
+    try:
+        resource = Resource.create(
+            {
+                "service.namespace": "verigence",
+                "service.name": settings.app_name,
+                "service.version": _service_version(),
+                "deployment.environment.name": settings.app_env.value,
+            }
+        )
 
-    tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(
-        BatchSpanProcessor(
-            OTLPSpanExporter(timeout=settings.observability_export_timeout_seconds),
-            max_queue_size=settings.observability_max_queue_size,
-            max_export_batch_size=settings.observability_max_export_batch_size,
-            schedule_delay_millis=settings.observability_batch_delay_ms,
+        span_exporter = OTLPSpanExporter(timeout=settings.observability_export_timeout_seconds)
+        metric_exporter = OTLPMetricExporter(timeout=settings.observability_export_timeout_seconds)
+        log_exporter = OTLPLogExporter(timeout=settings.observability_export_timeout_seconds)
+
+        tracer_provider = TracerProvider(resource=resource)
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(
+                span_exporter,
+                max_queue_size=settings.observability_max_queue_size,
+                max_export_batch_size=settings.observability_max_export_batch_size,
+                schedule_delay_millis=settings.observability_batch_delay_ms,
+                export_timeout_millis=int(settings.observability_export_timeout_seconds * 1000),
+            )
+        )
+
+        metric_reader = PeriodicExportingMetricReader(
+            metric_exporter,
+            export_interval_millis=settings.observability_metric_export_interval_ms,
             export_timeout_millis=int(settings.observability_export_timeout_seconds * 1000),
         )
-    )
-    trace.set_tracer_provider(tracer_provider)
+        meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
 
-    metric_reader = PeriodicExportingMetricReader(
-        OTLPMetricExporter(timeout=settings.observability_export_timeout_seconds),
-        export_interval_millis=settings.observability_metric_export_interval_ms,
-        export_timeout_millis=int(settings.observability_export_timeout_seconds * 1000),
-    )
-    meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
-    metrics.set_meter_provider(meter_provider)
-
-    logger_provider = LoggerProvider(resource=resource)
-    logger_provider.add_log_record_processor(
-        BatchLogRecordProcessor(
-            OTLPLogExporter(timeout=settings.observability_export_timeout_seconds),
-            max_queue_size=settings.observability_max_queue_size,
-            max_export_batch_size=settings.observability_max_export_batch_size,
-            schedule_delay_millis=settings.observability_batch_delay_ms,
-            export_timeout_millis=int(settings.observability_export_timeout_seconds * 1000),
+        logger_provider = LoggerProvider(resource=resource)
+        logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(
+                log_exporter,
+                max_queue_size=settings.observability_max_queue_size,
+                max_export_batch_size=settings.observability_max_export_batch_size,
+                schedule_delay_millis=settings.observability_batch_delay_ms,
+                export_timeout_millis=int(settings.observability_export_timeout_seconds * 1000),
+            )
         )
-    )
-    set_logger_provider(logger_provider)
-    _configure_application_logging(settings, logger_provider=logger_provider)
 
-    FastAPIInstrumentor.instrument_app(
-        app,
-        tracer_provider=tracer_provider,
-        meter_provider=meter_provider,
-        excluded_urls="/health/live,/health/ready",
-    )
-    HTTPXClientInstrumentor().instrument(tracer_provider=tracer_provider, meter_provider=meter_provider)
-    return True
+        trace.set_tracer_provider(tracer_provider)
+        metrics.set_meter_provider(meter_provider)
+        set_logger_provider(logger_provider)
+        _configure_application_logging(settings, logger_provider=logger_provider)
+
+        FastAPIInstrumentor.instrument_app(
+            app,
+            tracer_provider=tracer_provider,
+            meter_provider=meter_provider,
+            excluded_urls="/health/live,/health/ready",
+        )
+        HTTPXClientInstrumentor().instrument(
+            tracer_provider=tracer_provider,
+            meter_provider=meter_provider,
+        )
+        SQLAlchemyInstrumentor().instrument(tracer_provider=tracer_provider)
+        return True
+    except Exception as exc:  # pragma: no cover - defensive boundary around third-party telemetry
+        _bootstrap_warning("initialization_failed", type(exc).__name__)
+        return False
