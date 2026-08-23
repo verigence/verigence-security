@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import pytest
+
 import verigence_security.api.v2_human_dependencies as dependencies
 import verigence_security.services.v2_human_actor as actor_types
-
 
 USER_ID = "00000000-0000-4000-8000-000000000001"
 
