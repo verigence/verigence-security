@@ -11,6 +11,12 @@ from verigence_security.core.errors import SecurityError
 logger = logging.getLogger(__name__)
 
 
+def _route_template(request: Request) -> str | None:
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) and path else None
+
+
 def security_error_handler(request: Request, exc: Exception) -> JSONResponse:
     # Registered specifically for SecurityError in main.py. The broader Exception annotation
     # matches Starlette's handler protocol; this guard prevents accidental misuse elsewhere.
@@ -18,6 +24,21 @@ def security_error_handler(request: Request, exc: Exception) -> JSONResponse:
         raise exc
 
     cid = getattr(request.state, "correlation_id", None)
+    denied = exc.status_code in {401, 403}
+    level = logging.ERROR if exc.status_code >= 500 else logging.INFO
+    logger.log(
+        level,
+        "security_request_denied" if denied else "security_request_failed",
+        extra={
+            "event_name": "security_request_denied" if denied else "security_request_failed",
+            "outcome": "DENIED" if denied else "FAILURE",
+            "error_code": exc.code,
+            "http_method": request.method,
+            "http_route": _route_template(request),
+            "http_status_code": exc.status_code,
+        },
+    )
+
     response = JSONResponse(
         status_code=exc.status_code,
         content={
@@ -38,12 +59,22 @@ async def unexpected_error_handler(request: Request, exc: Exception) -> PlainTex
     """Preserve the v1.3 correlation contract even for an otherwise-unhandled HTTP 500.
 
     v1.3 does not define a normative application error code for an unexpected 500, so this handler
-    deliberately does not invent one. It emits a generic body, logs the exception with the resolved
-    correlation ID, and always returns the correlation header.
+    deliberately does not invent one. It emits a generic body, records one owning exception event,
+    and always returns the correlation header.
     """
 
     cid = getattr(request.state, "correlation_id", None)
-    logger.exception("Unhandled Security API exception; correlation_id=%s", cid, exc_info=exc)
+    logger.error(
+        "security_unexpected_exception",
+        extra={
+            "event_name": "security_unexpected_exception",
+            "outcome": "FAILURE",
+            "http_method": request.method,
+            "http_route": _route_template(request),
+            "http_status_code": 500,
+        },
+        exc_info=exc,
+    )
     response = PlainTextResponse("Internal Server Error", status_code=500)
     if cid:
         response.headers[HEADER] = cid
