@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from functools import lru_cache
+from typing import Any
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -31,13 +32,25 @@ def _runtime_database_url(database_url: str) -> str:
     return database_url
 
 
+def _is_postgresql(database_url: str) -> bool:
+    return database_url.startswith("postgresql+") or database_url.startswith("postgresql://")
+
+
 @lru_cache(maxsize=8)
 def _engine_for_url(database_url: str) -> Engine:
-    return create_engine(
-        database_url,
-        pool_pre_ping=True,
-        future=True,
-    )
+    options: dict[str, Any] = {
+        "pool_pre_ping": True,
+        "future": True,
+    }
+    if _is_postgresql(database_url):
+        options.update(
+            pool_timeout=5,
+            connect_args={
+                "connect_timeout": 5,
+                "options": "-c statement_timeout=10000",
+            },
+        )
+    return create_engine(database_url, **options)
 
 
 def build_engine(settings: Settings) -> Engine | None:
