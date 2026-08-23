@@ -59,3 +59,44 @@ def test_security_human_actor_releases_database_session_before_yield(
 
     with pytest.raises(StopIteration):
         next(generator)
+
+
+def test_security_human_actor_releases_database_session_when_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeSession:
+        def close(self) -> None:
+            events.append("close")
+
+    session = FakeSession()
+
+    class FailingAuthenticationService:
+        def __init__(self, observed_session: object) -> None:
+            assert observed_session is session
+
+        def authenticate_user_id(self, user_id: str) -> actor_types.HumanActorContext:
+            assert user_id == USER_ID
+            events.append("authenticate")
+            raise RuntimeError("resolution failed")
+
+    monkeypatch.setattr(
+        dependencies,
+        "build_session_factory",
+        lambda _settings: session,
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "HumanActorAuthenticationService",
+        FailingAuthenticationService,
+    )
+
+    generator = dependencies.security_human_actor(
+        user_id=USER_ID,
+        settings=object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeError, match="resolution failed"):
+        next(generator)
+
+    assert events == ["authenticate", "close"]
