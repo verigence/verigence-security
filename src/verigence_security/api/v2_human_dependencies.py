@@ -51,11 +51,18 @@ def security_human_actor(
     factory = build_session_factory(settings)
     if factory is None:
         raise security_error("DATABASE_UNAVAILABLE")
+
+    # HumanActorContext is fully materialized and contains no live ORM state. Resolve it while
+    # the authentication session is open, then close that session before downstream route
+    # dependencies execute. Keeping this read-only transaction checked out for the whole request
+    # unnecessarily consumes a second database connection on admin routes (which also depend on
+    # platform_session) and can starve the small DEV connection pool under concurrent page loads.
     session = factory()
     try:
-        yield HumanActorAuthenticationService(session).authenticate_user_id(user_id)
+        actor = HumanActorAuthenticationService(session).authenticate_user_id(user_id)
     finally:
         session.close()
+    yield actor
 
 
 # Compatibility alias for existing route imports. It no longer validates or accepts Clerk JWTs.
