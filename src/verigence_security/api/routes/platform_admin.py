@@ -17,10 +17,8 @@ from verigence_security.api.platform_schemas import (
 )
 from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
-from verigence_security.services.platform_admin import (
-    PlatformTenantService,
-    TenantCreateIdempotencyConflict,
-)
+from verigence_security.services.platform_admin import TenantCreateIdempotencyConflict
+from verigence_security.services.platform_tenant_runtime import PlatformTenantService
 from verigence_security.services.v2_human_actor import HumanActorContext
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Platform Administration"])
