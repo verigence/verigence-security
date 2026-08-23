@@ -52,11 +52,10 @@ def security_human_actor(
     if factory is None:
         raise security_error("DATABASE_UNAVAILABLE")
 
-    # HumanActorContext is fully materialized and contains no live ORM state. Resolve it while
-    # the authentication session is open, then close that session before downstream route
-    # dependencies execute. Keeping this read-only transaction checked out for the whole request
-    # unnecessarily consumes a second database connection on admin routes (which also depend on
-    # platform_session) and can starve the small DEV connection pool under concurrent page loads.
+    # Project Administration control-plane routes open their own DB session after this
+    # identity dependency. HumanActorContext is fully materialized and contains no live
+    # ORM state, so release the authentication connection before yielding. This prevents
+    # /admin-context, /platform/tenants and Tenant create from starving the small DEV pool.
     session = factory()
     try:
         actor = HumanActorAuthenticationService(session).authenticate_user_id(user_id)
