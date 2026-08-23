@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     app_name: str = "verigence-security"
     log_level: str = "INFO"
 
+    # Phase-1 observability is opt-in at runtime. Standard OTEL_EXPORTER_OTLP_* environment
+    # variables configure signal-specific endpoints/headers; tokens never belong in source code.
+    observability_enabled: bool = False
+    observability_export_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    observability_batch_delay_ms: int = Field(default=1000, ge=100, le=60000)
+    observability_max_queue_size: int = Field(default=2048, ge=128, le=65536)
+    observability_max_export_batch_size: int = Field(default=512, ge=1, le=8192)
+    observability_metric_export_interval_ms: int = Field(default=60000, ge=5000, le=300000)
+
     database_url: str = ""
     migration_database_url: str = ""
 
@@ -80,6 +89,8 @@ class Settings(BaseSettings):
             raise ValueError("Clerk Backend secret key is required in UAT/production")
         if self.app_env == AppEnvironment.PRODUCTION and not self.database_url:
             raise ValueError("DATABASE_URL is required in production")
+        if self.observability_max_export_batch_size > self.observability_max_queue_size:
+            raise ValueError("Observability export batch size cannot exceed queue size")
         if self.dev_mock_auth_enabled:
             if not self.dev_mock_signing_secret:
                 raise ValueError("DEV mock signing secret is required when mock auth is enabled")
