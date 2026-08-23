@@ -25,12 +25,16 @@ def security_error_handler(request: Request, exc: Exception) -> JSONResponse:
 
     cid = getattr(request.state, "correlation_id", None)
     denied = exc.status_code in {401, 403}
+    event_name = "security_request_denied" if denied else "security_request_failed"
     level = logging.ERROR if exc.status_code >= 500 else logging.INFO
     logger.log(
         level,
-        "security_request_denied" if denied else "security_request_failed",
+        "%s error_code=%s correlation_id=%s",
+        event_name,
+        exc.code,
+        cid,
         extra={
-            "event_name": "security_request_denied" if denied else "security_request_failed",
+            "event_name": event_name,
             "outcome": "DENIED" if denied else "FAILURE",
             "error_code": exc.code,
             "http_method": request.method,
@@ -65,7 +69,8 @@ async def unexpected_error_handler(request: Request, exc: Exception) -> PlainTex
 
     cid = getattr(request.state, "correlation_id", None)
     logger.error(
-        "security_unexpected_exception",
+        "security_unexpected_exception correlation_id=%s",
+        cid,
         extra={
             "event_name": "security_unexpected_exception",
             "outcome": "FAILURE",
