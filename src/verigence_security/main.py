@@ -24,6 +24,7 @@ from verigence_security.api.routes import (
 from verigence_security.config import get_settings
 from verigence_security.core.correlation import CorrelationIdMiddleware
 from verigence_security.core.errors import SecurityError
+from verigence_security.core.observability import configure_observability
 from verigence_security.core.problem import security_error_handler, unexpected_error_handler
 
 settings = get_settings()
@@ -61,3 +62,7 @@ app.include_router(v2_user_lifecycle.router)
 app.include_router(legacy_onboarding_compat.router)
 if settings.dev_mock_auth_enabled:
     app.include_router(dev_mock.router)
+
+# Disabled by default. When enabled, exporters are batched/bounded and never awaited by business
+# handlers. No authentication, authorization, token or route contract depends on telemetry.
+configure_observability(app, settings)
