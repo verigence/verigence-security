@@ -27,6 +27,7 @@ from verigence_security.api.schemas import (
 )
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import SecurityError, security_error
+from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.core.types import ActorType
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
@@ -163,6 +164,7 @@ def credential_login(
         session_id=f"clerk-backend-{uuid4()}",
     )
     actor = HumanActorAuthenticationService(repo.s).authenticate(identity)
+    attach_trusted_user_id(actor.user_id)
 
     ttl = settings.platform_admin_token_ttl_minutes
     if ttl is None:
