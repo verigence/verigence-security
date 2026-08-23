@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from pydantic import ValidationError
 
+import verigence_security.core.observability as observability
 from verigence_security.config import Settings
 from verigence_security.core.correlation import correlation_id_ctx
 from verigence_security.core.observability import StructuredJsonFormatter, configure_observability
@@ -77,3 +78,24 @@ def test_structured_formatter_includes_correlation_without_business_values():
     assert payload["error_code"] == "SEC-RBAC-002"
     assert "trace_id" not in payload
     assert "span_id" not in payload
+
+
+def test_trusted_user_id_is_added_only_to_recording_trace(monkeypatch: pytest.MonkeyPatch):
+    attributes: dict[str, str] = {}
+
+    class RecordingSpan:
+        @staticmethod
+        def is_recording() -> bool:
+            return True
+
+        @staticmethod
+        def set_attribute(key: str, value: str) -> None:
+            attributes[key] = value
+
+    monkeypatch.setattr(observability.trace, "get_current_span", lambda: RecordingSpan())
+
+    observability.attach_trusted_user_id("00000000-0000-4000-8000-000000000001")
+
+    assert attributes == {
+        "verigence.user.id": "00000000-0000-4000-8000-000000000001"
+    }
