@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from verigence_security.api import v2_human_dependencies as dependencies
-from verigence_security.services.v2_human_actor import (
-    AdminScope,
-    HumanActorContext,
-)
+import verigence_security.api.v2_human_dependencies as dependencies
+import verigence_security.services.v2_human_actor as actor_types
 
 
 USER_ID = "00000000-0000-4000-8000-000000000001"
@@ -22,17 +19,17 @@ def test_security_human_actor_releases_database_session_before_yield(
             events.append("close")
 
     session = FakeSession()
-    actor = HumanActorContext(
+    actor = actor_types.HumanActorContext(
         user_id=USER_ID,
         clerk_subject="user_super_admin",
-        admin_scopes=(AdminScope("SuperAdmin", "PLATFORM", None),),
+        admin_scopes=(actor_types.AdminScope("SuperAdmin", "PLATFORM", None),),
     )
 
     class FakeAuthenticationService:
         def __init__(self, observed_session: object) -> None:
             assert observed_session is session
 
-        def authenticate_user_id(self, user_id: str) -> HumanActorContext:
+        def authenticate_user_id(self, user_id: str) -> actor_types.HumanActorContext:
             assert user_id == USER_ID
             events.append("authenticate")
             return actor
