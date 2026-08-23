@@ -39,7 +39,7 @@ jobs:
           Path('/tmp/domain').write_text(str(domain))
           PY
           domain="$(cat /tmp/domain)"
-          if [[ -n "$domain" ]]; then case "$domain" in http://*|https://*) base="${domain%/}";; *) base="https://${domain%/}";; esac; code="$(curl -sS -o /tmp/health -w '%{http_code}' "$base/health" || true)"; echo "LIVE_HEALTH_HTTP=$code" >> docs/runtime/security-live-baseline.txt; fi
+          if [[ -n "$domain" ]]; then case "$domain" in http://*|https://*) base="${domain%/}";; *) base="https://${domain%/}";; esac; code="$(curl -sS -o /tmp/health -w '%{http_code}' "$base/health/ready" || true)"; echo "LIVE_HEALTH_HTTP=$code" >> docs/runtime/security-live-baseline.txt; fi
       - name: Commit evidence
         run: |
           git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
