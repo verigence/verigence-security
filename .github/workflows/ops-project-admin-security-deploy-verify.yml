@@ -1,0 +1,182 @@
+name: Ops verify Project Administration Security fix
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - .github/workflows/ops-project-admin-security-deploy-verify.yml
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/verigence/verigence-security
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+
+jobs:
+  verify-deploy:
+    name: Validate, deploy, and smoke exact Security fix
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate focused Security fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          ruff check src/verigence_security/api/v2_human_dependencies.py tests/unit/test_v2_human_dependencies.py
+          mypy src/verigence_security/api/v2_human_dependencies.py
+          pytest -q \
+            tests/unit/test_v2_human_dependencies.py \
+            tests/api/test_uc02_tenant_create.py \
+            tests/api/test_v2_control_plane_routes.py
+          echo "SECURITY_PROJECT_ADMIN_FIX_VALIDATION=PASS"
+          echo "SECURITY_FIX_SOURCE_SHA=$SOURCE_SHA"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish exact immutable Security image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ env.SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+          provenance: true
+
+      - name: Resolve Security Railway service
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo 'RAILWAY_TOKEN is not configured' >&2; exit 1; }
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          service_id="$(printf '%s' "$response" | jq -r '[.data.environment.serviceInstances.edges[].node | select((.source.image // "") | contains("verigence-security"))] | first | .serviceId // empty')"
+          [ -n "$service_id" ] || { echo 'Could not resolve Security service by immutable image source' >&2; printf '%s\n' "$response" | jq -c '.data.environment.serviceInstances.edges[].node'; exit 1; }
+          before_id="$(printf '%s' "$response" | jq -r --arg service "$service_id" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first | .latestDeployment.id // empty')"
+          echo "service_id=$service_id" >> "$GITHUB_OUTPUT"
+          echo "before_id=$before_id" >> "$GITHUB_OUTPUT"
+          echo "SECURITY_SERVICE_ID=$service_id"
+          echo "SECURITY_BEFORE_DEPLOYMENT=$before_id"
+
+      - name: Attach exact fixed image to Security service
+        id: patch
+        shell: bash
+        env:
+          SERVICE_ID: ${{ steps.resolve.outputs.service_id }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          mutation='mutation EnvironmentPatchCommit($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }'
+          patch="$(jq -cn --arg service "$SERVICE_ID" --arg image "$image_ref" '{services:{($service):{source:{image:$image}}}}')"
+          variables="$(jq -cn --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg message "Deploy Project Administration Security fix ${SOURCE_SHA}" --argjson patch "$patch" '{environmentId:$environment,patch:$patch,commitMessage:$message}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+          [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = false ] || { printf '%s\n' "$response" | jq -c '.errors'; exit 1; }
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "SECURITY_IMAGE_PATCH=PASS"
+          echo "SECURITY_IMAGE_REF=$image_ref"
+
+      - name: Wait for exact replacement deployment
+        id: deployed
+        shell: bash
+        env:
+          SERVICE_ID: ${{ steps.resolve.outputs.service_id }}
+          BEFORE_DEPLOYMENT_ID: ${{ steps.resolve.outputs.before_id }}
+          EXPECTED_IMAGE: ${{ steps.patch.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          query='query EnvironmentInstances($environmentId: String!, $projectId: String!) { environment(id: $environmentId, projectId: $projectId) { serviceInstances(first: 500) { edges { node { serviceId source { image } latestDeployment { id status } } } } } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" '{projectId:$project,environmentId:$environment}')"
+          for attempt in $(seq 1 72); do
+            body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+            response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+            node="$(printf '%s' "$response" | jq -c --arg service "$SERVICE_ID" '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $service)] | first // {}')"
+            deployment_id="$(printf '%s' "$node" | jq -r '.latestDeployment.id // empty')"
+            deployment_status="$(printf '%s' "$node" | jq -r '.latestDeployment.status // empty')"
+            source_image="$(printf '%s' "$node" | jq -r '.source.image // empty')"
+            echo "SECURITY_DEPLOY_WAIT|attempt=$attempt|id=$deployment_id|status=$deployment_status|image=$source_image"
+            if [[ "$source_image" == "$EXPECTED_IMAGE" && -n "$deployment_id" && "$deployment_id" != "$BEFORE_DEPLOYMENT_ID" ]]; then
+              case "$deployment_status" in
+                SUCCESS)
+                  echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+                  echo "SECURITY_REPLACEMENT_DEPLOYMENT=PASS"
+                  exit 0
+                  ;;
+                FAILED|CRASHED|REMOVED)
+                  echo "Replacement Security deployment failed: $deployment_status" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+            sleep 10
+          done
+          echo 'Timed out waiting for exact Security deployment' >&2
+          exit 1
+
+      - name: Smoke live Security routes
+        shell: bash
+        env:
+          DEPLOYMENT_ID: ${{ steps.deployed.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import time
+          import urllib.error
+          import urllib.request
+
+          base='https://security-dev.up.railway.app'
+          for path, expected in [('/health/live',{200}),('/security/v1/platform/admin-context',{401})]:
+              start=time.monotonic()
+              req=urllib.request.Request(base+path)
+              try:
+                  with urllib.request.urlopen(req, timeout=5) as response:
+                      code=response.status
+              except urllib.error.HTTPError as exc:
+                  code=exc.code
+              elapsed=time.monotonic()-start
+              print(f'SECURITY_ROUTE|{path}|HTTP_{code}|{elapsed:.3f}s')
+              if code not in expected:
+                  raise SystemExit(f'{path} returned unexpected HTTP {code}')
+              if elapsed >= 5:
+                  raise SystemExit(f'{path} exceeded 5-second response budget')
+          print('SECURITY_LIVE_SMOKE=PASS')
+          PY
+          echo "SECURITY_DEPLOYMENT_ID=$DEPLOYMENT_ID"
+          echo "PROJECT_ADMIN_CONNECTION_FIX_DEPLOYED=PASS"
