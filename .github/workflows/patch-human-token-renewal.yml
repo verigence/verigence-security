@@ -1,0 +1,36 @@
+name: Patch human token renewal
+
+on:
+  push:
+    branches: [fix/human-token-renewal]
+    paths: ['.github/workflows/patch-human-token-renewal.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/human-token-renewal
+      - name: Add human token renewal endpoint
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/verigence_security/api/routes/access.py')
+          s=p.read_text()
+          marker='''    return {\n        "accessToken": token,\n        "expiresAtUtc": expires_at,\n        "actorType": ActorType.USER.value,\n        "isSuperAdmin": actor.is_super_admin,\n    }\n\n\n@router.post("/access-sessions", response_model=AccessTokenResponse, deprecated=True)\n'''
+          replacement='''    return {\n        "accessToken": token,\n        "expiresAtUtc": expires_at,\n        "actorType": ActorType.USER.value,\n        "isSuperAdmin": actor.is_super_admin,\n    }\n\n\n@router.post("/auth/refresh", response_model=HumanLoginResponse)\ndef refresh_human_access_token(\n    authorization_token: str = Depends(bearer_token),\n    settings: Settings = Depends(get_settings),\n    repo: SecurityRepository = Depends(repository),\n    tokens: TokenService = Depends(token_service),\n) -> dict[str, object]:\n    """Renew a still-valid global human token after re-checking current USER/admin state."""\n\n    claims = tokens.verify_human_token(authorization_token)\n    actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(str(claims["sub"]))\n    attach_trusted_user_id(actor.user_id)\n\n    ttl = settings.platform_admin_token_ttl_minutes\n    if ttl is None:\n        raise RuntimeError("Configured Security human access-token lifetime is unavailable")\n    expires_at = datetime.now(UTC) + timedelta(minutes=ttl)\n    token = tokens.issue_human_token(\n        HumanTokenClaims(\n            user_id=actor.user_id,\n            expires_at=expires_at,\n        )\n    )\n    return {\n        "accessToken": token,\n        "expiresAtUtc": expires_at,\n        "actorType": ActorType.USER.value,\n        "isSuperAdmin": actor.is_super_admin,\n    }\n\n\n@router.post("/access-sessions", response_model=AccessTokenResponse, deprecated=True)\n'''
+          if marker not in s:
+              raise SystemExit('target marker not found')
+          p.write_text(s.replace(marker,replacement,1))
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/verigence_security/api/routes/access.py
+          git commit -m 'fix(security): renew active human access token'
+          git push origin HEAD:fix/human-token-renewal
