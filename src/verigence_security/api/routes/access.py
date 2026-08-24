@@ -184,6 +184,37 @@ def credential_login(
     }
 
 
+@router.post("/auth/refresh", response_model=HumanLoginResponse)
+def refresh_human_access_token(
+    authorization_token: str = Depends(bearer_token),
+    settings: Settings = Depends(get_settings),
+    repo: SecurityRepository = Depends(repository),
+    tokens: TokenService = Depends(token_service),
+) -> dict[str, object]:
+    """Renew a still-valid global human token after re-checking current USER/admin state."""
+
+    claims = tokens.verify_human_token(authorization_token)
+    actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(str(claims["sub"]))
+    attach_trusted_user_id(actor.user_id)
+
+    ttl = settings.platform_admin_token_ttl_minutes
+    if ttl is None:
+        raise RuntimeError("Configured Security human access-token lifetime is unavailable")
+    expires_at = datetime.now(UTC) + timedelta(minutes=ttl)
+    token = tokens.issue_human_token(
+        HumanTokenClaims(
+            user_id=actor.user_id,
+            expires_at=expires_at,
+        )
+    )
+    return {
+        "accessToken": token,
+        "expiresAtUtc": expires_at,
+        "actorType": ActorType.USER.value,
+        "isSuperAdmin": actor.is_super_admin,
+    }
+
+
 @router.post("/access-sessions", response_model=AccessTokenResponse, deprecated=True)
 def create_access_session(
     body: AccessSessionRequest,
