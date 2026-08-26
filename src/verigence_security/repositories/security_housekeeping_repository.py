@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 
@@ -57,35 +58,44 @@ class SecurityHousekeepingRepository:
             "cutoff_exclusive_utc": cutoff_exclusive_utc,
         }
 
-        access_context_result = self.s.execute(
-            text(
-                """
-                DELETE FROM security.access_context_evaluations
-                WHERE tenant_id=CAST(:tenant_id AS uuid)
-                  AND evaluated_at_utc < :cutoff_exclusive_utc
-                """
+        access_context_result = cast(
+            CursorResult[Any],
+            self.s.execute(
+                text(
+                    """
+                    DELETE FROM security.access_context_evaluations
+                    WHERE tenant_id=CAST(:tenant_id AS uuid)
+                      AND evaluated_at_utc < :cutoff_exclusive_utc
+                    """
+                ),
+                params,
             ),
-            params,
         )
-        access_session_result = self.s.execute(
-            text(
-                """
-                DELETE FROM security.access_sessions
-                WHERE tenant_id=CAST(:tenant_id AS uuid)
-                  AND last_activity_at_utc < :cutoff_exclusive_utc
-                """
+        access_session_result = cast(
+            CursorResult[Any],
+            self.s.execute(
+                text(
+                    """
+                    DELETE FROM security.access_sessions
+                    WHERE tenant_id=CAST(:tenant_id AS uuid)
+                      AND last_activity_at_utc < :cutoff_exclusive_utc
+                    """
+                ),
+                params,
             ),
-            params,
         )
-        security_event_result = self.s.execute(
-            text(
-                """
-                DELETE FROM security.security_events
-                WHERE tenant_id=CAST(:tenant_id AS uuid)
-                  AND occurred_at_utc < :cutoff_exclusive_utc
-                """
+        security_event_result = cast(
+            CursorResult[Any],
+            self.s.execute(
+                text(
+                    """
+                    DELETE FROM security.security_events
+                    WHERE tenant_id=CAST(:tenant_id AS uuid)
+                      AND occurred_at_utc < :cutoff_exclusive_utc
+                    """
+                ),
+                params,
             ),
-            params,
         )
 
         return {
