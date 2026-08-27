@@ -15,8 +15,9 @@ client = TestClient(app)
 
 
 class _FakeCredentialService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, session: object | None = None) -> None:
         _ = settings
+        assert session is not None
 
     def authenticate(self, *, identifier: str, password: str) -> object:
         assert identifier == "amit@example.com"
