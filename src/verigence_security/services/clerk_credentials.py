@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock
 
+import httpx
+
 from verigence_security.adapters.clerk_backend import (
     ClerkBackendClient,
     ClerkBackendError,
@@ -37,12 +39,10 @@ def _shared_clerk(settings: Settings) -> ClerkBackendClient:
     )
     with _shared_clerk_lock:
         if _shared_clerk_client is None or _shared_clerk_key != key:
-            _shared_clerk_client = ClerkBackendClient(settings)
-            # Give the adapter one persistent client. ClerkBackendClient otherwise creates
-            # and closes a temporary httpx.Client for each individual API operation.
-            import httpx
-
-            _shared_clerk_client._client = httpx.Client(timeout=10.0)  # noqa: SLF001
+            _shared_clerk_client = ClerkBackendClient(
+                settings,
+                client=httpx.Client(timeout=10.0),
+            )
             _shared_clerk_key = key
         return _shared_clerk_client
 
