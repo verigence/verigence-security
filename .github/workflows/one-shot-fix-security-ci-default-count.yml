@@ -1,0 +1,50 @@
+name: One-shot Security CI verification count fix
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/one-shot-fix-security-ci-default-count.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out dev
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Patch stale operating-role default count and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          ci = Path('.github/workflows/ci.yml')
+          text = ci.read_text()
+          old = '[ "$v2_default_count" = "156" ] || {'
+          new = '[ "$v2_default_count" = "157" ] || {'
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected exactly one stale count guard, found {text.count(old)}')
+          ci.write_text(text.replace(old, new))
+
+          one_shot = Path('.github/workflows/one-shot-fix-security-ci-default-count.yml')
+          one_shot.unlink()
+          PY
+
+      - name: Commit fix to dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/ci.yml .github/workflows/one-shot-fix-security-ci-default-count.yml
+          git commit -m "Fix Security DEV permission default verification count"
+          git push origin HEAD:dev
