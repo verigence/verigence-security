@@ -21,8 +21,10 @@ EXPECTED_DEFAULT_COUNTS = {
     "TL": 32,
     "PM": 39,
     "CRM": 15,
-    "Executive": 38,
+    "Executive": 39,
 }
+
+_FULL_CONTACT_PERMISSION = "audit.customer.contact.full.read"
 
 
 def _sqlalchemy_url(url: str) -> str:
@@ -72,10 +74,28 @@ def test_platform_operating_role_defaults_match_approved_counts() -> None:
             )
             assert "audit.master.write" in executive
             assert "audit.customer.write" in executive
+            assert _FULL_CONTACT_PERMISSION in executive
             assert "audit.master.publish" not in executive
             assert "audit.journey.create" not in executive
             assert "di.requirement_profile.read" in executive
             assert "di.requirement_profile.write" not in executive
+
+            ordinary_roles_with_full_contact = list(
+                conn.execute(
+                    text(
+                        """
+                        SELECT role_key
+                        FROM security.platform_role_permission_defaults
+                        WHERE permission_key=:permission_key
+                          AND role_key IN ('PC','TL','PM','CRM')
+                          AND status='ACTIVE'
+                        ORDER BY role_key
+                        """
+                    ),
+                    {"permission_key": _FULL_CONTACT_PERMISSION},
+                ).scalars()
+            )
+            assert ordinary_roles_with_full_contact == []
     finally:
         engine.dispose()
 
@@ -160,6 +180,11 @@ def test_new_tenant_seed_copies_current_platform_defaults() -> None:
         )
         assert tenant_rows == platform_rows
         assert len(tenant_rows) == sum(EXPECTED_DEFAULT_COUNTS.values())
+        assert ("Executive", _FULL_CONTACT_PERMISSION) in tenant_rows
+        assert all(
+            (role_key, _FULL_CONTACT_PERMISSION) not in tenant_rows
+            for role_key in ("PC", "TL", "PM", "CRM")
+        )
     finally:
         session.close()
         transaction.rollback()
