@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 
 from verigence_security.adapters.clerk_backend import (
     ClerkBackendClient,
@@ -16,6 +17,36 @@ class ClerkCredentialResult:
     clerk_user: ClerkBackendUser
 
 
+_shared_clerk_lock = Lock()
+_shared_clerk_key: tuple[str, str] | None = None
+_shared_clerk_client: ClerkBackendClient | None = None
+
+
+def _shared_clerk(settings: Settings) -> ClerkBackendClient:
+    """Reuse Clerk's outbound HTTP connection pool across credential logins.
+
+    Credential values are never cached. Only the backend adapter/transport is reused so
+    consecutive Clerk calls (find user, verify password, optional TOTP) can reuse TCP/TLS
+    connections instead of constructing a new httpx client for every operation.
+    """
+
+    global _shared_clerk_key, _shared_clerk_client
+    key = (
+        settings.clerk_backend_api_url.rstrip('/'),
+        settings.clerk_secret_key.strip(),
+    )
+    with _shared_clerk_lock:
+        if _shared_clerk_client is None or _shared_clerk_key != key:
+            _shared_clerk_client = ClerkBackendClient(settings)
+            # Give the adapter one persistent client. ClerkBackendClient otherwise creates
+            # and closes a temporary httpx.Client for each individual API operation.
+            import httpx
+
+            _shared_clerk_client._client = httpx.Client(timeout=10.0)  # noqa: SLF001
+            _shared_clerk_key = key
+        return _shared_clerk_client
+
+
 class ClerkCredentialService:
     """Backend-only human credential verification against Clerk.
 
@@ -24,7 +55,7 @@ class ClerkCredentialService:
     """
 
     def __init__(self, settings: Settings, clerk: ClerkBackendClient | None = None) -> None:
-        self.clerk = clerk or ClerkBackendClient(settings)
+        self.clerk = clerk or _shared_clerk(settings)
 
     def authenticate(
         self,
