@@ -78,6 +78,13 @@ class StructuredJsonFormatter(logging.Formatter):
             "http_status_code",
             "dependency_name",
             "dependency_type",
+            # Explicitly approved diagnostics. These fields are populated only with controlled
+            # validation metadata or safe Clerk status/code/operation text. Request values,
+            # provider detail, passwords, onboarding keys, OTPs and applicant PII remain excluded.
+            "validation_issues",
+            "provider_status_code",
+            "provider_error_code",
+            "provider_operation",
         ):
             value = getattr(record, key, None)
             if value is not None:
