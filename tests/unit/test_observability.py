@@ -80,6 +80,46 @@ def test_structured_formatter_includes_correlation_without_business_values():
     assert "span_id" not in payload
 
 
+def test_structured_formatter_emits_only_safe_uc001_diagnostic_fields():
+    formatter = StructuredJsonFormatter(
+        service_name="verigence-security",
+        service_version="test-sha",
+        environment="ci",
+    )
+    record = logging.LogRecord(
+        name="verigence_security.api.routes.global_users",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="uc001_onboarding_clerk_failure",
+        args=(),
+        exc_info=None,
+    )
+    record.event_name = "uc001_onboarding_clerk_failure"  # type: ignore[attr-defined]
+    record.provider_status_code = 422  # type: ignore[attr-defined]
+    record.provider_error_code = "form_param_missing"  # type: ignore[attr-defined]
+    record.provider_operation = "Clerk Backend API returned HTTP 422 for POST /users"  # type: ignore[attr-defined]
+    record.validation_issues = "header.X-Onboarding-Key:string_too_short"  # type: ignore[attr-defined]
+    # Arbitrary log-record data must remain excluded by the formatter allow-list.
+    record.password = "NeverLogThisPassword"  # type: ignore[attr-defined]
+    record.onboarding_key = "NeverLogThisKey"  # type: ignore[attr-defined]
+    record.provider_detail = "NeverLogProviderDetail"  # type: ignore[attr-defined]
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["provider_status_code"] == 422
+    assert payload["provider_error_code"] == "form_param_missing"
+    assert payload["provider_operation"] == "Clerk Backend API returned HTTP 422 for POST /users"
+    assert payload["validation_issues"] == "header.X-Onboarding-Key:string_too_short"
+    assert "password" not in payload
+    assert "onboarding_key" not in payload
+    assert "provider_detail" not in payload
+    serialized = json.dumps(payload)
+    assert "NeverLogThisPassword" not in serialized
+    assert "NeverLogThisKey" not in serialized
+    assert "NeverLogProviderDetail" not in serialized
+
+
 def test_trusted_user_id_is_added_only_to_recording_trace(monkeypatch: pytest.MonkeyPatch):
     attributes: dict[str, str] = {}
 
