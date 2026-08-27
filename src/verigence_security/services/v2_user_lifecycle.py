@@ -129,8 +129,8 @@ class V2UserLifecycleService:
                 post_commit_ban_subject = clerk_subject
 
             elif target == "DISABLED":
-                if current != "ACTIVE":
-                    raise ValueError("Deletion can be requested only for an ACTIVE USER")
+                if current not in {"ACTIVE", "REJECTED"}:
+                    raise ValueError("Deletion can be requested only for an ACTIVE or REJECTED USER")
                 if (reason_code or "").strip().upper() != "DELETE_REQUEST":
                     raise ValueError("DISABLED requires reasonCode=DELETE_REQUEST")
                 self._require_deletion_maker(actor, user_id)
