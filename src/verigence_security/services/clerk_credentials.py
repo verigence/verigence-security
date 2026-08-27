@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
+import httpx
 from sqlalchemy import text
 
 from verigence_security.adapters.clerk_backend import (
@@ -23,6 +25,34 @@ class ClerkCredentialResult:
     clerk_user: ClerkBackendUser
 
 
+_shared_clerk_lock = Lock()
+_shared_clerk_clients: dict[tuple[str, str], ClerkBackendClient] = {}
+
+
+def _shared_clerk(settings: Settings) -> ClerkBackendClient:
+    """Reuse Clerk's outbound HTTP connection pool across human login requests.
+
+    No password, OTP, user profile, or authentication result is cached. Only the backend
+    HTTP transport is reused so get_user + verify_password can reuse an established TCP/TLS
+    connection instead of creating and closing a new httpx client for each Clerk operation.
+    """
+
+    key = (
+        settings.clerk_backend_api_url.rstrip("/"),
+        settings.clerk_secret_key.strip(),
+    )
+    with _shared_clerk_lock:
+        existing = _shared_clerk_clients.get(key)
+        if existing is not None:
+            return existing
+        clerk = ClerkBackendClient(
+            settings,
+            client=httpx.Client(timeout=10.0),
+        )
+        _shared_clerk_clients[key] = clerk
+        return clerk
+
+
 class ClerkCredentialService:
     """Backend-only Phase-1 human password verification against Clerk.
 
@@ -38,7 +68,7 @@ class ClerkCredentialService:
 
     def __init__(self, settings: Settings, clerk: ClerkBackendClient | None = None) -> None:
         self.settings = settings
-        self.clerk = clerk or ClerkBackendClient(settings)
+        self.clerk = clerk or _shared_clerk(settings)
 
     def authenticate(
         self,
