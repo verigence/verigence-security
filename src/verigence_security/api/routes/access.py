@@ -154,7 +154,7 @@ def credential_login(
 ) -> dict[str, object]:
     """Authenticate a global human USER through Security -> Clerk Backend API."""
 
-    authenticated = ClerkCredentialService(settings).authenticate(
+    authenticated = ClerkCredentialService(settings, session=repo.s).authenticate(
         identifier=body.identifier,
         password=body.password.get_secret_value(),
     )
