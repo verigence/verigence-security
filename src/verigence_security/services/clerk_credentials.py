@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from verigence_security.adapters.clerk_backend import (
     ClerkBackendClient,
@@ -66,9 +67,15 @@ class ClerkCredentialService:
     Clerk credential rejection without logging identifiers, passwords, OTPs or provider detail.
     """
 
-    def __init__(self, settings: Settings, clerk: ClerkBackendClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        clerk: ClerkBackendClient | None = None,
+        session: Session | None = None,
+    ) -> None:
         self.settings = settings
         self.clerk = clerk or _shared_clerk(settings)
+        self.session = session
 
     def authenticate(
         self,
@@ -124,10 +131,15 @@ class ClerkCredentialService:
         logger.warning("Human credential authentication denied; stage=%s", stage)
 
     def _resolve_verigence_clerk_subject(self, normalized_email: str) -> str | None:
-        factory = build_session_factory(self.settings)
-        if factory is None:
-            raise security_error("DATABASE_UNAVAILABLE")
-        session = factory()
+        session = self.session
+        owns_session = False
+        if session is None:
+            factory = build_session_factory(self.settings)
+            if factory is None:
+                raise security_error("DATABASE_UNAVAILABLE")
+            session = factory()
+            owns_session = True
+
         try:
             rows = session.execute(
                 text(
@@ -186,7 +198,8 @@ class ClerkCredentialService:
             subject = row["provider_subject"]
             return str(subject) if isinstance(subject, str) and subject.startswith("user_") else None
         finally:
-            session.close()
+            if owns_session:
+                session.close()
 
     def _clerk_user(self, clerk_user_id: str) -> ClerkBackendUser:
         data = self.clerk.get_user(clerk_user_id)
