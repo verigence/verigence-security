@@ -239,7 +239,7 @@ jobs:
             WHERE d.status='ACTIVE' AND p.status='ACTIVE'
               AND d.role_key IN ('PC','TL','PM','CRM','Executive');
           ")"
-          [ "$v2_default_count" = "156" ] || {
+          [ "$v2_default_count" = "157" ] || {
             echo "::error::Security v2 operating-role default seed verification failed."
             exit 1
           }
