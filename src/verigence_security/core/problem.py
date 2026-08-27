@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import Request
+from fastapi.exception_handlers import request_validation_exception_handler as fastapi_validation_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from verigence_security.core.correlation import HEADER
@@ -15,6 +17,56 @@ def _route_template(request: Request) -> str | None:
     route = request.scope.get("route")
     path = getattr(route, "path", None)
     return path if isinstance(path, str) and path else None
+
+
+def _validation_issue_summary(exc: RequestValidationError) -> str:
+    """Return field/type-only validation diagnostics without request values or PII."""
+
+    summaries: list[str] = []
+    for issue in exc.errors()[:12]:
+        location = issue.get("loc")
+        if isinstance(location, (list, tuple)):
+            field = ".".join(str(part) for part in location)
+        else:
+            field = "unknown"
+        issue_type = issue.get("type")
+        safe_type = issue_type if isinstance(issue_type, str) and issue_type else "validation_error"
+        summaries.append(f"{field}:{safe_type}")
+    return ",".join(summaries) if summaries else "unknown"
+
+
+async def request_validation_error_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """Log safe 422 diagnostics while preserving FastAPI's normal validation response.
+
+    Only field locations and Pydantic validation types are logged. Request bodies, header values,
+    passwords, onboarding keys, OTPs, emails, phone numbers and validation inputs are never logged.
+    """
+
+    if not isinstance(exc, RequestValidationError):
+        raise exc
+
+    cid = getattr(request.state, "correlation_id", None)
+    issues = _validation_issue_summary(exc)
+    logger.warning(
+        "security_request_validation_failed correlation_id=%s issues=%s",
+        cid,
+        issues,
+        extra={
+            "event_name": "security_request_validation_failed",
+            "outcome": "FAILURE",
+            "http_method": request.method,
+            "http_route": _route_template(request) or request.url.path,
+            "http_status_code": 422,
+            "validation_issues": issues,
+        },
+    )
+    response = await fastapi_validation_handler(request, exc)
+    if cid:
+        response.headers[HEADER] = cid
+    return response
 
 
 def security_error_handler(request: Request, exc: Exception) -> JSONResponse:
