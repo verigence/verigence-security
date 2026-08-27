@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 
 from verigence_security.api.dependencies import correlation_header_parameter
 from verigence_security.api.routes import (
@@ -27,7 +28,11 @@ from verigence_security.config import get_settings
 from verigence_security.core.correlation import CorrelationIdMiddleware
 from verigence_security.core.errors import SecurityError
 from verigence_security.core.observability import configure_observability
-from verigence_security.core.problem import security_error_handler, unexpected_error_handler
+from verigence_security.core.problem import (
+    request_validation_error_handler,
+    security_error_handler,
+    unexpected_error_handler,
+)
 
 settings = get_settings()
 
@@ -41,6 +46,7 @@ app = FastAPI(
     dependencies=[Depends(correlation_header_parameter)],
 )
 app.add_middleware(CorrelationIdMiddleware)
+app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 app.add_exception_handler(SecurityError, security_error_handler)
 app.add_exception_handler(Exception, unexpected_error_handler)
 app.include_router(health.router)

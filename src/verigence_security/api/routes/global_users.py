@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -20,6 +21,7 @@ from verigence_security.services.phase1_self_onboarding import Phase1SelfOnboard
 from verigence_security.services.uc001_self_onboarding import UC001SelfOnboardingService
 
 router = APIRouter(prefix="/security/v1", tags=["Global User Onboarding"])
+logger = logging.getLogger(__name__)
 
 
 class GlobalUserOnboardingRequest(BaseModel):
@@ -48,6 +50,33 @@ def _clerk(settings: Settings) -> ClerkBackendClient:
         return ClerkBackendClient(settings)
     except ClerkBackendError as exc:
         raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
+
+
+def _log_onboarding_clerk_failure(request: Request, exc: ClerkBackendError) -> None:
+    """Emit actionable Clerk diagnostics without logging request secrets or applicant PII."""
+
+    correlation_id = getattr(request.state, "correlation_id", None)
+    provider_code = exc.provider_code or "unknown"
+    provider_status = exc.status_code if exc.status_code is not None else "none"
+    # ClerkBackendError messages contain only the provider operation/status or internal invariant
+    # name. Never log provider_detail because it is provider-controlled and may contain user data.
+    provider_operation = str(exc).replace("\n", " ")[:240]
+    logger.warning(
+        "uc001_onboarding_clerk_failure correlation_id=%s provider_status=%s provider_code=%s operation=%s",
+        correlation_id,
+        provider_status,
+        provider_code,
+        provider_operation,
+        extra={
+            "event_name": "uc001_onboarding_clerk_failure",
+            "outcome": "FAILURE",
+            "http_method": request.method,
+            "http_route": "/security/v1/onboarding/users",
+            "provider_status_code": exc.status_code,
+            "provider_error_code": provider_code,
+            "provider_operation": provider_operation,
+        },
+    )
 
 
 def _clerk_failure(exc: ClerkBackendError) -> HTTPException:
@@ -114,6 +143,7 @@ def start_global_user_onboarding(
             clerk=_clerk(settings),
         )
     except ClerkBackendError as exc:
+        _log_onboarding_clerk_failure(request, exc)
         raise _clerk_failure(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
