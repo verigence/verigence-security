@@ -121,3 +121,25 @@ def test_login_resolution_ignores_revoked_historical_clerk_identity(
     assert subject == "user_active"
     assert "e.status='ACTIVE'" in session.sql
     assert session.closed
+
+
+def test_injected_login_session_is_reused_and_left_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FilterSensitiveSession()
+
+    def _unexpected_factory(_settings: Settings) -> object:
+        raise AssertionError("Injected login session must avoid a second session factory checkout")
+
+    monkeypatch.setattr(clerk_credentials, "build_session_factory", _unexpected_factory)
+    service = ClerkCredentialService(
+        _settings(),
+        clerk=_NeverClerk(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
+    )
+
+    subject = service._resolve_verigence_clerk_subject("superadmin@example.com")
+
+    assert subject == "user_active"
+    assert "e.status='ACTIVE'" in session.sql
+    assert not session.closed
