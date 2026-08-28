@@ -1,0 +1,164 @@
+name: One-shot retire stale Phase1 TestUser shadowing TL
+
+on:
+  push:
+    branches: [diagnose/uc03-tl-authz-20260828]
+    paths:
+      - '.github/workflows/one-shot-uc03-retire-stale-testuser.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SERVICE: security
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install reconciliation dependencies
+        run: |
+          pip install -e .
+          npm install --global @railway/cli
+      - name: Retire stale TestUser binding and prove TL authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/dev/null
+          railway variable list --service "$SERVICE" --environment dev --json >/tmp/security-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.orm import Session
+          from verigence_security.repositories.v2_authorization_repository import V2AuthorizationRepository
+          from verigence_security.services.v2_authorization import HumanAuthorizationResolver
+
+          variables = json.loads(Path('/tmp/security-vars.json').read_text())
+          database_url = str(variables.get('DATABASE_URL') or '')
+          if not database_url:
+              raise SystemExit('DATABASE_URL unavailable')
+
+          required_permissions = (
+              'audit.journey.read',
+              'audit.review.read',
+              'audit.review.decide',
+          )
+          engine = create_engine(database_url)
+          with Session(engine) as session:
+              session.execute(text("SELECT pg_advisory_xact_lock(hashtext('verigence.uc03.retire_stale_testuser'))"))
+
+              binding = session.execute(text('''
+                  SELECT user_id, tenant_id, status
+                  FROM security.phase1_test_identity
+                  WHERE singleton_id=1
+                  FOR UPDATE
+              ''')).mappings().one_or_none()
+              if binding is None:
+                  raise RuntimeError('Phase1 TestUser singleton is missing; refusing reconciliation')
+              if str(binding['status']) != 'ACTIVE':
+                  print('RECONCILIATION=NOOP_ALREADY_INACTIVE')
+                  session.rollback()
+                  raise SystemExit(0)
+
+              user_id = str(binding['user_id'])
+              test_tenant_id = str(binding['tenant_id'])
+              roles = session.execute(text('''
+                  SELECT tenant_id, role_key
+                  FROM security.user_tenant_operating_roles
+                  WHERE user_id=:user_id
+                    AND status='ACTIVE'
+                    AND (valid_from_utc IS NULL OR valid_from_utc <= CURRENT_TIMESTAMP)
+                    AND (valid_to_utc IS NULL OR valid_to_utc > CURRENT_TIMESTAMP)
+                  FOR UPDATE
+              '''), {'user_id': user_id}).mappings().all()
+              if len(roles) != 1 or str(roles[0]['role_key']) != 'TL':
+                  raise RuntimeError('Expected exactly one ACTIVE TL operating role for TestUser; refusing reconciliation')
+              tl_tenant_id = str(roles[0]['tenant_id'])
+              if tl_tenant_id == test_tenant_id:
+                  raise RuntimeError('TestUser and TL tenants unexpectedly match; refusing reconciliation')
+
+              active_admin_count = int(session.execute(text('''
+                  SELECT count(*) FROM security.user_admin_role_assignments
+                  WHERE user_id=:user_id AND status='ACTIVE'
+              '''), {'user_id': user_id}).scalar_one())
+              if active_admin_count != 0:
+                  raise RuntimeError('TL user has ACTIVE admin role assignments; refusing reconciliation')
+
+              states = session.execute(text('''
+                  SELECT u.status AS user_status,
+                         p.status AS principal_status,
+                         e.status AS identity_status,
+                         t.status AS tenant_status
+                  FROM security.users u
+                  JOIN security.security_principals p ON p.principal_id=u.user_id
+                  JOIN security.external_identities e
+                    ON e.user_id=u.user_id AND e.provider='CLERK'
+                  JOIN security.tenants t ON t.tenant_id=:tenant_id
+                  WHERE u.user_id=:user_id
+              '''), {'user_id': user_id, 'tenant_id': tl_tenant_id}).mappings().one()
+              if any(str(states[key]) != 'ACTIVE' for key in ('user_status','principal_status','identity_status','tenant_status')):
+                  raise RuntimeError('TL identity or Tenant is not fully ACTIVE; refusing reconciliation')
+
+              actual_permissions = set(session.execute(text('''
+                  SELECT permission_key
+                  FROM security.tenant_role_permissions
+                  WHERE tenant_id=:tenant_id
+                    AND role_key='TL'
+                    AND permission_key = ANY(CAST(:permissions AS text[]))
+              '''), {'tenant_id': tl_tenant_id, 'permissions': list(required_permissions)}).scalars())
+              if actual_permissions != set(required_permissions):
+                  raise RuntimeError('Required TL permissions are not materialized; refusing reconciliation')
+
+              resolver = HumanAuthorizationResolver(V2AuthorizationRepository(session))
+              before = resolver.check(
+                  user_id=user_id,
+                  tenant_id=tl_tenant_id,
+                  permission_key='audit.journey.read',
+              )
+              print(f'BEFORE_ALLOWED={before.allowed}')
+              print(f'BEFORE_REASON={before.reason_code}')
+              print(f'BEFORE_CLASSIFICATION={before.classification}')
+              if before.allowed or before.reason_code != 'TEST_TENANT_REQUIRED' or before.classification != 'TestUser':
+                  raise RuntimeError('Precondition is not the diagnosed stale TestUser shadow; refusing reconciliation')
+
+              session.execute(text('''
+                  UPDATE security.phase1_test_identity
+                  SET status='INACTIVE'
+                  WHERE singleton_id=1
+                    AND user_id=:user_id
+                    AND tenant_id=:test_tenant_id
+                    AND status='ACTIVE'
+              '''), {'user_id': user_id, 'test_tenant_id': test_tenant_id})
+              session.flush()
+
+              for permission in required_permissions:
+                  decision = resolver.check(
+                      user_id=user_id,
+                      tenant_id=tl_tenant_id,
+                      permission_key=permission,
+                  )
+                  print(f'AFTER_{permission}_ALLOWED={decision.allowed}')
+                  print(f'AFTER_{permission}_REASON={decision.reason_code}')
+                  print(f'AFTER_{permission}_CLASSIFICATION={decision.classification}')
+                  print(f'AFTER_{permission}_ROLE={decision.role_key}')
+                  if not decision.allowed or decision.classification != 'OperatingUser' or decision.role_key != 'TL':
+                      raise RuntimeError(f'TL authorization proof failed for {permission}; rolling back')
+
+              status = session.execute(text('''
+                  SELECT status FROM security.phase1_test_identity WHERE singleton_id=1
+              ''')).scalar_one()
+              if str(status) != 'INACTIVE':
+                  raise RuntimeError('Phase1 TestUser binding did not become INACTIVE')
+
+              session.commit()
+              print('RECONCILIATION=COMMITTED')
+              print('POST_STATUS=INACTIVE')
+          PY
