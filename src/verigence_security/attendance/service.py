@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from verigence_security.attendance.audit_core import AuditCoreAttendanceClient
 from verigence_security.attendance.config import AttendanceSettings
