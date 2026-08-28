@@ -69,18 +69,18 @@ def _dependencies(monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides.clear()
 
 
-def test_phase1_login_openapi_has_only_identifier_and_password_body_fields() -> None:
+def test_phase1_login_openapi_adds_optional_device_without_reintroducing_tenant_geo() -> None:
     schema = app.openapi()
     operation = schema["paths"]["/security/v1/auth/login"]["post"]
     request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
     component_name = request_schema["$ref"].rsplit("/", 1)[-1]
     component = schema["components"]["schemas"][component_name]
 
-    assert set(component["properties"]) == {"identifier", "password"}
+    assert set(component["properties"]) == {"identifier", "password", "device"}
     assert set(component["required"]) == {"identifier", "password"}
 
 
-def test_phase1_login_requires_no_tenant_device_geo_or_idempotency_header(
+def test_phase1_login_remains_backward_compatible_without_device_context(
     _dependencies: _FakeTokens,
 ) -> None:
     response = client.post(
@@ -95,7 +95,35 @@ def test_phase1_login_requires_no_tenant_device_geo_or_idempotency_header(
     assert response.json()["accessToken"] == "security-human-token"
     assert response.json()["actorType"] == "USER"
     assert response.json()["isSuperAdmin"] is False
+    assert response.json()["sessionId"]
+    assert response.json()["deviceId"]
     assert _dependencies.claims.user_id == "11111111-1111-1111-1111-111111111111"
+    assert _dependencies.claims.session_id
+    assert _dependencies.claims.device_id
+
+
+def test_phase1_login_binds_supplied_device_id_into_human_token(
+    _dependencies: _FakeTokens,
+) -> None:
+    device_id = "22222222-2222-2222-2222-222222222222"
+    response = client.post(
+        "/security/v1/auth/login",
+        json={
+            "identifier": "amit@example.com",
+            "password": "safe-password-123",
+            "device": {
+                "deviceId": device_id,
+                "deviceType": "WEB",
+                "platform": "WINDOWS",
+                "browserName": "Chrome",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deviceId"] == device_id
+    assert _dependencies.claims.device_id == device_id
+    assert _dependencies.claims.session_id == response.json()["sessionId"]
 
 
 def test_optional_device_geo_headers_do_not_change_phase1_login(
