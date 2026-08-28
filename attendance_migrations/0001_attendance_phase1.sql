@@ -4,7 +4,9 @@ CREATE SCHEMA IF NOT EXISTS attendance;
 
 CREATE TABLE IF NOT EXISTS attendance.schema_migrations (
     migration_name varchar(160) PRIMARY KEY,
-    applied_at_utc timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+    sha256 char(64) NOT NULL,
+    applied_at_utc timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    applied_by_revision varchar(160) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS attendance.policy (
