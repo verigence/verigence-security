@@ -12,12 +12,14 @@ from sqlalchemy.orm import Session
 from verigence_security.attendance.audit_core import AuditCoreAttendanceClient
 from verigence_security.attendance.config import AttendanceSettings, get_attendance_settings
 from verigence_security.attendance.db import attendance_session
+from verigence_security.attendance.overview import build_attendance_overview
 from verigence_security.attendance.repository import AttendanceRepository
 from verigence_security.attendance.runtime_service import RuntimeAttendanceService as AttendanceService
 from verigence_security.attendance.schemas import (
     AttendanceActionRequest,
     AttendanceActionResponse,
     AttendanceListResponse,
+    AttendanceOverviewResponse,
     AttendancePolicyResponse,
     AttendancePolicyUpdate,
     AttendanceRecord,
@@ -135,6 +137,21 @@ def tenant_day(
     service: Annotated[AttendanceService, Depends(attendance_service)],
 ) -> AttendanceListResponse:
     return service.tenant_day(
+        tenant_id=tenant_id,
+        user_id=context.human.user_id,
+        attendance_date=attendance_date,
+    )
+
+
+@router.get("/tenants/{tenant_id}/overview", response_model=AttendanceOverviewResponse)
+def tenant_overview(
+    tenant_id: UUID,
+    attendance_date: Annotated[date, Query(alias="attendanceDate")],
+    context: Annotated[AttendanceRequestContext, Depends(attendance_request_context)],
+    service: Annotated[AttendanceService, Depends(attendance_service)],
+) -> AttendanceOverviewResponse:
+    return build_attendance_overview(
+        service,
         tenant_id=tenant_id,
         user_id=context.human.user_id,
         attendance_date=attendance_date,
