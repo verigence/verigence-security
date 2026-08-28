@@ -127,3 +127,15 @@ def test_hradmin_without_operating_assignment_remains_non_geofenced() -> None:
     assert context.operatingRole == "HRADMIN"
     assert context.geofenceRequired is False
     assert context.outlets == []
+
+
+def test_attendance_cors_adds_only_approved_native_origins() -> None:
+    settings = AttendanceSettings(
+        allowed_origins="https://verigence-web-dev.example,capacitor://localhost"
+    )
+
+    assert settings.allowed_origin_list == [
+        "https://verigence-web-dev.example",
+        "capacitor://localhost",
+        "https://localhost",
+    ]
