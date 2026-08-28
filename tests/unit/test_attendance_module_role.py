@@ -41,31 +41,15 @@ class AttendanceAuthorizationRepository:
         return "ACTIVE" if tenant_id == TENANT_ID else None
 
     def active_admin_assignments(self, user_id: str) -> list[dict[str, Any]]:
-        return []
-
-    def active_module_roles(
-        self,
-        *,
-        user_id: str,
-        tenant_id: str,
-        module_key: str,
-    ) -> list[str]:
-        if user_id == USER_ID and tenant_id == TENANT_ID and module_key == "attendance":
-            return ["HRADMIN"]
-        return []
-
-    def module_role_has_permission(
-        self,
-        *,
-        module_key: str,
-        role_key: str,
-        permission_key: str,
-    ) -> bool:
-        return (
-            module_key == "attendance"
-            and role_key == "HRADMIN"
-            and permission_key.startswith("attendance.")
-        )
+        if user_id != USER_ID:
+            return []
+        return [
+            {
+                "role_key": "HRAdmin",
+                "scope_type": "TENANT",
+                "scope_id": TENANT_ID,
+            }
+        ]
 
     def active_operating_role(self, *, user_id: str, tenant_id: str) -> str | None:
         if user_id == USER_ID and tenant_id == TENANT_ID:
@@ -79,7 +63,11 @@ class AttendanceAuthorizationRepository:
         role_key: str,
         permission_key: str,
     ) -> bool:
-        return tenant_id == TENANT_ID and role_key == "TL" and permission_key == "audit.journey.read"
+        if tenant_id != TENANT_ID:
+            return False
+        if role_key == "HRAdmin":
+            return permission_key.startswith("attendance.")
+        return role_key == "TL" and permission_key == "audit.journey.read"
 
     def active_test_identity_for_user(self, user_id: str) -> str | None:
         return None
@@ -100,11 +88,24 @@ def test_hradmin_grants_attendance_without_replacing_operating_role() -> None:
     )
 
     assert attendance.allowed is True
-    assert attendance.reason_code == "ALLOW_MODULE_ROLE"
-    assert attendance.classification == "Module"
-    assert attendance.role_key == "HRADMIN"
+    assert attendance.reason_code == "ALLOW_HR_ADMIN"
+    assert attendance.classification == "Admin"
+    assert attendance.role_key == "HRAdmin"
 
     assert audit.allowed is True
     assert audit.reason_code == "ALLOW_OPERATING_ROLE"
     assert audit.classification == "Operating"
     assert audit.role_key == "TL"
+
+
+def test_hradmin_scope_is_tenant_specific() -> None:
+    resolver = HumanAuthorizationResolver(AttendanceAuthorizationRepository())
+    other_tenant = "00000000-0000-4000-8000-000000000202"
+
+    decision = resolver.check(
+        user_id=USER_ID,
+        tenant_id=other_tenant,
+        permission_key="attendance.all.read",
+    )
+
+    assert decision.allowed is False
