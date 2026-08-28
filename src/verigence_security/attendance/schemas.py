@@ -101,6 +101,32 @@ class AttendanceListResponse(BaseModel):
     items: list[AttendanceRecord]
 
 
+class AttendanceRosterMember(BaseModel):
+    userId: UUID
+    displayName: str
+    primaryEmail: str | None = None
+    operatingRole: str | None = None
+
+
+class AttendanceOverviewItem(BaseModel):
+    userId: UUID
+    displayName: str
+    primaryEmail: str | None = None
+    roleKey: str | None = None
+    status: str
+    attendance: AttendanceRecord | None = None
+
+
+class AttendanceOverviewResponse(BaseModel):
+    attendanceDate: date
+    totalEmployees: int
+    checkedIn: int
+    checkedOut: int
+    notCheckedIn: int
+    exceptions: int
+    items: list[AttendanceOverviewItem]
+
+
 class CapabilityResponse(BaseModel):
     canSelfRead: bool
     canCheckIn: bool
