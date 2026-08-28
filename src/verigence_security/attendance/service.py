@@ -136,7 +136,11 @@ class AttendanceService:
         )
 
     @staticmethod
-    def _validate_location(request: AttendanceActionRequest, policy: AttendancePolicyResponse, now_utc: datetime) -> None:
+    def _validate_location(
+        request: AttendanceActionRequest,
+        policy: AttendancePolicyResponse,
+        now_utc: datetime,
+    ) -> None:
         location = request.location
         captured_at = location.capturedAt
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
@@ -399,9 +403,11 @@ class AttendanceService:
         attendance_date: date,
     ) -> AttendanceListResponse:
         self._authorize(user_id=user_id, tenant_id=tenant_id, permission="attendance.all.read")
-        return AttendanceListResponse(
-            items=[self._record(row) for row in self.repository.tenant_day(tenant_id=tenant_id, attendance_date=attendance_date)]
+        rows = self.repository.tenant_day(
+            tenant_id=tenant_id,
+            attendance_date=attendance_date,
         )
+        return AttendanceListResponse(items=[self._record(row) for row in rows])
 
     def policy(self, *, tenant_id: UUID, user_id: UUID) -> AttendancePolicyResponse:
         self._authorize(user_id=user_id, tenant_id=tenant_id, permission="attendance.policy.read")
