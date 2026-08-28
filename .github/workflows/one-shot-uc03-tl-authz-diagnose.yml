@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
       - name: Install diagnostic dependencies
         run: |
-          pip install 'psycopg[binary]>=3.3,<4'
+          pip install -e .
           npm install --global @railway/cli
       - name: Inspect active TL effective authorization state
         shell: bash
@@ -35,73 +35,77 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          import psycopg
+
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.orm import Session
+          from verigence_security.repositories.v2_authorization_repository import V2AuthorizationRepository
+          from verigence_security.services.v2_authorization import HumanAuthorizationResolver
 
           variables = json.loads(Path('/tmp/security-vars.json').read_text())
           database_url = str(variables.get('DATABASE_URL') or '')
-          database_url = database_url.replace('postgresql+psycopg://','postgresql://',1).replace('postgresql+asyncpg://','postgresql://',1)
           if not database_url:
               raise SystemExit('DATABASE_URL unavailable')
 
-          with psycopg.connect(database_url) as conn:
-              with conn.cursor() as cur:
-                  cur.execute('''
-                      SELECT otr.user_id, otr.tenant_id
-                      FROM security.user_tenant_operating_roles otr
-                      JOIN security.tenants t ON t.tenant_id=otr.tenant_id
-                      WHERE otr.role_key='TL'
-                        AND otr.status='ACTIVE'
-                        AND t.status='ACTIVE'
-                        AND (otr.valid_from_utc IS NULL OR otr.valid_from_utc<=CURRENT_TIMESTAMP)
-                        AND (otr.valid_to_utc IS NULL OR otr.valid_to_utc>CURRENT_TIMESTAMP)
-                      ORDER BY otr.tenant_id, otr.user_id
-                  ''')
-                  rows = cur.fetchall()
-                  print('ACTIVE_TL_OPERATING_ROLES=' + str(len(rows)))
-                  for i,(user_id,tenant_id) in enumerate(rows,1):
-                      cur.execute('''
-                          SELECT EXISTS(
-                            SELECT 1 FROM security.tenant_role_permissions
-                            WHERE tenant_id=%s AND role_key='TL' AND permission_key='audit.journey.read'
-                          )
-                      ''',(tenant_id,))
-                      has_tenant_permission = bool(cur.fetchone()[0])
-                      cur.execute('''
-                          SELECT EXISTS(
-                            SELECT 1 FROM security.platform_role_permission_defaults
-                            WHERE role_key='TL' AND permission_key='audit.journey.read' AND status='ACTIVE'
-                          )
-                      ''')
-                      has_default = bool(cur.fetchone()[0])
-                      cur.execute('''
-                          SELECT role_key,scope_type
-                          FROM security.user_admin_role_assignments
-                          WHERE user_id=%s AND status='ACTIVE'
-                          ORDER BY role_key,scope_type
-                      ''',(user_id,))
-                      admins = cur.fetchall()
-                      cur.execute('''
-                          SELECT u.status,p.status,e.status
-                          FROM security.users u
-                          JOIN security.security_principals p ON p.principal_id=u.user_id
-                          JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
-                          WHERE u.user_id=%s
-                      ''',(user_id,))
-                      state = cur.fetchone()
-                      print(f'TL_{i}_TENANT_PERMISSION_AUDIT_JOURNEY_READ={has_tenant_permission}')
-                      print(f'TL_{i}_PLATFORM_DEFAULT_AUDIT_JOURNEY_READ={has_default}')
-                      print(f'TL_{i}_ADMIN_ASSIGNMENT_COUNT={len(admins)}')
-                      print(f'TL_{i}_ADMIN_ASSIGNMENT_KINDS=' + (','.join(f'{r}:{s}' for r,s in admins) if admins else 'NONE'))
-                      print(f'TL_{i}_IDENTITY_STATES=' + ('/'.join(str(x) for x in state) if state else 'MISSING'))
-
-                  cur.execute('''
-                      SELECT count(*)
-                      FROM security.tenant_role_permissions rp
-                      JOIN security.user_tenant_operating_roles otr
-                        ON otr.tenant_id=rp.tenant_id AND otr.role_key=rp.role_key
-                      WHERE otr.role_key='TL'
-                        AND otr.status='ACTIVE'
-                        AND rp.permission_key='audit.journey.read'
-                  ''')
-                  print('ACTIVE_TL_ROLE_PERMISSION_LINKS=' + str(cur.fetchone()[0]))
+          engine = create_engine(database_url)
+          with Session(engine) as session:
+              rows = session.execute(text('''
+                  SELECT otr.user_id, otr.tenant_id
+                  FROM security.user_tenant_operating_roles otr
+                  JOIN security.tenants t ON t.tenant_id=otr.tenant_id
+                  WHERE otr.role_key='TL'
+                    AND otr.status='ACTIVE'
+                    AND t.status='ACTIVE'
+                    AND (otr.valid_from_utc IS NULL OR otr.valid_from_utc<=CURRENT_TIMESTAMP)
+                    AND (otr.valid_to_utc IS NULL OR otr.valid_to_utc>CURRENT_TIMESTAMP)
+                  ORDER BY otr.tenant_id, otr.user_id
+              ''')).all()
+              print('ACTIVE_TL_OPERATING_ROLES=' + str(len(rows)))
+              resolver = HumanAuthorizationResolver(V2AuthorizationRepository(session))
+              for i,(user_id,tenant_id) in enumerate(rows,1):
+                  has_tenant_permission = bool(session.execute(text('''
+                      SELECT EXISTS(
+                        SELECT 1 FROM security.tenant_role_permissions
+                        WHERE tenant_id=:tenant_id AND role_key='TL' AND permission_key='audit.journey.read'
+                      )
+                  '''), {'tenant_id': tenant_id}).scalar_one())
+                  has_default = bool(session.execute(text('''
+                      SELECT EXISTS(
+                        SELECT 1 FROM security.platform_role_permission_defaults
+                        WHERE role_key='TL' AND permission_key='audit.journey.read' AND status='ACTIVE'
+                      )
+                  ''')).scalar_one())
+                  admins = session.execute(text('''
+                      SELECT role_key,scope_type
+                      FROM security.user_admin_role_assignments
+                      WHERE user_id=:user_id AND status='ACTIVE'
+                      ORDER BY role_key,scope_type
+                  '''), {'user_id': user_id}).all()
+                  state = session.execute(text('''
+                      SELECT u.status,p.status,e.status
+                      FROM security.users u
+                      JOIN security.security_principals p ON p.principal_id=u.user_id
+                      JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+                      WHERE u.user_id=:user_id
+                  '''), {'user_id': user_id}).first()
+                  test_identity = session.execute(text('''
+                      SELECT tenant_id
+                      FROM security.phase1_test_identity
+                      WHERE singleton_id=1 AND user_id=:user_id AND status='ACTIVE'
+                  '''), {'user_id': user_id}).scalar_one_or_none()
+                  decision = resolver.check(
+                      user_id=str(user_id),
+                      tenant_id=str(tenant_id),
+                      permission_key='audit.journey.read',
+                  )
+                  print(f'TL_{i}_TENANT_PERMISSION_AUDIT_JOURNEY_READ={has_tenant_permission}')
+                  print(f'TL_{i}_PLATFORM_DEFAULT_AUDIT_JOURNEY_READ={has_default}')
+                  print(f'TL_{i}_ADMIN_ASSIGNMENT_COUNT={len(admins)}')
+                  print(f'TL_{i}_ADMIN_ASSIGNMENT_KINDS=' + (','.join(f'{r}:{s}' for r,s in admins) if admins else 'NONE'))
+                  print(f'TL_{i}_IDENTITY_STATES=' + ('/'.join(str(x) for x in state) if state else 'MISSING'))
+                  print(f'TL_{i}_TEST_IDENTITY_ACTIVE={test_identity is not None}')
+                  print(f'TL_{i}_TEST_IDENTITY_MATCHES_TENANT={test_identity is not None and str(test_identity)==str(tenant_id)}')
+                  print(f'TL_{i}_RESOLVER_ALLOWED={decision.allowed}')
+                  print(f'TL_{i}_RESOLVER_REASON={decision.reason_code}')
+                  print(f'TL_{i}_RESOLVER_CLASSIFICATION={decision.classification}')
+                  print(f'TL_{i}_RESOLVER_ROLE={decision.role_key}')
           PY
