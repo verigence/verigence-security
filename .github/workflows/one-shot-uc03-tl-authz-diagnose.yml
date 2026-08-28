@@ -54,7 +54,7 @@ jobs:
                         AND t.status='ACTIVE'
                         AND (otr.valid_from_utc IS NULL OR otr.valid_from_utc<=CURRENT_TIMESTAMP)
                         AND (otr.valid_to_utc IS NULL OR otr.valid_to_utc>CURRENT_TIMESTAMP)
-                      ORDER BY otr.created_at_utc DESC NULLS LAST
+                      ORDER BY otr.tenant_id, otr.user_id
                   ''')
                   rows = cur.fetchall()
                   print('ACTIVE_TL_OPERATING_ROLES=' + str(len(rows)))
