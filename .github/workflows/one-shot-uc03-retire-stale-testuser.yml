@@ -149,7 +149,12 @@ jobs:
                   print(f'AFTER_{permission}_REASON={decision.reason_code}')
                   print(f'AFTER_{permission}_CLASSIFICATION={decision.classification}')
                   print(f'AFTER_{permission}_ROLE={decision.role_key}')
-                  if not decision.allowed or decision.classification != 'OperatingUser' or decision.role_key != 'TL':
+                  if (
+                      not decision.allowed
+                      or decision.reason_code != 'ALLOW_OPERATING_ROLE'
+                      or decision.classification != 'Operating'
+                      or decision.role_key != 'TL'
+                  ):
                       raise RuntimeError(f'TL authorization proof failed for {permission}; rolling back')
 
               status = session.execute(text('''
