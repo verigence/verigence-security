@@ -121,7 +121,9 @@ class AttendanceService:
                 UUID(str(row["check_in_dealer_id"])) if row.get("check_in_dealer_id") else None
             ),
             checkInDistanceMeters=(
-                float(row["check_in_distance_m"]) if row.get("check_in_distance_m") is not None else None
+                float(row["check_in_distance_m"])
+                if row.get("check_in_distance_m") is not None
+                else None
             ),
             checkOutAt=row.get("check_out_at_utc"),
             checkOutResult=(str(row["check_out_result"]) if row.get("check_out_result") else None),
@@ -132,7 +134,9 @@ class AttendanceService:
                 UUID(str(row["check_out_dealer_id"])) if row.get("check_out_dealer_id") else None
             ),
             checkOutDistanceMeters=(
-                float(row["check_out_distance_m"]) if row.get("check_out_distance_m") is not None else None
+                float(row["check_out_distance_m"])
+                if row.get("check_out_distance_m") is not None
+                else None
             ),
         )
 
@@ -237,7 +241,11 @@ class AttendanceService:
         local_now = now_utc.astimezone(self._timezone(policy)).time().replace(tzinfo=None)
         if row is None and local_now >= policy.checkinReminderLocal:
             reminder = "CHECK_IN"
-        elif row is not None and row.get("check_out_at_utc") is None and local_now >= policy.checkoutReminderLocal:
+        elif (
+            row is not None
+            and row.get("check_out_at_utc") is None
+            and local_now >= policy.checkoutReminderLocal
+        ):
             reminder = "CHECK_OUT"
         return TodayResponse(
             attendance=self._record(row) if row is not None else None,
@@ -263,14 +271,25 @@ class AttendanceService:
             user_id=user_id,
             attendance_date=attendance_date,
         ) is not None:
-            raise AttendanceRuleError("ALREADY_CHECKED_IN", "Attendance has already been started today.")
+            raise AttendanceRuleError(
+                "ALREADY_CHECKED_IN",
+                "Attendance has already been started today.",
+            )
 
         context = self.audit_core.current_work_context(
             tenant_id=tenant_id,
             human_bearer_token=human_bearer_token,
         )
+        if context is None:
+            raise AttendanceRuleError(
+                "WORK_CONTEXT_UNAVAILABLE",
+                "No active operating work context is available for this attendance action.",
+            )
         if context.userId != user_id:
-            raise AttendanceRuleError("WORK_CONTEXT_MISMATCH", "Attendance work context does not match the user.")
+            raise AttendanceRuleError(
+                "WORK_CONTEXT_MISMATCH",
+                "Attendance work context does not match the user.",
+            )
         decision = self._geofence(request=request, context=context, policy=policy)
         reason = (request.exceptionReason or "").strip() or None
         row = self.repository.create_check_in(
@@ -335,14 +354,25 @@ class AttendanceService:
         if row is None:
             raise AttendanceRuleError("NOT_CHECKED_IN", "No check-in exists for today.")
         if row.get("check_out_at_utc") is not None:
-            raise AttendanceRuleError("ALREADY_CHECKED_OUT", "Attendance has already been completed today.")
+            raise AttendanceRuleError(
+                "ALREADY_CHECKED_OUT",
+                "Attendance has already been completed today.",
+            )
 
         context = self.audit_core.current_work_context(
             tenant_id=tenant_id,
             human_bearer_token=human_bearer_token,
         )
+        if context is None:
+            raise AttendanceRuleError(
+                "WORK_CONTEXT_UNAVAILABLE",
+                "No active operating work context is available for this attendance action.",
+            )
         if context.userId != user_id:
-            raise AttendanceRuleError("WORK_CONTEXT_MISMATCH", "Attendance work context does not match the user.")
+            raise AttendanceRuleError(
+                "WORK_CONTEXT_MISMATCH",
+                "Attendance work context does not match the user.",
+            )
         decision = self._geofence(request=request, context=context, policy=policy)
         reason = (request.exceptionReason or "").strip() or None
         attendance_id = UUID(str(row["attendance_id"]))
@@ -363,7 +393,10 @@ class AttendanceService:
             }
         )
         if updated is None:
-            raise AttendanceRuleError("ALREADY_CHECKED_OUT", "Attendance has already been completed today.")
+            raise AttendanceRuleError(
+                "ALREADY_CHECKED_OUT",
+                "Attendance has already been completed today.",
+            )
         self.repository.append_event(
             attendance_id=attendance_id,
             tenant_id=tenant_id,
@@ -425,7 +458,10 @@ class AttendanceService:
         try:
             ZoneInfo(update.timezoneIana)
         except ZoneInfoNotFoundError as exc:
-            raise AttendanceRuleError("ATTENDANCE_POLICY_TIMEZONE_INVALID", "Unknown timezone.") from exc
+            raise AttendanceRuleError(
+                "ATTENDANCE_POLICY_TIMEZONE_INVALID",
+                "Unknown timezone.",
+            ) from exc
         row = self.repository.upsert_policy(
             tenant_id=tenant_id,
             updated_by_user_id=user_id,
@@ -462,7 +498,11 @@ class AttendanceService:
         attendance_id: UUID,
         request: CorrectionRequest,
     ) -> AttendanceRecord:
-        self._authorize(user_id=user_id, tenant_id=tenant_id, permission="attendance.correction.write")
+        self._authorize(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            permission="attendance.correction.write",
+        )
         row = self.repository.correct(
             tenant_id=tenant_id,
             attendance_id=attendance_id,
@@ -472,7 +512,10 @@ class AttendanceService:
             reason=request.reason.strip(),
         )
         if row is None:
-            raise AttendanceRuleError("ATTENDANCE_NOT_FOUND", "Attendance record was not found.")
+            raise AttendanceRuleError(
+                "ATTENDANCE_NOT_FOUND",
+                "Attendance record was not found.",
+            )
         self.repository.append_event(
             attendance_id=attendance_id,
             tenant_id=tenant_id,
