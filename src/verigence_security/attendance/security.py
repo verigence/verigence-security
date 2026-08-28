@@ -116,9 +116,12 @@ class SecurityAuthorizationClient:
                 timeout=self.settings.downstream_timeout_seconds,
             )
             response.raise_for_status()
-            payload = response.json()
+            raw_payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise AttendanceDependencyError("Security authorization is temporarily unavailable") from exc
+        if not isinstance(raw_payload, dict):
+            raise AttendanceDependencyError("Security authorization response is invalid")
+        payload: dict[str, Any] = {str(key): value for key, value in raw_payload.items()}
         if not bool(payload.get("allowed")):
             raise AttendanceAuthorizationError(str(payload.get("reasonCode", "PERMISSION_DENIED")))
         return payload
