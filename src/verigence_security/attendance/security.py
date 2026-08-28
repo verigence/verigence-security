@@ -130,9 +130,11 @@ class SecurityAuthorizationClient:
     def active_roster(self, *, tenant_id: UUID) -> list[AttendanceRosterMember]:
         if not self.settings.security_base_url.strip():
             raise AttendanceDependencyError("Attendance Security base URL is not configured")
+        base = self.settings.security_base_url.rstrip("/")
+        roster_url = f"{base}/security/v1/internal/attendance/tenants/{tenant_id}/roster"
         try:
             response = httpx.get(
-                f"{self.settings.security_base_url.rstrip('/')}/security/v1/internal/attendance/tenants/{tenant_id}/roster",
+                roster_url,
                 headers={"Authorization": f"Bearer {self._token()}"},
                 timeout=self.settings.downstream_timeout_seconds,
             )
