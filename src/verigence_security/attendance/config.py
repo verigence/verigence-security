@@ -5,6 +5,8 @@ from functools import lru_cache
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_CAPACITOR_ORIGINS = ("capacitor://localhost", "https://localhost")
+
 
 class AttendanceSettings(BaseSettings):
     """Configuration owned by the isolated Attendance runtime.
@@ -54,7 +56,15 @@ class AttendanceSettings(BaseSettings):
 
     @property
     def allowed_origin_list(self) -> list[str]:
-        return [value.strip() for value in self.allowed_origins.split(",") if value.strip()]
+        configured = [
+            value.strip()
+            for value in self.allowed_origins.split(",")
+            if value.strip()
+        ]
+        # The native Verigence app uses these stable Capacitor/WebView origins. Keep
+        # them local to the isolated Attendance runtime so native attendance works
+        # without widening CORS on Security, Audit Core, DI, or normal Web traffic.
+        return list(dict.fromkeys([*configured, *_CAPACITOR_ORIGINS]))
 
 
 @lru_cache
