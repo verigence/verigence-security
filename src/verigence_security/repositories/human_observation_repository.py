@@ -109,7 +109,8 @@ class HumanObservationRepository:
             previous_different_device = any(
                 str(row["device_id"]) != str(device_id) for row in previous
             )
-            result = self.s.execute(
+            superseded = len(previous)
+            self.s.execute(
                 text(
                     """
                     UPDATE security.human_access_sessions
@@ -119,7 +120,6 @@ class HumanObservationRepository:
                 ),
                 {"user_id": user_id, "now": now},
             )
-            superseded = int(result.rowcount or 0)
             self.s.execute(
                 text(
                     """
@@ -196,7 +196,7 @@ class HumanObservationRepository:
         captured_at: datetime | None,
         now: datetime,
     ) -> bool:
-        result = self.s.execute(
+        updated = self.s.execute(
             text(
                 """
                 UPDATE security.human_access_sessions
@@ -210,6 +210,7 @@ class HumanObservationRepository:
                 WHERE access_session_id=:session_id
                   AND user_id=:user_id
                   AND device_id=:device_id
+                RETURNING access_session_id
                 """
             ),
             {
@@ -224,9 +225,9 @@ class HumanObservationRepository:
                 "user_id": user_id,
                 "device_id": str(device_id),
             },
-        )
+        ).scalar_one_or_none()
         self.s.commit()
-        return int(result.rowcount or 0) > 0
+        return updated is not None
 
     def session_status(
         self,
