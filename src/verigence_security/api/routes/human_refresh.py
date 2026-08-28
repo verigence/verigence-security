@@ -85,6 +85,6 @@ def refresh_human_access_token(
         "expiresAtUtc": expires_at,
         "actorType": ActorType.USER.value,
         "isSuperAdmin": actor.is_super_admin,
-        "sessionId": session_id,
-        "deviceId": device_id,
+        "sessionId": str(session_id),
+        "deviceId": str(device_id),
     }
