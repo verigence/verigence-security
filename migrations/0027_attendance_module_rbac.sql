@@ -32,7 +32,7 @@ SET module_key=EXCLUDED.module_key,
     catalog_version='attendance-phase1',
     updated_at_utc=CURRENT_TIMESTAMP;
 
--- Operating-role defaults remain the normal role source. HRADMIN is a secondary module role.
+-- Operating-role defaults remain the normal primary role source. HRADMIN is secondary.
 WITH operating_defaults(role_key,permission_key) AS (
   VALUES
     ('PC','attendance.self.read'),
@@ -63,14 +63,28 @@ FROM operating_defaults
 ON CONFLICT (role_key,permission_key) DO UPDATE
 SET source_catalog_version='attendance-phase1',status='ACTIVE';
 
--- Materialize the new defaults for existing Tenant roles without disturbing any existing grant.
-INSERT INTO security.tenant_role_permissions (tenant_id,role_key,permission_key,created_at_utc)
-SELECT tr.tenant_id,d.role_key,d.permission_key,CURRENT_TIMESTAMP
-FROM security.tenant_roles tr
-JOIN security.platform_role_permission_defaults d
-  ON d.role_key=tr.role_key AND d.status='ACTIVE'
-WHERE d.source_catalog_version='attendance-phase1'
-ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING;
+-- Add Attendance permissions to already-materialized Tenant role bundles. The canonical
+-- SuperAdmin is recorded as the grant actor, matching the v2 reconciliation convention.
+DO $$
+DECLARE super_admin_user uuid;
+BEGIN
+  SELECT user_id INTO super_admin_user
+  FROM security.user_admin_role_assignments
+  WHERE role_key='SuperAdmin' AND scope_type='PLATFORM' AND status='ACTIVE'
+  LIMIT 1;
+  IF super_admin_user IS NULL THEN
+    RAISE EXCEPTION 'Attendance RBAC migration requires canonical active SuperAdmin';
+  END IF;
+
+  INSERT INTO security.tenant_role_permissions
+  (tenant_id,role_key,permission_key,assigned_by_user_id,assigned_at_utc)
+  SELECT t.tenant_id,d.role_key,d.permission_key,super_admin_user,CURRENT_TIMESTAMP
+  FROM security.tenants t
+  JOIN security.platform_role_permission_defaults d
+    ON d.status='ACTIVE' AND d.source_catalog_version='attendance-phase1'
+  WHERE t.status='ACTIVE'
+  ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING;
+END $$;
 
 CREATE TABLE IF NOT EXISTS security.module_roles (
     module_key              varchar(80) NOT NULL,
@@ -85,7 +99,7 @@ CREATE TABLE IF NOT EXISTS security.module_roles (
 CREATE TABLE IF NOT EXISTS security.module_role_permissions (
     module_key              varchar(80) NOT NULL,
     role_key                varchar(80) NOT NULL,
-    permission_key          varchar(160) NOT NULL REFERENCES security.permissions(permission_key),
+    permission_key          varchar(180) NOT NULL REFERENCES security.permissions(permission_key),
     status                  varchar(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
     created_at_utc          timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (module_key, role_key, permission_key),
@@ -94,21 +108,22 @@ CREATE TABLE IF NOT EXISTS security.module_role_permissions (
 
 CREATE TABLE IF NOT EXISTS security.user_module_role_assignments (
     assignment_id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id               varchar(128) NOT NULL REFERENCES security.tenants(tenant_id),
-    user_id                 varchar(160) NOT NULL REFERENCES security.users(user_id),
+    tenant_id               uuid NOT NULL REFERENCES security.tenants(tenant_id),
+    user_id                 uuid NOT NULL REFERENCES security.users(user_id),
     module_key              varchar(80) NOT NULL,
     role_key                varchar(80) NOT NULL,
-    status                  varchar(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
+    status                  varchar(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','ENDED')),
     valid_from_utc          timestamptz,
     valid_to_utc            timestamptz,
-    created_by_user_id      varchar(160),
-    created_at_utc          timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    assigned_by_user_id     uuid REFERENCES security.users(user_id),
+    assigned_at_utc         timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at_utc            timestamptz,
     updated_at_utc          timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (module_key, role_key) REFERENCES security.module_roles(module_key, role_key),
     CHECK (valid_to_utc IS NULL OR valid_from_utc IS NULL OR valid_to_utc > valid_from_utc)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_active_user_attendance_hradmin
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_user_module_role
 ON security.user_module_role_assignments (tenant_id,user_id,module_key,role_key)
 WHERE status='ACTIVE';
 
