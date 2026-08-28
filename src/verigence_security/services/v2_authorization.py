@@ -56,22 +56,6 @@ class AuthorizationRepository(Protocol):
 
     def active_admin_assignments(self, user_id: str) -> list[dict[str, Any]]: ...
 
-    def active_module_roles(
-        self,
-        *,
-        user_id: str,
-        tenant_id: str,
-        module_key: str,
-    ) -> list[str]: ...
-
-    def module_role_has_permission(
-        self,
-        *,
-        module_key: str,
-        role_key: str,
-        permission_key: str,
-    ) -> bool: ...
-
     def active_operating_role(self, *, user_id: str, tenant_id: str) -> str | None: ...
 
     def tenant_role_has_permission(
@@ -213,35 +197,38 @@ class HumanAuthorizationResolver:
                 role_key="PC",
             )
 
-        # Secondary module roles are intentionally narrow. They are consulted only for
-        # permissions that belong to that module, so HRADMIN cannot alter the user's
-        # operating role or gain authority in Audit/DI. If no secondary grant matches,
-        # normal admin/operating authorization continues unchanged.
-        if module_key == "attendance" and tenant is not None:
-            for module_role in self.repository.active_module_roles(
+        # HRAdmin deliberately reuses the existing admin-assignment and Tenant role-permission
+        # constructs, but is secondary: it can grant attendance.* without replacing or blocking
+        # the user's normal operating role in Audit/DI.
+        if (
+            module_key == "attendance"
+            and tenant is not None
+            and self._is_hr_admin(admin_assignments, tenant)
+            and self.repository.tenant_role_has_permission(
+                tenant_id=tenant,
+                role_key="HRAdmin",
+                permission_key=required_permission,
+            )
+        ):
+            return self._allow(
+                "ALLOW_HR_ADMIN",
                 user_id=resolved_user_id,
                 tenant_id=tenant,
-                module_key="attendance",
-            ):
-                if self.repository.module_role_has_permission(
-                    module_key="attendance",
-                    role_key=module_role,
-                    permission_key=required_permission,
-                ):
-                    return self._allow(
-                        "ALLOW_MODULE_ROLE",
-                        user_id=resolved_user_id,
-                        tenant_id=tenant,
-                        permission_key=required_permission,
-                        module_key=module_key,
-                        classification="Module",
-                        role_key=module_role,
-                    )
+                permission_key=required_permission,
+                module_key=module_key,
+                classification="Admin",
+                role_key="HRAdmin",
+            )
 
-        if admin_assignments:
+        # Preserve the existing primary-admin behavior exactly. HRAdmin is excluded from this
+        # branch so a PC/TL/PM/CRM/Executive who also handles HR keeps normal operating access.
+        primary_admin_assignments = [
+            row for row in admin_assignments if row.get("role_key") != "HRAdmin"
+        ]
+        if primary_admin_assignments:
             admin_set = MODULE_ADMIN_PERMISSIONS.get(module_key, frozenset())
             if required_permission in admin_set:
-                if tenant is not None and self._is_tenant_admin(admin_assignments, tenant):
+                if tenant is not None and self._is_tenant_admin(primary_admin_assignments, tenant):
                     return self._allow(
                         "ALLOW_TENANT_ADMIN",
                         user_id=resolved_user_id,
@@ -250,7 +237,7 @@ class HumanAuthorizationResolver:
                         module_key=module_key,
                         classification="TenantAdmin",
                     )
-                if self._is_module_admin(admin_assignments, module_key):
+                if self._is_module_admin(primary_admin_assignments, module_key):
                     return self._allow(
                         "ALLOW_MODULE_ADMIN",
                         user_id=resolved_user_id,
@@ -337,6 +324,15 @@ class HumanAuthorizationResolver:
             row.get("role_key") == "ModuleAdmin"
             and row.get("scope_type") == "MODULE"
             and str(row.get("scope_id")).lower() == module_key
+            for row in assignments
+        )
+
+    @staticmethod
+    def _is_hr_admin(assignments: list[dict[str, Any]], tenant_id: str) -> bool:
+        return any(
+            row.get("role_key") == "HRAdmin"
+            and row.get("scope_type") == "TENANT"
+            and str(row.get("scope_id")) == tenant_id
             for row in assignments
         )
 
