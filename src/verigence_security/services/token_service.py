@@ -160,7 +160,7 @@ class TokenService:
         payload: dict[str, Any] = {
             "iss": self.settings.security_token_issuer,
             "sub": claims.subject,
-            "aud": self.settings.security_token_audience,
+            "aud": claims.audience,
             "iat": now,
             "exp": claims.expires_at,
             "jti": str(uuid4()),
