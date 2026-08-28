@@ -18,7 +18,12 @@ class AuditCoreAttendanceClient:
         *,
         tenant_id: UUID,
         human_bearer_token: str,
-    ) -> AttendanceWorkContext:
+    ) -> AttendanceWorkContext | None:
+        """Return the user's active Audit Core operating context when one exists.
+
+        A 404 is a valid result for a secondary-role-only user such as HRADMIN.
+        Connectivity failures and other HTTP failures remain dependency errors.
+        """
         if not self.settings.audit_core_base_url.strip():
             raise AttendanceDependencyError("Audit Core attendance context is not configured")
         try:
@@ -27,6 +32,8 @@ class AuditCoreAttendanceClient:
                 headers={"Authorization": f"Bearer {human_bearer_token}"},
                 timeout=self.settings.downstream_timeout_seconds,
             )
+            if response.status_code == 404:
+                return None
             response.raise_for_status()
             return AttendanceWorkContext.model_validate(response.json())
         except (httpx.HTTPError, ValueError) as exc:
