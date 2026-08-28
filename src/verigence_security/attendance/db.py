@@ -31,8 +31,16 @@ def _session_factory() -> sessionmaker[Session]:
 
 
 def attendance_session() -> Iterator[Session]:
+    """One isolated Attendance transaction per request.
+
+    This pool/session factory is not shared with the existing Security runtime.
+    """
     session = _session_factory()()
     try:
         yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
