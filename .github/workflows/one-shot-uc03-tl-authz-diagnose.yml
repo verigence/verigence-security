@@ -1,0 +1,107 @@
+name: One-shot diagnose UC03 TL Security authorization
+
+on:
+  push:
+    branches: [diagnose/uc03-tl-authz-20260828]
+    paths:
+      - '.github/workflows/one-shot-uc03-tl-authz-diagnose.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SERVICE: security
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install diagnostic dependencies
+        run: |
+          pip install 'psycopg[binary]>=3.3,<4'
+          npm install --global @railway/cli
+      - name: Inspect active TL effective authorization state
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/dev/null
+          railway variable list --service "$SERVICE" --environment dev --json >/tmp/security-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import psycopg
+
+          variables = json.loads(Path('/tmp/security-vars.json').read_text())
+          database_url = str(variables.get('DATABASE_URL') or '')
+          database_url = database_url.replace('postgresql+psycopg://','postgresql://',1).replace('postgresql+asyncpg://','postgresql://',1)
+          if not database_url:
+              raise SystemExit('DATABASE_URL unavailable')
+
+          with psycopg.connect(database_url) as conn:
+              with conn.cursor() as cur:
+                  cur.execute('''
+                      SELECT otr.user_id, otr.tenant_id
+                      FROM security.user_tenant_operating_roles otr
+                      JOIN security.tenants t ON t.tenant_id=otr.tenant_id
+                      WHERE otr.role_key='TL'
+                        AND otr.status='ACTIVE'
+                        AND t.status='ACTIVE'
+                        AND (otr.valid_from_utc IS NULL OR otr.valid_from_utc<=CURRENT_TIMESTAMP)
+                        AND (otr.valid_to_utc IS NULL OR otr.valid_to_utc>CURRENT_TIMESTAMP)
+                      ORDER BY otr.created_at_utc DESC NULLS LAST
+                  ''')
+                  rows = cur.fetchall()
+                  print('ACTIVE_TL_OPERATING_ROLES=' + str(len(rows)))
+                  for i,(user_id,tenant_id) in enumerate(rows,1):
+                      cur.execute('''
+                          SELECT EXISTS(
+                            SELECT 1 FROM security.tenant_role_permissions
+                            WHERE tenant_id=%s AND role_key='TL' AND permission_key='audit.journey.read'
+                          )
+                      ''',(tenant_id,))
+                      has_tenant_permission = bool(cur.fetchone()[0])
+                      cur.execute('''
+                          SELECT EXISTS(
+                            SELECT 1 FROM security.platform_role_permission_defaults
+                            WHERE role_key='TL' AND permission_key='audit.journey.read' AND status='ACTIVE'
+                          )
+                      ''')
+                      has_default = bool(cur.fetchone()[0])
+                      cur.execute('''
+                          SELECT role_key,scope_type
+                          FROM security.user_admin_role_assignments
+                          WHERE user_id=%s AND status='ACTIVE'
+                          ORDER BY role_key,scope_type
+                      ''',(user_id,))
+                      admins = cur.fetchall()
+                      cur.execute('''
+                          SELECT u.status,p.status,e.status
+                          FROM security.users u
+                          JOIN security.security_principals p ON p.principal_id=u.user_id
+                          JOIN security.external_identities e ON e.user_id=u.user_id AND e.provider='CLERK'
+                          WHERE u.user_id=%s
+                      ''',(user_id,))
+                      state = cur.fetchone()
+                      print(f'TL_{i}_TENANT_PERMISSION_AUDIT_JOURNEY_READ={has_tenant_permission}')
+                      print(f'TL_{i}_PLATFORM_DEFAULT_AUDIT_JOURNEY_READ={has_default}')
+                      print(f'TL_{i}_ADMIN_ASSIGNMENT_COUNT={len(admins)}')
+                      print(f'TL_{i}_ADMIN_ASSIGNMENT_KINDS=' + (','.join(f'{r}:{s}' for r,s in admins) if admins else 'NONE'))
+                      print(f'TL_{i}_IDENTITY_STATES=' + ('/'.join(str(x) for x in state) if state else 'MISSING'))
+
+                  cur.execute('''
+                      SELECT count(*)
+                      FROM security.tenant_role_permissions rp
+                      JOIN security.user_tenant_operating_roles otr
+                        ON otr.tenant_id=rp.tenant_id AND otr.role_key=rp.role_key
+                      WHERE otr.role_key='TL'
+                        AND otr.status='ACTIVE'
+                        AND rp.permission_key='audit.journey.read'
+                  ''')
+                  print('ACTIVE_TL_ROLE_PERMISSION_LINKS=' + str(cur.fetchone()[0]))
+          PY
