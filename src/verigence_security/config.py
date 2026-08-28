@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     platform_bootstrap_password: str = ""
     platform_admin_token_ttl_minutes: int = Field(default=15, gt=0)
 
+    # Global-human device registration is observation-only in the first rollout. Exceeding this
+    # number is recorded and surfaced to the client but does not block authentication.
+    human_device_observation_limit: int = Field(default=2, gt=0, le=20)
+
     dev_mock_auth_enabled: bool = False
     dev_mock_signing_secret: str = ""
     dev_mock_token_ttl_minutes: int | None = Field(default=None, gt=0)

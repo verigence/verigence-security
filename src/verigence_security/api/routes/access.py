@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
@@ -29,6 +29,7 @@ from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import SecurityError, security_error
 from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.core.types import ActorType
+from verigence_security.repositories.human_observation_repository import HumanObservationRepository
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
 from verigence_security.services.clerk_credentials import ClerkCredentialService
@@ -145,6 +146,17 @@ def _geo(body: AccessSessionRequest) -> GeoSample:
     )
 
 
+def _uuid_or_new(claims: dict[str, object], name: str) -> UUID:
+    value = claims.get(name)
+    if isinstance(value, str):
+        try:
+            return UUID(value)
+        except ValueError:
+            raise security_error("AUTH_TOKEN_INVALID") from None
+    # Compatibility for a Security JWT issued immediately before this feature is deployed.
+    return uuid4()
+
+
 @router.post("/auth/login", response_model=HumanLoginResponse)
 def credential_login(
     body: HumanLoginRequest,
@@ -170,10 +182,16 @@ def credential_login(
     if ttl is None:
         raise RuntimeError("Configured Security human access-token lifetime is unavailable")
     expires_at = datetime.now(UTC) + timedelta(minutes=ttl)
+    # Device context is already available locally to current Web/Mobile. Older clients remain
+    # compatible by receiving an ephemeral observation device id until they upgrade.
+    device_id = body.device.deviceId if body.device is not None else uuid4()
+    session_id = uuid4()
     token = tokens.issue_human_token(
         HumanTokenClaims(
             user_id=actor.user_id,
             expires_at=expires_at,
+            session_id=str(session_id),
+            device_id=str(device_id),
         )
     )
     return {
@@ -181,6 +199,8 @@ def credential_login(
         "expiresAtUtc": expires_at,
         "actorType": ActorType.USER.value,
         "isSuperAdmin": actor.is_super_admin,
+        "sessionId": session_id,
+        "deviceId": device_id,
     }
 
 
@@ -197,6 +217,22 @@ def refresh_human_access_token(
     actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(str(claims["sub"]))
     attach_trusted_user_id(actor.user_id)
 
+    session_id = _uuid_or_new(claims, "session_id")
+    device_id = _uuid_or_new(claims, "device_id")
+    observation = HumanObservationRepository(repo.s)
+    status = observation.session_status(
+        user_id=actor.user_id,
+        session_id=session_id,
+        device_id=device_id,
+    )
+    # Observation persistence is deliberately fail-open while it is being introduced. Only an
+    # explicit terminal/superseded record denies renewal; a missing async observation record does
+    # not create a new availability dependency.
+    if status == "SUPERSEDED":
+        raise security_error("SESSION_SUPERSEDED")
+    if status in {"ENDED", "REVOKED"}:
+        raise security_error("SESSION_REVOKED")
+
     ttl = settings.platform_admin_token_ttl_minutes
     if ttl is None:
         raise RuntimeError("Configured Security human access-token lifetime is unavailable")
@@ -205,13 +241,25 @@ def refresh_human_access_token(
         HumanTokenClaims(
             user_id=actor.user_id,
             expires_at=expires_at,
+            session_id=str(session_id),
+            device_id=str(device_id),
         )
     )
+    if status == "ACTIVE":
+        observation.touch_active_session(
+            user_id=actor.user_id,
+            session_id=session_id,
+            device_id=device_id,
+            token_expires_at=expires_at,
+            now=datetime.now(UTC),
+        )
     return {
         "accessToken": token,
         "expiresAtUtc": expires_at,
         "actorType": ActorType.USER.value,
         "isSuperAdmin": actor.is_super_admin,
+        "sessionId": session_id,
+        "deviceId": device_id,
     }
 
 

@@ -40,6 +40,8 @@ class AccessTokenClaims:
 class HumanTokenClaims:
     user_id: str
     expires_at: datetime
+    session_id: str | None = None
+    device_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,10 +114,11 @@ class TokenService:
             raise security_error("SIGNING_KEY_UNAVAILABLE") from exc
 
     def issue_human_token(self, claims: HumanTokenClaims) -> str:
-        """Issue the active Phase-1 global USER authentication token.
+        """Issue the active global USER authentication token.
 
-        This token deliberately carries no Tenant, role, permission, device, location or legacy
-        access-session authority. Those decisions remain live Security state.
+        Tenant/role/permission/location authority remains live Security state. Device/session claims
+        identify the login installation and observation session only; normal business APIs do not
+        use them to perform an extra Security database lookup.
         """
 
         if not self.settings.security_private_key_pem or not self.settings.security_key_id:
@@ -133,6 +136,10 @@ class TokenService:
             "jti": str(uuid4()),
             "actor_type": ActorType.USER.value,
         }
+        if claims.session_id:
+            payload["session_id"] = claims.session_id
+        if claims.device_id:
+            payload["device_id"] = claims.device_id
         try:
             return jwt.encode(
                 payload,
@@ -172,9 +179,9 @@ class TokenService:
     def verify_human_token(self, token: str) -> dict[str, Any]:
         """Validate a Security-issued human token for the active v2 human boundary.
 
-        The token proves the global USER identity only. Roles, permissions, Tenant context and
-        other legacy session claims are deliberately not trusted here; protected operations
-        resolve current authorization from Security-owned state after token verification.
+        The token proves the global USER identity. Roles, permissions and Tenant context are not
+        trusted from this token; protected operations resolve current authorization from Security-
+        owned state after token verification. Device/session claims are observation identifiers.
         """
 
         if not self.settings.security_public_key_pem:
@@ -194,6 +201,10 @@ class TokenService:
                 raise security_error("ACTOR_TYPE_NOT_ALLOWED")
             if not isinstance(payload.get("sub"), str) or not str(payload["sub"]).strip():
                 raise security_error("AUTH_TOKEN_INVALID")
+            for claim_name in ("session_id", "device_id"):
+                value = payload.get(claim_name)
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise security_error("AUTH_TOKEN_INVALID")
             # Token exchange is a retired/deferred human path. A delegated USER token must not
             # enter the direct human administrative boundary.
             if "act" in payload:
