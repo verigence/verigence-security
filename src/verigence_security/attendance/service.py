@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -103,7 +104,7 @@ class AttendanceService:
         return now_utc.astimezone(self._timezone(policy)).date()
 
     @staticmethod
-    def _record(row: dict[str, object]) -> AttendanceRecord:
+    def _record(row: dict[str, Any]) -> AttendanceRecord:
         return AttendanceRecord(
             attendanceId=UUID(str(row["attendance_id"])),
             tenantId=UUID(str(row["tenant_id"])),
@@ -232,7 +233,7 @@ class AttendanceService:
             user_id=user_id,
             attendance_date=self._business_date(policy, now_utc),
         )
-        reminder: str | None = None
+        reminder: Literal["CHECK_IN", "CHECK_OUT"] | None = None
         local_now = now_utc.astimezone(self._timezone(policy)).time().replace(tzinfo=None)
         if row is None and local_now >= policy.checkinReminderLocal:
             reminder = "CHECK_IN"
