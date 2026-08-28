@@ -32,7 +32,19 @@ SET module_key=EXCLUDED.module_key,
     catalog_version='attendance-phase1',
     updated_at_utc=CURRENT_TIMESTAMP;
 
--- Existing operating roles receive only their approved Attendance permissions.
+-- Attendance is a separate module. Keep the core platform operating-role bundle stable
+-- and register Attendance extensions in a module-specific default catalogue. Tenant
+-- authorization still materializes into the canonical tenant_role_permissions table.
+CREATE TABLE IF NOT EXISTS security.module_operating_role_permission_defaults (
+    module_key              varchar(80) NOT NULL,
+    role_key                varchar(120) NOT NULL REFERENCES security.role_definitions(role_key),
+    permission_key          varchar(180) NOT NULL REFERENCES security.permissions(permission_key),
+    source_catalog_version  varchar(40),
+    status                  varchar(20) NOT NULL CHECK (status IN ('ACTIVE','INACTIVE')),
+    created_at_utc          timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (module_key,role_key,permission_key)
+);
+
 WITH operating_defaults(role_key,permission_key) AS (
   VALUES
     ('PC','attendance.self.read'),
@@ -56,14 +68,15 @@ WITH operating_defaults(role_key,permission_key) AS (
     ('Executive','attendance.all.read'),
     ('Executive','attendance.report.read')
 )
-INSERT INTO security.platform_role_permission_defaults
-(role_key,permission_key,source_catalog_version,status,created_at_utc)
-SELECT role_key,permission_key,'attendance-phase1','ACTIVE',CURRENT_TIMESTAMP
+INSERT INTO security.module_operating_role_permission_defaults
+(module_key,role_key,permission_key,source_catalog_version,status,created_at_utc)
+SELECT 'attendance',role_key,permission_key,'attendance-phase1','ACTIVE',CURRENT_TIMESTAMP
 FROM operating_defaults
-ON CONFLICT (role_key,permission_key) DO UPDATE
+ON CONFLICT (module_key,role_key,permission_key) DO UPDATE
 SET source_catalog_version='attendance-phase1',status='ACTIVE';
 
--- Materialize only the new operating-role Attendance defaults into existing active Tenants.
+-- Materialize Attendance grants for existing Tenants. Future Tenant creation reads
+-- both the core platform defaults and these active module defaults.
 DO $$
 DECLARE super_admin_user uuid;
 BEGIN
@@ -79,9 +92,11 @@ BEGIN
   (tenant_id,role_key,permission_key,assigned_by_user_id,assigned_at_utc)
   SELECT t.tenant_id,d.role_key,d.permission_key,super_admin_user,CURRENT_TIMESTAMP
   FROM security.tenants t
-  JOIN security.platform_role_permission_defaults d
-    ON d.status='ACTIVE' AND d.source_catalog_version='attendance-phase1'
-  WHERE t.status='ACTIVE'
+  JOIN security.module_operating_role_permission_defaults d
+    ON d.module_key='attendance' AND d.status='ACTIVE'
+  JOIN security.permissions p
+    ON p.permission_key=d.permission_key AND p.status='ACTIVE'
+  WHERE t.status IN ('CONFIGURING','ACTIVE')
   ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING;
 END $$;
 
