@@ -13,6 +13,7 @@ from verigence_security.attendance.audit_core import AuditCoreAttendanceClient
 from verigence_security.attendance.config import AttendanceSettings, get_attendance_settings
 from verigence_security.attendance.db import attendance_session
 from verigence_security.attendance.repository import AttendanceRepository
+from verigence_security.attendance.runtime_service import RuntimeAttendanceService as AttendanceService
 from verigence_security.attendance.schemas import (
     AttendanceActionRequest,
     AttendanceActionResponse,
@@ -29,7 +30,6 @@ from verigence_security.attendance.security import (
     VerifiedHuman,
     verify_human_token,
 )
-from verigence_security.attendance.service import AttendanceService
 
 router = APIRouter(prefix="/attendance/v1", tags=["Attendance"])
 _human_bearer = HTTPBearer(auto_error=False, scheme_name="VerigenceHumanToken", bearerFormat="JWT")
