@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from verigence_security.services.v2_authorization import HumanAuthorizationResolver
@@ -142,16 +141,3 @@ def test_hradmin_requires_tenant_context() -> None:
 
     assert decision.allowed is False
     assert decision.reason_code == "TENANT_CONTEXT_REQUIRED"
-
-
-def test_hradmin_assignment_is_removed_with_tenant_hard_delete() -> None:
-    migration = (
-        Path(__file__).resolve().parents[2]
-        / "migrations"
-        / "0027_attendance_module_rbac.sql"
-    ).read_text(encoding="utf-8")
-
-    assert (
-        "tenant_id           uuid NOT NULL REFERENCES security.tenants(tenant_id) "
-        "ON DELETE CASCADE"
-    ) in migration

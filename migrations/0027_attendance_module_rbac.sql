@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS security.module_role_permissions (
 
 CREATE TABLE IF NOT EXISTS security.user_module_role_assignments (
     assignment_id       uuid PRIMARY KEY,
-    tenant_id           uuid NOT NULL REFERENCES security.tenants(tenant_id) ON DELETE CASCADE,
+    tenant_id           uuid NOT NULL REFERENCES security.tenants(tenant_id),
     user_id             uuid NOT NULL REFERENCES security.users(user_id),
     module_key          varchar(80) NOT NULL,
     role_key            varchar(80) NOT NULL,
