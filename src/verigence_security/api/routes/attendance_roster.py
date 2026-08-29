@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from verigence_security.api.attendance_roster_schemas import (
     AttendanceRosterMember,
     AttendanceRosterResponse,
+    AttendanceTenantDirectoryResponse,
+    AttendanceTenantSummary,
 )
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.routes.authorization import service_integration_token
@@ -32,6 +34,32 @@ def _require_service_integration(
         raise security_error("AUTH_TOKEN_INVALID")
     if not V2AuthorizationRepository(session).active_service_integration(subject):
         raise security_error("AUTH_TOKEN_INVALID")
+
+
+@router.get("/tenants", response_model=AttendanceTenantDirectoryResponse)
+def attendance_tenant_directory(
+    service_token: str = Depends(service_integration_token),
+    session: Session = Depends(platform_session),
+    settings: Settings = Depends(get_settings),
+) -> AttendanceTenantDirectoryResponse:
+    """Return active Tenant identity for global Attendance administration only."""
+
+    _require_service_integration(
+        service_token=service_token,
+        session=session,
+        settings=settings,
+    )
+    rows = AttendanceRosterRepository(session).active_tenants()
+    return AttendanceTenantDirectoryResponse(
+        items=[
+            AttendanceTenantSummary(
+                tenantId=UUID(str(row["tenant_id"])),
+                tenantCode=str(row["tenant_code"]),
+                tenantName=str(row["tenant_name"]),
+            )
+            for row in rows
+        ]
+    )
 
 
 @router.get("/tenants/{tenant_id}/roster", response_model=AttendanceRosterResponse)
