@@ -60,7 +60,6 @@ class AuthorizationRepository(Protocol):
         self,
         *,
         user_id: str,
-        tenant_id: str,
         module_key: str,
     ) -> list[str]: ...
 
@@ -213,12 +212,12 @@ class HumanAuthorizationResolver:
                 role_key="PC",
             )
 
-        # Secondary module roles are evaluated only inside their own permission
-        # module. They never replace or block the user's primary operating/admin role.
-        if module_key == "attendance" and tenant is not None:
+        # Secondary module roles are global and evaluated only inside their own
+        # permission module. HRADMIN therefore needs no Tenant/Project assignment,
+        # while normal PC/TL/PM/etc. authorization remains tenant-scoped below.
+        if module_key == "attendance":
             for module_role in self.repository.active_module_roles(
                 user_id=resolved_user_id,
-                tenant_id=tenant,
                 module_key="attendance",
             ):
                 if self.repository.module_role_has_permission(
