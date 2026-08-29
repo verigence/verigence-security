@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from verigence_security.attendance.audit_core import AuditCoreAttendanceClient
 from verigence_security.attendance.config import AttendanceSettings, get_attendance_settings
 from verigence_security.attendance.db import attendance_session
+from verigence_security.attendance.directory_schemas import AttendanceTenantDirectoryResponse
 from verigence_security.attendance.overview import build_attendance_overview
 from verigence_security.attendance.repository import AttendanceRepository
 from verigence_security.attendance.runtime_service import RuntimeAttendanceService as AttendanceService
@@ -78,6 +79,25 @@ def attendance_service(
         security=security_client(),
         audit_core=audit_core_client(),
     )
+
+
+@router.get("/hr/tenants", response_model=AttendanceTenantDirectoryResponse)
+def hr_tenant_directory(
+    context: Annotated[AttendanceRequestContext, Depends(attendance_request_context)],
+    service: Annotated[AttendanceService, Depends(attendance_service)],
+) -> AttendanceTenantDirectoryResponse:
+    """Return the active Tenant directory only to global Attendance administrators.
+
+    Authorization is deliberately checked without Tenant context. This route is part
+    of the isolated Attendance application and is never called by login, project
+    selection, Booking, Delivery, Review, or other normal Verigence flows.
+    """
+    service.security.check(
+        user_id=context.human.user_id,
+        tenant_id=None,
+        permission_key="attendance.all.read",
+    )
+    return AttendanceTenantDirectoryResponse(items=service.security.active_tenants())
 
 
 @router.get("/tenants/{tenant_id}/me/today", response_model=TodayResponse)
