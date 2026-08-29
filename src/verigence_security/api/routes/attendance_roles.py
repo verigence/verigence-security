@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -19,54 +21,60 @@ def _require_super_admin(actor: HumanActorContext) -> None:
 
 
 @router.put(
-    "/users/{userId}/module-roles/attendance/HRADMIN",
+    "/tenants/{tenantId}/users/{userId}/module-roles/attendance/HRADMIN",
     response_model=AttendanceRoleMutationResponse,
 )
 def assign_hradmin(
-    userId: str,
+    tenantId: UUID,
+    userId: UUID,
     request: Request,
     actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AttendanceRoleMutationResponse:
-    """Assign global Attendance HRADMIN without Tenant/Project scope."""
+    """Assign tenant-scoped Attendance HRADMIN without changing operating role."""
     _require_super_admin(actor)
     try:
         changed, assignment_id = AttendanceModuleRoleService(session).assign(
-            user_id=userId,
+            tenant_id=str(tenantId),
+            user_id=str(userId),
             actor_user_id=actor.user_id,
             correlation_id=request.state.correlation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return AttendanceRoleMutationResponse(
+        tenantId=tenantId,
         userId=userId,
         changed=changed,
-        assignmentId=assignment_id,
+        assignmentId=UUID(assignment_id),
     )
 
 
 @router.delete(
-    "/users/{userId}/module-roles/attendance/HRADMIN",
+    "/tenants/{tenantId}/users/{userId}/module-roles/attendance/HRADMIN",
     response_model=AttendanceRoleMutationResponse,
 )
 def remove_hradmin(
-    userId: str,
+    tenantId: UUID,
+    userId: UUID,
     request: Request,
     actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AttendanceRoleMutationResponse:
-    """Remove global Attendance HRADMIN without touching operating roles."""
+    """Remove tenant-scoped HRADMIN without touching the user's operating role."""
     _require_super_admin(actor)
     try:
         changed, assignment_id = AttendanceModuleRoleService(session).remove(
-            user_id=userId,
+            tenant_id=str(tenantId),
+            user_id=str(userId),
             actor_user_id=actor.user_id,
             correlation_id=request.state.correlation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return AttendanceRoleMutationResponse(
+        tenantId=tenantId,
         userId=userId,
         changed=changed,
-        assignmentId=assignment_id,
+        assignmentId=UUID(assignment_id) if assignment_id is not None else None,
     )
