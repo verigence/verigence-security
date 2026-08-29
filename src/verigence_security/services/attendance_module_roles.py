@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 
 
 class AttendanceModuleRoleService:
-    """Manage the secondary Attendance HRADMIN role without touching primary roles."""
+    """Manage the global secondary Attendance HRADMIN role.
+
+    HRADMIN is intentionally independent of Tenant/Project membership and never
+    changes the user's normal operating role.
+    """
 
     MODULE_KEY = "attendance"
     ROLE_KEY = "HRADMIN"
@@ -21,7 +25,6 @@ class AttendanceModuleRoleService:
     def assign(
         self,
         *,
-        tenant_id: str,
         user_id: str,
         actor_user_id: str,
         correlation_id: str,
@@ -29,9 +32,9 @@ class AttendanceModuleRoleService:
         now = datetime.now(UTC)
         assignment_id = str(uuid4())
         try:
-            self._require_subject(tenant_id=tenant_id, user_id=user_id)
+            self._require_subject(user_id=user_id)
             self._require_module_role()
-            existing = self._active_assignment(tenant_id=tenant_id, user_id=user_id)
+            existing = self._active_assignment(user_id=user_id)
             if existing is not None:
                 self.session.rollback()
                 return False, str(existing)
@@ -40,25 +43,23 @@ class AttendanceModuleRoleService:
                 text(
                     """
                     INSERT INTO security.user_module_role_assignments (
-                        assignment_id,tenant_id,user_id,module_key,role_key,status,
+                        assignment_id,user_id,module_key,role_key,status,
                         valid_from_utc,assigned_by_user_id,assigned_at_utc
                     ) VALUES (
-                        CAST(:assignment_id AS uuid),CAST(:tenant_id AS uuid),
-                        CAST(:user_id AS uuid),'attendance','HRADMIN','ACTIVE',
+                        CAST(:assignment_id AS uuid),CAST(:user_id AS uuid),
+                        'attendance','HRADMIN','ACTIVE',
                         :now,CAST(:actor_user_id AS uuid),:now
                     )
                     """
                 ),
                 {
                     "assignment_id": assignment_id,
-                    "tenant_id": tenant_id,
                     "user_id": user_id,
                     "actor_user_id": actor_user_id,
                     "now": now,
                 },
             )
             self._audit(
-                tenant_id=tenant_id,
                 user_id=user_id,
                 actor_user_id=actor_user_id,
                 correlation_id=correlation_id,
@@ -78,14 +79,13 @@ class AttendanceModuleRoleService:
     def remove(
         self,
         *,
-        tenant_id: str,
         user_id: str,
         actor_user_id: str,
         correlation_id: str,
     ) -> tuple[bool, str | None]:
         now = datetime.now(UTC)
         try:
-            existing = self._active_assignment(tenant_id=tenant_id, user_id=user_id)
+            existing = self._active_assignment(user_id=user_id)
             if existing is None:
                 self.session.rollback()
                 return False, None
@@ -102,7 +102,6 @@ class AttendanceModuleRoleService:
                 {"assignment_id": existing, "now": now},
             )
             self._audit(
-                tenant_id=tenant_id,
                 user_id=user_id,
                 actor_user_id=actor_user_id,
                 correlation_id=correlation_id,
@@ -116,29 +115,24 @@ class AttendanceModuleRoleService:
             raise
         return True, str(existing)
 
-    def _require_subject(self, *, tenant_id: str, user_id: str) -> None:
+    def _require_subject(self, *, user_id: str) -> None:
         row = self.session.execute(
             text(
                 """
                 SELECT u.user_id
                 FROM security.users u
-                JOIN security.tenant_memberships m
-                  ON m.user_id=u.user_id
-                 AND m.tenant_id=CAST(:tenant_id AS uuid)
-                JOIN security.tenants t ON t.tenant_id=m.tenant_id
+                JOIN security.security_principals p ON p.principal_id=u.user_id
                 WHERE u.user_id=CAST(:user_id AS uuid)
                   AND u.status='ACTIVE'
-                  AND m.status='ACTIVE'
-                  AND t.status='ACTIVE'
-                  AND (m.valid_from_utc IS NULL OR m.valid_from_utc<=CURRENT_TIMESTAMP)
-                  AND (m.valid_to_utc IS NULL OR m.valid_to_utc>CURRENT_TIMESTAMP)
+                  AND p.actor_type='USER'
+                  AND p.status='ACTIVE'
                 FOR UPDATE OF u
                 """
             ),
-            {"tenant_id": tenant_id, "user_id": user_id},
+            {"user_id": user_id},
         ).first()
         if row is None:
-            raise ValueError("USER must be an active member of the Tenant")
+            raise ValueError("HRADMIN subject must be an active Verigence USER")
 
     def _require_module_role(self) -> None:
         row = self.session.execute(
@@ -155,14 +149,13 @@ class AttendanceModuleRoleService:
         if row is None:
             raise ValueError("Attendance HRADMIN role is not active")
 
-    def _active_assignment(self, *, tenant_id: str, user_id: str) -> str | None:
+    def _active_assignment(self, *, user_id: str) -> str | None:
         value = self.session.execute(
             text(
                 """
                 SELECT assignment_id
                 FROM security.user_module_role_assignments
-                WHERE tenant_id=CAST(:tenant_id AS uuid)
-                  AND user_id=CAST(:user_id AS uuid)
+                WHERE user_id=CAST(:user_id AS uuid)
                   AND module_key='attendance'
                   AND role_key='HRADMIN'
                   AND status='ACTIVE'
@@ -170,14 +163,13 @@ class AttendanceModuleRoleService:
                   AND (valid_to_utc IS NULL OR valid_to_utc>CURRENT_TIMESTAMP)
                 """
             ),
-            {"tenant_id": tenant_id, "user_id": user_id},
+            {"user_id": user_id},
         ).scalar_one_or_none()
         return str(value) if value is not None else None
 
     def _audit(
         self,
         *,
-        tenant_id: str,
         user_id: str,
         actor_user_id: str,
         correlation_id: str,
@@ -193,8 +185,8 @@ class AttendanceModuleRoleService:
                     operation_key,resource_type,resource_id,outcome,
                     before_state_json,after_state_json,occurred_at_utc
                 ) VALUES (
-                    CAST(:admin_change_id AS uuid),:correlation_id,'TENANT',
-                    CAST(:tenant_id AS uuid),CAST(:actor_user_id AS uuid),
+                    CAST(:admin_change_id AS uuid),:correlation_id,'PLATFORM',
+                    NULL,CAST(:actor_user_id AS uuid),
                     'security.attendance_hradmin.manage','USER_MODULE_ROLE',:resource_id,
                     'SUCCESS',CAST(:before_json AS jsonb),CAST(:after_json AS jsonb),:now
                 )
@@ -203,7 +195,6 @@ class AttendanceModuleRoleService:
             {
                 "admin_change_id": str(uuid4()),
                 "correlation_id": correlation_id,
-                "tenant_id": tenant_id,
                 "actor_user_id": actor_user_id,
                 "resource_id": user_id,
                 "before_json": json.dumps(before) if before is not None else None,
