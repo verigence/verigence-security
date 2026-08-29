@@ -6,6 +6,8 @@ from fastapi.exceptions import RequestValidationError
 from verigence_security.api.dependencies import correlation_header_parameter
 from verigence_security.api.routes import (
     access,
+    attendance_roles,
+    attendance_roster,
     authorization,
     dev_mock,
     health,
@@ -62,6 +64,8 @@ app.include_router(human_observation.router)
 app.include_router(password_recovery.router)
 app.include_router(service_tokens.router)
 app.include_router(authorization.router)
+app.include_router(attendance_roles.router)
+app.include_router(attendance_roster.router)
 app.include_router(platform_admin.router)
 app.include_router(security_housekeeping.router)
 app.include_router(tenant_activation_compensation.router)

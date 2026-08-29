@@ -90,6 +90,72 @@ class V2AuthorizationRepository:
             ).mappings()
         ]
 
+    def active_module_roles(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        module_key: str,
+    ) -> list[str]:
+        return [
+            str(value)
+            for value in self.s.execute(
+                text(
+                    """
+                    SELECT a.role_key
+                    FROM security.user_module_role_assignments a
+                    JOIN security.module_roles r
+                      ON r.module_key=a.module_key AND r.role_key=a.role_key
+                    WHERE a.user_id=:user_id
+                      AND a.tenant_id=:tenant_id
+                      AND a.module_key=:module_key
+                      AND a.status='ACTIVE'
+                      AND r.status='ACTIVE'
+                      AND (a.valid_from_utc IS NULL OR a.valid_from_utc<=CURRENT_TIMESTAMP)
+                      AND (a.valid_to_utc IS NULL OR a.valid_to_utc>CURRENT_TIMESTAMP)
+                    ORDER BY a.role_key
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "module_key": module_key,
+                },
+            ).scalars()
+        ]
+
+    def module_role_has_permission(
+        self,
+        *,
+        module_key: str,
+        role_key: str,
+        permission_key: str,
+    ) -> bool:
+        return (
+            self.s.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM security.module_role_permissions rp
+                    JOIN security.permissions p
+                      ON p.permission_key=rp.permission_key
+                     AND p.status='ACTIVE'
+                    WHERE rp.module_key=:module_key
+                      AND rp.role_key=:role_key
+                      AND rp.permission_key=:permission_key
+                      AND rp.status='ACTIVE'
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "module_key": module_key,
+                    "role_key": role_key,
+                    "permission_key": permission_key,
+                },
+            ).first()
+            is not None
+        )
+
     def active_operating_role(self, *, user_id: str, tenant_id: str) -> str | None:
         value = self.s.execute(
             text(

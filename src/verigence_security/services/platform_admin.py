@@ -418,14 +418,21 @@ class PlatformTenantService:
         defaults = self.s.execute(
             text(
                 """
-                SELECT d.role_key,d.permission_key
-                FROM security.platform_role_permission_defaults d
+                SELECT defaults.role_key,defaults.permission_key
+                FROM (
+                    SELECT d.role_key,d.permission_key
+                    FROM security.platform_role_permission_defaults d
+                    WHERE d.status='ACTIVE'
+                    UNION
+                    SELECT d.role_key,d.permission_key
+                    FROM security.module_operating_role_permission_defaults d
+                    WHERE d.status='ACTIVE'
+                ) defaults
                 JOIN security.permissions p
-                  ON p.permission_key=d.permission_key
+                  ON p.permission_key=defaults.permission_key
                  AND p.status='ACTIVE'
-                WHERE d.status='ACTIVE'
-                  AND d.role_key IN ('PC','TL','PM','CRM','Executive')
-                ORDER BY d.role_key,d.permission_key
+                WHERE defaults.role_key IN ('PC','TL','PM','CRM','Executive')
+                ORDER BY defaults.role_key,defaults.permission_key
                 """
             )
         ).mappings().all()

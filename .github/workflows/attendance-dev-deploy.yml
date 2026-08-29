@@ -1,0 +1,396 @@
+name: Deploy Attendance Service to Railway DEV
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+concurrency:
+  group: attendance-dev-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE: security
+  ATTENDANCE_SERVICE: attendance
+  SECURITY_BASE_URL: https://security-dev.up.railway.app
+  AUDIT_CORE_BASE_URL: https://verigence-audit-core-production.up.railway.app
+  WEB_DEV_ORIGIN: https://verigence-web-dev.jbrconsulting-it.workers.dev
+
+jobs:
+  deploy:
+    name: Validate, migrate, and deploy isolated Attendance DEV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      DEPLOY_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Check out exact Attendance revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Determine whether Attendance changed
+        id: scope
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=2 origin dev
+          changed="$(git diff --name-only HEAD^ HEAD || true)"
+          printf '%s\n' "$changed"
+          if grep -Eq '^((attendance_migrations/)|(.github/workflows/attendance-dev-deploy.yml$)|(Dockerfile.attendance$)|(scripts/apply_attendance_migrations.py$)|(src/verigence_security/attendance/)|(src/verigence_security/api/attendance_role_schemas.py$)|(src/verigence_security/api/routes/attendance_roles.py$)|(src/verigence_security/services/attendance_module_roles.py$)|(src/verigence_security/services/platform_admin.py$)|(src/verigence_security/services/v2_authorization.py$)|(src/verigence_security/repositories/v2_authorization_repository.py$)|(migrations/0027_attendance_module_rbac.sql$))' <<<"$changed"; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop cleanly when Attendance is unchanged
+        if: github.event_name == 'push' && steps.scope.outputs.deploy != 'true'
+        run: echo 'ATTENDANCE_DEPLOY=SKIPPED_NO_CHANGE'
+
+      - name: Set up Python 3.12
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Attendance test/runtime tooling
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Revalidate Attendance isolation and unit behavior
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        run: |
+          ruff check src/verigence_security/attendance tests/unit/test_attendance_*.py scripts/apply_attendance_migrations.py
+          mypy src/verigence_security/attendance
+          pytest -q tests/unit/test_attendance_module_role.py tests/unit/test_attendance_runtime_isolation.py tests/unit/test_attendance_service.py tests/unit/test_attendance_migration_runner.py
+
+      - name: Install PostgreSQL client and Railway CLI
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          npm install --global @railway/cli
+          psql --version
+          railway --version
+
+      - name: Resolve migration database and approved Railway target
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-}"
+          [ -n "$raw" ] || { echo '::error::MIGRATION_DATABASE_URL is not configured.'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) migration_db="postgresql://${raw#postgresql+psycopg://}" ;;
+            postgresql+asyncpg://*) migration_db="postgresql://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*|postgres://*) migration_db="$raw" ;;
+            *) echo '::error::MIGRATION_DATABASE_URL is not PostgreSQL.'; exit 1 ;;
+          esac
+          echo "::add-mask::$migration_db"
+          echo "ATTENDANCE_MIGRATION_DATABASE_URL=$migration_db" >> "$GITHUB_ENV"
+          psql "$migration_db" -X -v ON_ERROR_STOP=1 -Atc 'SELECT 1' >/dev/null
+
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN is not configured.'; exit 1; }
+          env -u RAILWAY_TOKEN railway link --project "$PLATFORM_PROJECT_ID" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/tmp/railway-link.json
+          env -u RAILWAY_TOKEN railway status --json >/tmp/railway-status.json
+          [ "$(jq -r '.id // empty' /tmp/railway-status.json)" = "$PLATFORM_PROJECT_ID" ] || {
+            echo '::error::Railway CLI is not linked to the approved shared DEV project.'
+            exit 1
+          }
+
+      - name: Wait for Security Attendance RBAC migration
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            ready="$(psql "$ATTENDANCE_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+              SELECT CASE WHEN to_regclass('security.module_operating_role_permission_defaults') IS NOT NULL
+                AND to_regclass('security.user_module_role_assignments') IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM security.permissions
+                  WHERE permission_key='attendance.self.checkin' AND status='ACTIVE'
+                ) THEN 'READY' ELSE 'WAIT' END;
+            ")"
+            if [ "$ready" = 'READY' ]; then
+              echo 'SECURITY_ATTENDANCE_RBAC=PASS'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::Timed out waiting for Security Attendance RBAC migration.'
+          exit 1
+
+      - name: Apply Attendance-owned database migrations
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_attendance_migrations.py \
+            --database-url "$ATTENDANCE_MIGRATION_DATABASE_URL" \
+            --revision "$DEPLOY_SHA"
+          tables="$(psql "$ATTENDANCE_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT CASE WHEN to_regclass('attendance.daily_attendance') IS NOT NULL
+              AND to_regclass('attendance.attendance_event') IS NOT NULL
+              AND to_regclass('attendance.policy') IS NOT NULL
+              AND to_regclass('attendance.correction') IS NOT NULL
+              THEN 'READY' ELSE 'MISSING' END;
+          ")"
+          [ "$tables" = 'READY' ] || { echo '::error::Attendance schema verification failed.'; exit 1; }
+
+      - name: Ensure separate Railway Attendance service exists
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+          service_id="$(jq -r --arg name "$ATTENDANCE_SERVICE" '[.[] | select(.name == $name)] | first | .id // empty' /tmp/services.json)"
+          if [ -z "$service_id" ]; then
+            env -u RAILWAY_TOKEN railway add --service "$ATTENDANCE_SERVICE" --json >/tmp/attendance-service-create.json
+            env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
+            service_id="$(jq -r --arg name "$ATTENDANCE_SERVICE" '[.[] | select(.name == $name)] | first | .id // empty' /tmp/services.json)"
+          fi
+          [ -n "$service_id" ] || { echo '::error::Attendance Railway service could not be resolved.'; exit 1; }
+          echo "ATTENDANCE_RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
+          echo "ATTENDANCE_SERVICE_ISOLATION=PASS service_id=$service_id"
+
+      - name: Resolve isolated Attendance runtime configuration
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway variable list --service "$SECURITY_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/tmp/security-vars.json
+          runtime_db="$(jq -r '.DATABASE_URL // empty' /tmp/security-vars.json)"
+          public_key="$(jq -r '.SECURITY_PUBLIC_KEY_PEM // empty' /tmp/security-vars.json)"
+          [ -n "$runtime_db" ] || { echo '::error::Security runtime DATABASE_URL is missing.'; exit 1; }
+          [ -n "$public_key" ] || { echo '::error::Security public key is missing.'; exit 1; }
+          echo "::add-mask::$runtime_db"
+
+          env -u RAILWAY_TOKEN railway variable list --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --json >/tmp/attendance-vars.json || echo '{}' >/tmp/attendance-vars.json
+          client_secret="$(jq -r '.ATTENDANCE_SECURITY_CLIENT_SECRET // empty' /tmp/attendance-vars.json)"
+          if [ -z "$client_secret" ]; then
+            client_secret="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          fi
+          echo "::add-mask::$client_secret"
+
+          RUNTIME_DB="$runtime_db" PUBLIC_KEY="$public_key" CLIENT_SECRET="$client_secret" python - <<'PY'
+          import os
+          from pathlib import Path
+          Path('/tmp/attendance-runtime-db').write_text(os.environ['RUNTIME_DB'], encoding='utf-8')
+          Path('/tmp/attendance-public-key').write_text(os.environ['PUBLIC_KEY'], encoding='utf-8')
+          Path('/tmp/attendance-client-secret').write_text(os.environ['CLIENT_SECRET'], encoding='utf-8')
+          PY
+
+      - name: Provision Attendance service integration in Security
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ATTENDANCE_ADMIN_DATABASE_URL="$ATTENDANCE_MIGRATION_DATABASE_URL" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          from argon2 import PasswordHasher
+          from sqlalchemy import create_engine, text
+
+          db = os.environ['ATTENDANCE_ADMIN_DATABASE_URL']
+          secret = Path('/tmp/attendance-client-secret').read_text(encoding='utf-8')
+          now = datetime.now(UTC)
+          hasher = PasswordHasher()
+          engine = create_engine(db, pool_pre_ping=True)
+
+          with engine.begin() as conn:
+              admins = conn.execute(text("""
+                  SELECT user_id FROM security.user_admin_role_assignments
+                  WHERE role_key='SuperAdmin' AND scope_type='PLATFORM'
+                    AND scope_id IS NULL AND status='ACTIVE'
+              """)).all()
+              if len(admins) != 1:
+                  raise SystemExit(f'Expected one ACTIVE SuperAdmin; found {len(admins)}')
+              admin_user_id = str(admins[0][0])
+
+              integration = conn.execute(text("""
+                  SELECT si.principal_id,p.actor_type,p.status
+                  FROM security.service_integrations si
+                  JOIN security.security_principals p ON p.principal_id=si.principal_id
+                  WHERE si.integration_key='attendance'
+              """)).mappings().first()
+              if integration is None:
+                  principal_id = str(uuid4())
+                  conn.execute(text("""
+                      INSERT INTO security.security_principals
+                      (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+                      VALUES (:id,'SERVICE_INTEGRATION','Attendance Service','ACTIVE',:now,:now)
+                  """), {'id': principal_id, 'now': now})
+                  conn.execute(text("""
+                      INSERT INTO security.service_integrations
+                      (principal_id,integration_key,description,created_at_utc)
+                      VALUES (:id,'attendance','Isolated Attendance runtime',:now)
+                  """), {'id': principal_id, 'now': now})
+              else:
+                  if integration['actor_type'] != 'SERVICE_INTEGRATION' or integration['status'] != 'ACTIVE':
+                      raise SystemExit('Existing attendance integration is not an ACTIVE SERVICE_INTEGRATION')
+                  principal_id = str(integration['principal_id'])
+
+              credential = conn.execute(text("""
+                  SELECT credential_id,principal_id,status
+                  FROM security.principal_credentials
+                  WHERE client_id='attendance'
+                  FOR UPDATE
+              """)).mappings().first()
+              secret_hash = hasher.hash(secret)
+              if credential is None:
+                  conn.execute(text("""
+                      INSERT INTO security.principal_credentials
+                      (credential_id,principal_id,client_id,secret_hash,status,valid_from_utc,valid_to_utc,
+                       created_by_user_id,created_at_utc,last_used_at_utc)
+                      VALUES (:credential_id,:principal_id,'attendance',:secret_hash,'ACTIVE',:now,NULL,
+                              :admin_user_id,:now,NULL)
+                  """), {
+                      'credential_id': str(uuid4()), 'principal_id': principal_id,
+                      'secret_hash': secret_hash, 'admin_user_id': admin_user_id, 'now': now,
+                  })
+              else:
+                  if str(credential['principal_id']) != principal_id:
+                      raise SystemExit('attendance client_id belongs to another principal')
+                  if credential['status'] == 'REVOKED':
+                      raise SystemExit('Attendance service credential is REVOKED; refusing automatic revival')
+                  conn.execute(text("""
+                      UPDATE security.principal_credentials
+                      SET secret_hash=:secret_hash,status='ACTIVE',valid_from_utc=:now,valid_to_utc=NULL
+                      WHERE credential_id=:credential_id
+                  """), {
+                      'secret_hash': secret_hash, 'now': now,
+                      'credential_id': str(credential['credential_id']),
+                  })
+          print('ATTENDANCE_SECURITY_INTEGRATION=PASS')
+          PY
+
+      - name: Configure only the Attendance Railway service
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/attendance-runtime-db | env -u RAILWAY_TOKEN railway variable set ATTENDANCE_DATABASE_URL --stdin --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --skip-deploys >/dev/null
+          cat /tmp/attendance-public-key | env -u RAILWAY_TOKEN railway variable set ATTENDANCE_SECURITY_PUBLIC_KEY_PEM --stdin --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --skip-deploys >/dev/null
+          cat /tmp/attendance-client-secret | env -u RAILWAY_TOKEN railway variable set ATTENDANCE_SECURITY_CLIENT_SECRET --stdin --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --skip-deploys >/dev/null
+          env -u RAILWAY_TOKEN railway variable set \
+            ATTENDANCE_SECURITY_CLIENT_ID=attendance \
+            ATTENDANCE_SECURITY_BASE_URL="$SECURITY_BASE_URL" \
+            ATTENDANCE_AUDIT_CORE_BASE_URL="$AUDIT_CORE_BASE_URL" \
+            ATTENDANCE_ALLOWED_ORIGINS="$WEB_DEV_ORIGIN" \
+            ATTENDANCE_ENVIRONMENT=DEV \
+            --service "$ATTENDANCE_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --skip-deploys >/dev/null
+          echo 'ATTENDANCE_RUNTIME_CONFIG=PASS'
+
+      - name: Require the new Security runtime before Attendance deploy
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe="$SECURITY_BASE_URL/security/v1/tenants/00000000-0000-0000-0000-000000000000/users/00000000-0000-0000-0000-000000000000/module-roles/attendance/HRADMIN"
+          for attempt in $(seq 1 60); do
+            code="$(curl --silent --show-error --output /tmp/security-probe.json --write-out '%{http_code}' --request PUT "$probe" || true)"
+            case "$code" in
+              401|403|422)
+                echo "SECURITY_ATTENDANCE_RUNTIME=PASS http=$code"
+                exit 0
+                ;;
+            esac
+            sleep 5
+          done
+          echo '::error::New Security Attendance role route was not observed in DEV.'
+          exit 1
+
+      - name: Deploy Attendance source to Attendance service only
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > railway.toml <<'TOML'
+          [build]
+          builder = "DOCKERFILE"
+          dockerfilePath = "Dockerfile.attendance"
+
+          [deploy]
+          healthcheckPath = "/ready"
+          healthcheckTimeout = 30
+          restartPolicyType = "ON_FAILURE"
+          restartPolicyMaxRetries = 5
+          TOML
+          env -u RAILWAY_TOKEN railway up \
+            --service "$ATTENDANCE_SERVICE" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --ci
+          echo 'ATTENDANCE_RAILWAY_DEPLOY_SUBMITTED=PASS'
+
+      - name: Resolve/create Attendance public domain and smoke test
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::RAILWAY_TOKEN is not configured.'; exit 1; }
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { id domain } } }'
+          variables="$(jq -cn --arg project "$PLATFORM_PROJECT_ID" --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$ATTENDANCE_RAILWAY_SERVICE_ID" '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          if [ -z "$domain" ]; then
+            mutation='mutation serviceDomainCreate($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }'
+            vars="$(jq -cn --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$ATTENDANCE_RAILWAY_SERVICE_ID" '{input:{environmentId:$environment,serviceId:$service}}')"
+            body="$(jq -cn --arg query "$mutation" --argjson variables "$vars" '{query:$query,variables:$variables}')"
+            response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
+            domain="$(printf '%s' "$response" | jq -r '.data.serviceDomainCreate.domain // empty')"
+          fi
+          [ -n "$domain" ] || { echo '::error::Attendance DEV domain could not be resolved.'; exit 1; }
+          base="https://$domain"
+          echo "Attendance DEV URL: $base"
+          for attempt in $(seq 1 60); do
+            ready="$(curl --silent --show-error --output /tmp/attendance-ready.json --write-out '%{http_code}' "$base/ready" || true)"
+            if [ "$ready" = '200' ]; then
+              curl --fail --silent --show-error "$base/health" >/tmp/attendance-health.json
+              jq -e '.service == "attendance" and .status == "ok"' /tmp/attendance-health.json >/dev/null
+              jq -e '.service == "attendance" and .status == "ready"' /tmp/attendance-ready.json >/dev/null
+              echo "ATTENDANCE_DEV_URL=$base" >> "$GITHUB_ENV"
+              echo 'ATTENDANCE_DEPLOYMENT=PASS'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::Attendance service did not become ready.'
+          exit 1
+
+      - name: Verify existing Security and Audit Core remain healthy
+        if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$SECURITY_BASE_URL/health/ready" >/dev/null
+          curl --fail --silent --show-error "$AUDIT_CORE_BASE_URL/health" >/dev/null
+          echo 'SECURITY_POST_ATTENDANCE_SMOKE=PASS'
+          echo 'AUDIT_CORE_POST_ATTENDANCE_SMOKE=PASS'

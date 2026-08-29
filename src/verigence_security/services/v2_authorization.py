@@ -56,6 +56,22 @@ class AuthorizationRepository(Protocol):
 
     def active_admin_assignments(self, user_id: str) -> list[dict[str, Any]]: ...
 
+    def active_module_roles(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        module_key: str,
+    ) -> list[str]: ...
+
+    def module_role_has_permission(
+        self,
+        *,
+        module_key: str,
+        role_key: str,
+        permission_key: str,
+    ) -> bool: ...
+
     def active_operating_role(self, *, user_id: str, tenant_id: str) -> str | None: ...
 
     def tenant_role_has_permission(
@@ -197,6 +213,30 @@ class HumanAuthorizationResolver:
                 role_key="PC",
             )
 
+        # Secondary module roles are evaluated only inside their own permission
+        # module. They never replace or block the user's primary operating/admin role.
+        if module_key == "attendance" and tenant is not None:
+            for module_role in self.repository.active_module_roles(
+                user_id=resolved_user_id,
+                tenant_id=tenant,
+                module_key="attendance",
+            ):
+                if self.repository.module_role_has_permission(
+                    module_key="attendance",
+                    role_key=module_role,
+                    permission_key=required_permission,
+                ):
+                    return self._allow(
+                        "ALLOW_MODULE_ROLE",
+                        user_id=resolved_user_id,
+                        tenant_id=tenant,
+                        permission_key=required_permission,
+                        module_key=module_key,
+                        classification="Module",
+                        role_key=module_role,
+                    )
+
+        # Existing primary-admin behavior remains unchanged.
         if admin_assignments:
             admin_set = MODULE_ADMIN_PERMISSIONS.get(module_key, frozenset())
             if required_permission in admin_set:
