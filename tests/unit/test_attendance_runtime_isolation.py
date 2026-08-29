@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from verigence_security.attendance.config import AttendanceSettings
+from verigence_security.attendance.db import sqlalchemy_database_url
 from verigence_security.attendance.runtime_service import RuntimeAttendanceService
 from verigence_security.attendance.schemas import AttendanceWorkContext, OutletContext
 
@@ -139,3 +140,15 @@ def test_attendance_cors_adds_only_approved_native_origins() -> None:
         "capacitor://localhost",
         "https://localhost",
     ]
+
+
+def test_attendance_runtime_uses_psycopg_v3_for_plain_postgresql_url() -> None:
+    assert sqlalchemy_database_url("postgresql://user:secret@db.example/app") == (
+        "postgresql+psycopg://user:secret@db.example/app"
+    )
+    assert sqlalchemy_database_url("postgres://user:secret@db.example/app") == (
+        "postgresql+psycopg://user:secret@db.example/app"
+    )
+    assert sqlalchemy_database_url("postgresql+psycopg://user:secret@db.example/app") == (
+        "postgresql+psycopg://user:secret@db.example/app"
+    )
