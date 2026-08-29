@@ -6,6 +6,7 @@ from verigence_security.services.v2_authorization import HumanAuthorizationResol
 
 USER_ID = "00000000-0000-4000-8000-000000000101"
 TENANT_ID = "00000000-0000-4000-8000-000000000201"
+OTHER_TENANT_ID = "00000000-0000-4000-8000-000000000202"
 
 
 class AttendanceAuthorizationRepository:
@@ -38,7 +39,7 @@ class AttendanceAuthorizationRepository:
         }
 
     def tenant_status(self, tenant_id: str) -> str | None:
-        return "ACTIVE" if tenant_id == TENANT_ID else None
+        return "ACTIVE" if tenant_id in {TENANT_ID, OTHER_TENANT_ID} else None
 
     def active_admin_assignments(self, user_id: str) -> list[dict[str, Any]]:
         del user_id
@@ -48,10 +49,9 @@ class AttendanceAuthorizationRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
         module_key: str,
     ) -> list[str]:
-        if user_id == USER_ID and tenant_id == TENANT_ID and module_key == "attendance":
+        if user_id == USER_ID and module_key == "attendance":
             return ["HRADMIN"]
         return []
 
@@ -116,14 +116,31 @@ def test_hradmin_grants_attendance_without_replacing_operating_role() -> None:
     assert audit.role_key == "TL"
 
 
-def test_hradmin_scope_is_tenant_specific() -> None:
+def test_hradmin_is_not_bound_to_an_operating_tenant() -> None:
     resolver = HumanAuthorizationResolver(AttendanceAuthorizationRepository())
-    other_tenant = "00000000-0000-4000-8000-000000000202"
 
     decision = resolver.check(
         user_id=USER_ID,
-        tenant_id=other_tenant,
+        tenant_id=OTHER_TENANT_ID,
         permission_key="attendance.all.read",
     )
 
-    assert decision.allowed is False
+    assert decision.allowed is True
+    assert decision.reason_code == "ALLOW_MODULE_ROLE"
+    assert decision.role_key == "HRADMIN"
+    assert decision.tenant_id == OTHER_TENANT_ID
+
+
+def test_hradmin_can_authorize_global_attendance_read_without_tenant_context() -> None:
+    resolver = HumanAuthorizationResolver(AttendanceAuthorizationRepository())
+
+    decision = resolver.check(
+        user_id=USER_ID,
+        tenant_id=None,
+        permission_key="attendance.all.read",
+    )
+
+    assert decision.allowed is True
+    assert decision.reason_code == "ALLOW_MODULE_ROLE"
+    assert decision.role_key == "HRADMIN"
+    assert decision.tenant_id is None

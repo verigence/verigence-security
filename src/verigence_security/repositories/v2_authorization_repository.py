@@ -94,20 +94,24 @@ class V2AuthorizationRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
         module_key: str,
     ) -> list[str]:
+        """Return global active secondary roles for one module.
+
+        Global module-role assignments intentionally carry no Tenant/Project scope.
+        This keeps roles such as Attendance HRADMIN independent from the operating-
+        role model while preserving normal tenant-scoped authorization for PC/TL/PM.
+        """
         return [
             str(value)
             for value in self.s.execute(
                 text(
                     """
                     SELECT a.role_key
-                    FROM security.user_module_role_assignments a
+                    FROM security.user_global_module_role_assignments a
                     JOIN security.module_roles r
                       ON r.module_key=a.module_key AND r.role_key=a.role_key
                     WHERE a.user_id=:user_id
-                      AND a.tenant_id=:tenant_id
                       AND a.module_key=:module_key
                       AND a.status='ACTIVE'
                       AND r.status='ACTIVE'
@@ -118,7 +122,6 @@ class V2AuthorizationRepository:
                 ),
                 {
                     "user_id": user_id,
-                    "tenant_id": tenant_id,
                     "module_key": module_key,
                 },
             ).scalars()
