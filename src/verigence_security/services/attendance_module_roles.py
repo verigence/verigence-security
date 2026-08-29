@@ -42,7 +42,7 @@ class AttendanceModuleRoleService:
             self.session.execute(
                 text(
                     """
-                    INSERT INTO security.user_module_role_assignments (
+                    INSERT INTO security.user_global_module_role_assignments (
                         assignment_id,user_id,module_key,role_key,status,
                         valid_from_utc,assigned_by_user_id,assigned_at_utc
                     ) VALUES (
@@ -92,7 +92,7 @@ class AttendanceModuleRoleService:
             self.session.execute(
                 text(
                     """
-                    UPDATE security.user_module_role_assignments
+                    UPDATE security.user_global_module_role_assignments
                     SET status='ENDED',ended_at_utc=:now,
                         valid_to_utc=COALESCE(valid_to_utc,:now)
                     WHERE assignment_id=CAST(:assignment_id AS uuid)
@@ -154,7 +154,7 @@ class AttendanceModuleRoleService:
             text(
                 """
                 SELECT assignment_id
-                FROM security.user_module_role_assignments
+                FROM security.user_global_module_role_assignments
                 WHERE user_id=CAST(:user_id AS uuid)
                   AND module_key='attendance'
                   AND role_key='HRADMIN'
@@ -187,7 +187,7 @@ class AttendanceModuleRoleService:
                 ) VALUES (
                     CAST(:admin_change_id AS uuid),:correlation_id,'PLATFORM',
                     NULL,CAST(:actor_user_id AS uuid),
-                    'security.attendance_hradmin.manage','USER_MODULE_ROLE',:resource_id,
+                    'security.attendance_hradmin.manage','USER_GLOBAL_MODULE_ROLE',:resource_id,
                     'SUCCESS',CAST(:before_json AS jsonb),CAST(:after_json AS jsonb),:now
                 )
                 """
