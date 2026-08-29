@@ -98,9 +98,9 @@ class V2AuthorizationRepository:
     ) -> list[str]:
         """Return global active secondary roles for one module.
 
-        Module-role assignments intentionally carry no Tenant/Project scope. This
-        keeps roles such as Attendance HRADMIN independent from the operating-role
-        model while preserving normal tenant-scoped authorization for PC/TL/PM/etc.
+        Global module-role assignments intentionally carry no Tenant/Project scope.
+        This keeps roles such as Attendance HRADMIN independent from the operating-
+        role model while preserving normal tenant-scoped authorization for PC/TL/PM.
         """
         return [
             str(value)
@@ -108,7 +108,7 @@ class V2AuthorizationRepository:
                 text(
                     """
                     SELECT a.role_key
-                    FROM security.user_module_role_assignments a
+                    FROM security.user_global_module_role_assignments a
                     JOIN security.module_roles r
                       ON r.module_key=a.module_key AND r.role_key=a.role_key
                     WHERE a.user_id=:user_id
