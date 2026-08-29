@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel
 
 
 class AttendanceRoleMutationResponse(BaseModel):
-    userId: str
+    tenantId: UUID
+    userId: UUID
     moduleKey: Literal["attendance"] = "attendance"
     roleKey: Literal["HRADMIN"] = "HRADMIN"
     changed: bool
-    assignmentId: str | None
+    assignmentId: UUID | None
