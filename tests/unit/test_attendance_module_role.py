@@ -49,9 +49,10 @@ class AttendanceAuthorizationRepository:
         self,
         *,
         user_id: str,
+        tenant_id: str,
         module_key: str,
     ) -> list[str]:
-        if user_id == USER_ID and module_key == "attendance":
+        if user_id == USER_ID and tenant_id == TENANT_ID and module_key == "attendance":
             return ["HRADMIN"]
         return []
 
@@ -116,7 +117,7 @@ def test_hradmin_grants_attendance_without_replacing_operating_role() -> None:
     assert audit.role_key == "TL"
 
 
-def test_hradmin_is_not_bound_to_an_operating_tenant() -> None:
+def test_hradmin_does_not_leak_to_another_tenant() -> None:
     resolver = HumanAuthorizationResolver(AttendanceAuthorizationRepository())
 
     decision = resolver.check(
@@ -125,13 +126,11 @@ def test_hradmin_is_not_bound_to_an_operating_tenant() -> None:
         permission_key="attendance.all.read",
     )
 
-    assert decision.allowed is True
-    assert decision.reason_code == "ALLOW_MODULE_ROLE"
-    assert decision.role_key == "HRADMIN"
-    assert decision.tenant_id == OTHER_TENANT_ID
+    assert decision.allowed is False
+    assert decision.reason_code == "OPERATING_ROLE_NOT_ASSIGNED"
 
 
-def test_hradmin_can_authorize_global_attendance_read_without_tenant_context() -> None:
+def test_hradmin_requires_tenant_context() -> None:
     resolver = HumanAuthorizationResolver(AttendanceAuthorizationRepository())
 
     decision = resolver.check(
@@ -140,7 +139,5 @@ def test_hradmin_can_authorize_global_attendance_read_without_tenant_context() -
         permission_key="attendance.all.read",
     )
 
-    assert decision.allowed is True
-    assert decision.reason_code == "ALLOW_MODULE_ROLE"
-    assert decision.role_key == "HRADMIN"
-    assert decision.tenant_id is None
+    assert decision.allowed is False
+    assert decision.reason_code == "TENANT_CONTEXT_REQUIRED"
