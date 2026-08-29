@@ -12,6 +12,22 @@ class AttendanceRosterRepository:
     def __init__(self, session: Session) -> None:
         self.s = session
 
+    def active_tenants(self) -> list[dict[str, Any]]:
+        """Return the active Tenant directory for global Attendance administration."""
+        return [
+            dict(row)
+            for row in self.s.execute(
+                text(
+                    """
+                    SELECT tenant_id,tenant_code,tenant_name
+                    FROM security.tenants
+                    WHERE status='ACTIVE'
+                    ORDER BY lower(tenant_name),tenant_code,tenant_id
+                    """
+                )
+            ).mappings()
+        ]
+
     def active_members(self, tenant_id: str) -> list[dict[str, Any]]:
         return [
             dict(row)
