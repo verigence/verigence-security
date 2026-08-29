@@ -100,7 +100,7 @@ class SecurityAuthorizationClient:
         self,
         *,
         user_id: UUID,
-        tenant_id: UUID,
+        tenant_id: UUID | None,
         permission_key: str,
     ) -> dict[str, Any]:
         if not self.settings.security_base_url.strip():
@@ -111,7 +111,7 @@ class SecurityAuthorizationClient:
                 headers={"Authorization": f"Bearer {self._token()}"},
                 json={
                     "userId": str(user_id),
-                    "tenantId": str(tenant_id),
+                    "tenantId": str(tenant_id) if tenant_id is not None else None,
                     "permissionKey": permission_key,
                 },
                 timeout=self.settings.downstream_timeout_seconds,
@@ -151,7 +151,7 @@ class SecurityAuthorizationClient:
         self,
         *,
         user_id: UUID,
-        tenant_id: UUID,
+        tenant_id: UUID | None,
         permission_key: str,
     ) -> tuple[bool, dict[str, Any] | None]:
         try:
