@@ -32,9 +32,9 @@ SET module_key=EXCLUDED.module_key,
     catalog_version='attendance-phase1',
     updated_at_utc=CURRENT_TIMESTAMP;
 
--- Attendance is a separate module. Keep the core platform operating-role bundle stable
--- and register Attendance extensions in a module-specific default catalogue. Tenant
--- authorization still materializes into the canonical tenant_role_permissions table.
+-- Attendance extends operating roles without changing the core platform role-default
+-- catalogue. New Tenant creation reads both catalogues and materializes them into the
+-- canonical tenant_role_permissions table.
 CREATE TABLE IF NOT EXISTS security.module_operating_role_permission_defaults (
     module_key              varchar(80) NOT NULL,
     role_key                varchar(120) NOT NULL REFERENCES security.role_definitions(role_key),
@@ -75,8 +75,8 @@ FROM operating_defaults
 ON CONFLICT (module_key,role_key,permission_key) DO UPDATE
 SET source_catalog_version='attendance-phase1',status='ACTIVE';
 
--- Materialize Attendance grants for existing Tenants. This applies only to the
--- tenant-scoped operating roles (PC/TL/PM/CRM/Executive), never to HRADMIN.
+-- Materialize Attendance grants for existing Tenants. This applies only to normal
+-- tenant-scoped operating roles, never to the secondary HRADMIN role.
 DO $$
 DECLARE super_admin_user uuid;
 BEGIN
@@ -100,10 +100,9 @@ BEGIN
   ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING;
 END $$;
 
--- Secondary module roles are deliberately outside role_definitions,
--- user_tenant_operating_roles and user_admin_role_assignments. HRADMIN is global:
--- its assignment has no Tenant/Project foreign key and can coexist with any normal
--- operating role without changing operating-role cardinality.
+-- HRADMIN is a secondary module role scoped to one Tenant. It is intentionally
+-- outside role_definitions/user_tenant_operating_roles/user_admin_role_assignments,
+-- so assigning HRADMIN never changes the employee's PC/TL/PM/CRM/Executive role.
 CREATE TABLE IF NOT EXISTS security.module_roles (
     module_key      varchar(80) NOT NULL,
     role_key        varchar(80) NOT NULL,
@@ -127,6 +126,7 @@ CREATE TABLE IF NOT EXISTS security.module_role_permissions (
 
 CREATE TABLE IF NOT EXISTS security.user_module_role_assignments (
     assignment_id       uuid PRIMARY KEY,
+    tenant_id           uuid NOT NULL REFERENCES security.tenants(tenant_id),
     user_id             uuid NOT NULL REFERENCES security.users(user_id),
     module_key          varchar(80) NOT NULL,
     role_key            varchar(80) NOT NULL,
@@ -136,17 +136,18 @@ CREATE TABLE IF NOT EXISTS security.user_module_role_assignments (
     assigned_by_user_id uuid NOT NULL REFERENCES security.users(user_id),
     assigned_at_utc     timestamptz NOT NULL,
     ended_at_utc        timestamptz,
+    updated_at_utc      timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (module_key,role_key)
       REFERENCES security.module_roles(module_key,role_key),
     CHECK (valid_to_utc IS NULL OR valid_from_utc IS NULL OR valid_to_utc>valid_from_utc)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_user_module_role
-ON security.user_module_role_assignments(user_id,module_key,role_key)
+ON security.user_module_role_assignments(tenant_id,user_id,module_key,role_key)
 WHERE status='ACTIVE';
 
 CREATE INDEX IF NOT EXISTS ix_user_module_roles_runtime
-ON security.user_module_role_assignments(user_id,module_key,status);
+ON security.user_module_role_assignments(user_id,tenant_id,module_key,status);
 
 INSERT INTO security.module_roles
 (module_key,role_key,display_name,status,created_at_utc,updated_at_utc)
