@@ -9,13 +9,30 @@ from sqlalchemy.orm import Session, sessionmaker
 from verigence_security.attendance.config import get_attendance_settings
 
 
+def sqlalchemy_database_url(database_url: str) -> str:
+    """Select the installed psycopg v3 SQLAlchemy dialect explicitly.
+
+    Railway/Neon commonly expose plain ``postgresql://`` URLs. SQLAlchemy maps that
+    legacy spelling to psycopg2, while this service intentionally installs psycopg v3.
+    Keep the stored secret unchanged and normalize only at the SQLAlchemy boundary.
+    """
+    normalized = database_url.strip()
+    if normalized.startswith("postgresql+psycopg://"):
+        return normalized
+    if normalized.startswith("postgresql://"):
+        return "postgresql+psycopg://" + normalized.removeprefix("postgresql://")
+    if normalized.startswith("postgres://"):
+        return "postgresql+psycopg://" + normalized.removeprefix("postgres://")
+    return normalized
+
+
 @lru_cache
 def attendance_engine() -> Engine:
     settings = get_attendance_settings()
     if not settings.database_url.strip():
         raise RuntimeError("ATTENDANCE_DATABASE_URL is required")
     return create_engine(
-        settings.database_url,
+        sqlalchemy_database_url(settings.database_url),
         pool_pre_ping=True,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
