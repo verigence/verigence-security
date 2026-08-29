@@ -32,6 +32,7 @@ dev = [
   "pytest-cov>=6,<8",
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
+  "psycopg2-binary>=2.9,<3",
 ]
 
 [tool.hatch.build.targets.wheel]
