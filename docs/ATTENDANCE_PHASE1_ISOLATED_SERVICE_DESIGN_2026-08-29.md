@@ -39,9 +39,9 @@ Exact rollback branches created before Attendance implementation:
 - `verigence-audit-core`: `baseline/pre-attendance-phase1-20260828` @ `605d097eb92e36009f884ebf4cd1cdb76ed864fe`
 - `verigence-di`: `baseline/pre-attendance-phase1-20260828` @ `86713488d7811ab6b9cb7d049bf04aa6fa004201`
 
-Feature branches:
+Current Attendance implementation branches:
 
-- Security/Attendance service: `feature/attendance-phase1-service`
+- Security global-HR delta from current `dev`: `feature/attendance-global-hradmin-20260829`
 - Web: `feature/attendance-phase1-web`
 - Audit Core read-only location contract: `feature/attendance-phase1-location-contract`
 
@@ -81,7 +81,7 @@ Security remains source of truth for:
 It is deliberately independent of Tenant/Project membership:
 
 - assigning HRADMIN does not require a Tenant ID
-- the HRADMIN assignment row contains no Tenant foreign key
+- the global HRADMIN assignment row contains no Tenant foreign key
 - HRADMIN can authorize Attendance administration with no Tenant context
 - HRADMIN can administer Attendance data across Tenants/Projects
 - HRADMIN does not replace or alter the user's normal operating role
@@ -93,9 +93,11 @@ The global secondary-role persistence is isolated from existing primary roles:
 
 - `security.module_roles`
 - `security.module_role_permissions`
-- `security.user_module_role_assignments`
+- `security.user_global_module_role_assignments`
 
-These tables are only consulted for permissions belonging to the same module. For `attendance.*`, Security may resolve `HRADMIN`; for Audit/DI permissions it continues through the existing authorization path.
+The original Tenant-scoped `security.user_module_role_assignments` introduced by migration `0027` is preserved unchanged as a rollback-compatible legacy table. Migration `0028` adds the global table and copies only an unambiguous active HRADMIN assignment. If a USER has multiple active legacy HRADMIN assignments, `0028` aborts instead of silently choosing one.
+
+Only permissions belonging to the same module consult global module roles. For `attendance.*`, Security may resolve `HRADMIN`; for Audit/DI permissions it continues through the existing authorization path.
 
 HRADMIN assignment/removal is a platform-level Security administration change and is audited with `scope_type='PLATFORM'` and no Tenant ID.
 
@@ -246,7 +248,7 @@ Independent rollback paths:
 
 1. disable/remove Web Attendance navigation/widget
 2. roll back Attendance service deployment only
-3. revert additive Attendance Security permissions/global HRADMIN support
+3. revert the global-HR application code while keeping additive migration `0028`; legacy `0027` data remains intact
 4. revert Audit Core Attendance read-only context independently
 
 The baseline branches in section 3 remain the pre-Attendance restore points.
