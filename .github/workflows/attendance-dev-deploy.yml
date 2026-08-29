@@ -48,7 +48,7 @@ jobs:
           git fetch --no-tags --depth=2 origin dev
           changed="$(git diff --name-only HEAD^ HEAD || true)"
           printf '%s\n' "$changed"
-          if grep -Eq '^((attendance_migrations/)|(.github/workflows/attendance-dev-deploy.yml$)|(Dockerfile.attendance$)|(scripts/apply_attendance_migrations.py$)|(src/verigence_security/attendance/)|(src/verigence_security/api/attendance_role_schemas.py$)|(src/verigence_security/api/routes/attendance_roles.py$)|(src/verigence_security/services/attendance_module_roles.py$)|(src/verigence_security/services/platform_admin.py$)|(src/verigence_security/services/v2_authorization.py$)|(src/verigence_security/repositories/v2_authorization_repository.py$)|(migrations/0027_attendance_module_rbac.sql$))' <<<"$changed"; then
+          if grep -Eq '^((attendance_migrations/)|(.github/workflows/attendance-dev-deploy.yml$)|(Dockerfile.attendance$)|(scripts/apply_attendance_migrations.py$)|(src/verigence_security/attendance/)|(src/verigence_security/api/attendance_role_schemas.py$)|(src/verigence_security/api/routes/attendance_roles.py$)|(src/verigence_security/services/attendance_module_roles.py$)|(src/verigence_security/services/platform_admin.py$)|(src/verigence_security/services/v2_authorization.py$)|(src/verigence_security/repositories/v2_authorization_repository.py$)|(migrations/0027_attendance_module_rbac.sql$)|(migrations/0028_attendance_global_hradmin.sql$))' <<<"$changed"; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
@@ -126,6 +126,7 @@ jobs:
             ready="$(psql "$ATTENDANCE_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
               SELECT CASE WHEN to_regclass('security.module_operating_role_permission_defaults') IS NOT NULL
                 AND to_regclass('security.user_module_role_assignments') IS NOT NULL
+                AND to_regclass('security.user_global_module_role_assignments') IS NOT NULL
                 AND EXISTS (
                   SELECT 1 FROM security.permissions
                   WHERE permission_key='attendance.self.checkin' AND status='ACTIVE'
@@ -298,6 +299,7 @@ jobs:
           cat /tmp/attendance-public-key | env -u RAILWAY_TOKEN railway variable set ATTENDANCE_SECURITY_PUBLIC_KEY_PEM --stdin --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --skip-deploys >/dev/null
           cat /tmp/attendance-client-secret | env -u RAILWAY_TOKEN railway variable set ATTENDANCE_SECURITY_CLIENT_SECRET --stdin --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --skip-deploys >/dev/null
           env -u RAILWAY_TOKEN railway variable set \
+            RAILWAY_DOCKERFILE_PATH=Dockerfile.attendance \
             ATTENDANCE_SECURITY_CLIENT_ID=attendance \
             ATTENDANCE_SECURITY_BASE_URL="$SECURITY_BASE_URL" \
             ATTENDANCE_AUDIT_CORE_BASE_URL="$AUDIT_CORE_BASE_URL" \
@@ -306,14 +308,17 @@ jobs:
             --service "$ATTENDANCE_SERVICE" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
             --skip-deploys >/dev/null
+          resolved_dockerfile="$(env -u RAILWAY_TOKEN railway variable list --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --json | jq -r '.RAILWAY_DOCKERFILE_PATH // empty')"
+          [ "$resolved_dockerfile" = 'Dockerfile.attendance' ] || { echo '::error::Attendance Railway Dockerfile path was not persisted.'; exit 1; }
           echo 'ATTENDANCE_RUNTIME_CONFIG=PASS'
+          echo 'ATTENDANCE_DOCKERFILE_PATH=PASS'
 
       - name: Require the new Security runtime before Attendance deploy
         if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          probe="$SECURITY_BASE_URL/security/v1/tenants/00000000-0000-0000-0000-000000000000/users/00000000-0000-0000-0000-000000000000/module-roles/attendance/HRADMIN"
+          probe="$SECURITY_BASE_URL/security/v1/users/00000000-0000-0000-0000-000000000000/module-roles/attendance/HRADMIN"
           for attempt in $(seq 1 60); do
             code="$(curl --silent --show-error --output /tmp/security-probe.json --write-out '%{http_code}' --request PUT "$probe" || true)"
             case "$code" in
@@ -332,17 +337,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > railway.toml <<'TOML'
-          [build]
-          builder = "DOCKERFILE"
-          dockerfilePath = "Dockerfile.attendance"
-
-          [deploy]
-          healthcheckPath = "/ready"
-          healthcheckTimeout = 30
-          restartPolicyType = "ON_FAILURE"
-          restartPolicyMaxRetries = 5
-          TOML
+          # New Railway services no longer opt into deprecated railway.toml Config-as-Code.
+          # The supported service variable above is therefore the authoritative custom
+          # Dockerfile selection and prevents this service from starting Security's image.
           env -u RAILWAY_TOKEN railway up \
             --service "$ATTENDANCE_SERVICE" \
             --environment "$PLATFORM_ENVIRONMENT_ID" \
@@ -370,8 +367,10 @@ jobs:
           [ -n "$domain" ] || { echo '::error::Attendance DEV domain could not be resolved.'; exit 1; }
           base="https://$domain"
           echo "Attendance DEV URL: $base"
+          last_ready='000'
           for attempt in $(seq 1 60); do
             ready="$(curl --silent --show-error --output /tmp/attendance-ready.json --write-out '%{http_code}' "$base/ready" || true)"
+            last_ready="$ready"
             if [ "$ready" = '200' ]; then
               curl --fail --silent --show-error "$base/health" >/tmp/attendance-health.json
               jq -e '.service == "attendance" and .status == "ok"' /tmp/attendance-health.json >/dev/null
@@ -380,9 +379,21 @@ jobs:
               echo 'ATTENDANCE_DEPLOYMENT=PASS'
               exit 0
             fi
+            if [ "$attempt" -eq 3 ]; then
+              security_ready="$(curl --silent --show-error --output /tmp/wrong-runtime-probe.json --write-out '%{http_code}' "$base/health/ready" || true)"
+              if [ "$ready" = '404' ] && [ "$security_ready" = '200' ]; then
+                echo '::error::Attendance Railway service is running the Security runtime instead of Dockerfile.attendance.'
+                env -u RAILWAY_TOKEN railway logs --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --latest --lines 80 || true
+                exit 1
+              fi
+            fi
             sleep 5
           done
-          echo '::error::Attendance service did not become ready.'
+          echo "::error::Attendance service did not become ready; last /ready HTTP status=$last_ready"
+          echo '--- Attendance /ready response ---'
+          cat /tmp/attendance-ready.json 2>/dev/null || true
+          echo '\n--- Latest Attendance deploy logs ---'
+          env -u RAILWAY_TOKEN railway logs --service "$ATTENDANCE_SERVICE" --environment "$PLATFORM_ENVIRONMENT_ID" --latest --lines 120 || true
           exit 1
 
       - name: Verify existing Security and Audit Core remain healthy
