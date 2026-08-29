@@ -10,6 +10,7 @@ import httpx
 import jwt
 
 from verigence_security.attendance.config import AttendanceSettings
+from verigence_security.attendance.directory_schemas import AttendanceTenantSummary
 from verigence_security.attendance.schemas import AttendanceRosterMember
 
 
@@ -53,7 +54,7 @@ def verify_human_token(token: str, settings: AttendanceSettings) -> VerifiedHuma
 
 
 class SecurityAuthorizationClient:
-    """Small cached client for Security v2 authorization and Attendance-only roster reads.
+    """Small cached client for Security v2 authorization and Attendance-only reads.
 
     The Attendance process owns this cache. It never adds work to the Security login
     path and every downstream call has a short bounded timeout.
@@ -126,6 +127,27 @@ class SecurityAuthorizationClient:
         if not bool(payload.get("allowed")):
             raise AttendanceAuthorizationError(str(payload.get("reasonCode", "PERMISSION_DENIED")))
         return payload
+
+    def active_tenants(self) -> list[AttendanceTenantSummary]:
+        if not self.settings.security_base_url.strip():
+            raise AttendanceDependencyError("Attendance Security base URL is not configured")
+        base = self.settings.security_base_url.rstrip("/")
+        try:
+            response = httpx.get(
+                f"{base}/security/v1/internal/attendance/tenants",
+                headers={"Authorization": f"Bearer {self._token()}"},
+                timeout=self.settings.downstream_timeout_seconds,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                raise ValueError("Tenant directory payload does not contain items")
+            return [AttendanceTenantSummary.model_validate(item) for item in items]
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise AttendanceDependencyError(
+                "Security attendance tenant directory is temporarily unavailable"
+            ) from exc
 
     def active_roster(self, *, tenant_id: UUID) -> list[AttendanceRosterMember]:
         if not self.settings.security_base_url.strip():
