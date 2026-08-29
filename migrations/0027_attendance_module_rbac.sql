@@ -75,8 +75,8 @@ FROM operating_defaults
 ON CONFLICT (module_key,role_key,permission_key) DO UPDATE
 SET source_catalog_version='attendance-phase1',status='ACTIVE';
 
--- Materialize Attendance grants for existing Tenants. Future Tenant creation reads
--- both the core platform defaults and these active module defaults.
+-- Materialize Attendance grants for existing Tenants. This applies only to the
+-- tenant-scoped operating roles (PC/TL/PM/CRM/Executive), never to HRADMIN.
 DO $$
 DECLARE super_admin_user uuid;
 BEGIN
@@ -101,8 +101,9 @@ BEGIN
 END $$;
 
 -- Secondary module roles are deliberately outside role_definitions,
--- user_tenant_operating_roles and user_admin_role_assignments. This allows HRADMIN
--- to coexist with PC/TL/PM/etc. without changing any existing Security role rules.
+-- user_tenant_operating_roles and user_admin_role_assignments. HRADMIN is global:
+-- its assignment has no Tenant/Project foreign key and can coexist with any normal
+-- operating role without changing operating-role cardinality.
 CREATE TABLE IF NOT EXISTS security.module_roles (
     module_key      varchar(80) NOT NULL,
     role_key        varchar(80) NOT NULL,
@@ -126,7 +127,6 @@ CREATE TABLE IF NOT EXISTS security.module_role_permissions (
 
 CREATE TABLE IF NOT EXISTS security.user_module_role_assignments (
     assignment_id       uuid PRIMARY KEY,
-    tenant_id           uuid NOT NULL REFERENCES security.tenants(tenant_id),
     user_id             uuid NOT NULL REFERENCES security.users(user_id),
     module_key          varchar(80) NOT NULL,
     role_key            varchar(80) NOT NULL,
@@ -142,11 +142,11 @@ CREATE TABLE IF NOT EXISTS security.user_module_role_assignments (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_user_module_role
-ON security.user_module_role_assignments(tenant_id,user_id,module_key,role_key)
+ON security.user_module_role_assignments(user_id,module_key,role_key)
 WHERE status='ACTIVE';
 
 CREATE INDEX IF NOT EXISTS ix_user_module_roles_runtime
-ON security.user_module_role_assignments(user_id,tenant_id,module_key,status);
+ON security.user_module_role_assignments(user_id,module_key,status);
 
 INSERT INTO security.module_roles
 (module_key,role_key,display_name,status,created_at_utc,updated_at_utc)

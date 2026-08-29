@@ -19,20 +19,19 @@ def _require_super_admin(actor: HumanActorContext) -> None:
 
 
 @router.put(
-    "/tenants/{tenantId}/users/{userId}/module-roles/attendance/HRADMIN",
+    "/users/{userId}/module-roles/attendance/HRADMIN",
     response_model=AttendanceRoleMutationResponse,
 )
 def assign_hradmin(
-    tenantId: str,
     userId: str,
     request: Request,
     actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AttendanceRoleMutationResponse:
+    """Assign global Attendance HRADMIN without Tenant/Project scope."""
     _require_super_admin(actor)
     try:
         changed, assignment_id = AttendanceModuleRoleService(session).assign(
-            tenant_id=tenantId,
             user_id=userId,
             actor_user_id=actor.user_id,
             correlation_id=request.state.correlation_id,
@@ -40,7 +39,6 @@ def assign_hradmin(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return AttendanceRoleMutationResponse(
-        tenantId=tenantId,
         userId=userId,
         changed=changed,
         assignmentId=assignment_id,
@@ -48,20 +46,19 @@ def assign_hradmin(
 
 
 @router.delete(
-    "/tenants/{tenantId}/users/{userId}/module-roles/attendance/HRADMIN",
+    "/users/{userId}/module-roles/attendance/HRADMIN",
     response_model=AttendanceRoleMutationResponse,
 )
 def remove_hradmin(
-    tenantId: str,
     userId: str,
     request: Request,
     actor: HumanActorContext = Depends(security_human_actor),
     session: Session = Depends(platform_session),
 ) -> AttendanceRoleMutationResponse:
+    """Remove global Attendance HRADMIN without touching operating roles."""
     _require_super_admin(actor)
     try:
         changed, assignment_id = AttendanceModuleRoleService(session).remove(
-            tenant_id=tenantId,
             user_id=userId,
             actor_user_id=actor.user_id,
             correlation_id=request.state.correlation_id,
@@ -69,7 +66,6 @@ def remove_hradmin(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return AttendanceRoleMutationResponse(
-        tenantId=tenantId,
         userId=userId,
         changed=changed,
         assignmentId=assignment_id,
