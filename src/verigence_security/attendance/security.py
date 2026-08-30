@@ -4,6 +4,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -229,18 +230,18 @@ class SecurityAuthorizationClient:
     ) -> dict[str, Any]:
         for token_attempt in range(2):
             token = self._token()
+            request = partial(
+                self._client.post,
+                "/security/v1/authorization/check",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "userId": str(user_id),
+                    "tenantId": str(tenant_id) if tenant_id is not None else None,
+                    "permissionKey": permission_key,
+                },
+            )
             try:
-                response = self._call_with_retry(
-                    lambda token=token: self._client.post(
-                        "/security/v1/authorization/check",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={
-                            "userId": str(user_id),
-                            "tenantId": str(tenant_id) if tenant_id is not None else None,
-                            "permissionKey": permission_key,
-                        },
-                    )
-                )
+                response = self._call_with_retry(request)
                 raw_payload = response.json()
                 break
             except httpx.HTTPStatusError as exc:
@@ -302,13 +303,13 @@ class SecurityAuthorizationClient:
             raise AttendanceDependencyError("Attendance Security base URL is not configured")
         for token_attempt in range(2):
             token = self._token()
+            request = partial(
+                self._client.get,
+                f"/security/v1/internal/attendance/tenants/{tenant_id}/roster",
+                headers={"Authorization": f"Bearer {token}"},
+            )
             try:
-                response = self._call_with_retry(
-                    lambda token=token: self._client.get(
-                        f"/security/v1/internal/attendance/tenants/{tenant_id}/roster",
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                )
+                response = self._call_with_retry(request)
                 payload = response.json()
                 items = payload.get("items") if isinstance(payload, dict) else None
                 if not isinstance(items, list):
