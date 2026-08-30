@@ -1,0 +1,33 @@
+name: Diagnose DEV auth live logs read-only
+
+on:
+  push:
+    branches: [diag/live-auth-key-sync-20260830]
+    paths: ['.github/workflows/diag-auth-live-logs.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install --global @railway/cli
+      - name: Read-only recent auth log correlation
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service security --json >/dev/null
+          for svc in security attendance verigence-audit-core; do
+            echo "===== ${svc} ====="
+            railway logs --service "$svc" --environment dev --lines 500 2>&1 \
+              | sed -E 's/[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/[JWT_REDACTED]/g' \
+              | grep -Ei 'auth|token|refresh|attendance|401|403|500|502|503|504|invalid|expired|session|error|exception|/security/v1/auth/refresh' \
+              | tail -n 180 || true
+          done
+          echo READ_ONLY_LOG_CORRELATION=PASS
