@@ -14,28 +14,20 @@ def test_authorization_retries_one_transient_503(monkeypatch) -> None:
         security_client_secret="secret",
         downstream_timeout_seconds=0.5,
     )
-    client = SecurityAuthorizationClient(settings)
-    client._service_token = "cached-token"
-    client._service_token_expires_at = time.monotonic() + 600
-
     calls: list[int] = []
     responses = [
-        httpx.Response(
-            503,
-            request=httpx.Request("POST", "https://security.example/security/v1/authorization/check"),
-        ),
-        httpx.Response(
-            200,
-            json={"allowed": True, "reasonCode": "ALLOWED"},
-            request=httpx.Request("POST", "https://security.example/security/v1/authorization/check"),
-        ),
+        httpx.Response(503),
+        httpx.Response(200, json={"allowed": True, "reasonCode": "ALLOWED"}),
     ]
 
-    def fake_post(*args, **kwargs) -> httpx.Response:  # noqa: ANN002, ANN003
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/security/v1/authorization/check"
         calls.append(1)
         return responses.pop(0)
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    client = SecurityAuthorizationClient(settings, transport=httpx.MockTransport(handler))
+    client._service_token = "cached-token"
+    client._service_token_reuse_until = time.monotonic() + 600
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     payload = client.check(
@@ -46,3 +38,4 @@ def test_authorization_retries_one_transient_503(monkeypatch) -> None:
 
     assert payload["allowed"] is True
     assert len(calls) == 2
+    client.close()
