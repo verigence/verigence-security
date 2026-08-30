@@ -127,6 +127,12 @@ class AttendanceRosterMember(BaseModel):
     operatingRole: str | None = None
 
 
+class AttendanceLocationConfirmationSummary(BaseModel):
+    displayAddress: str
+    employeeConfirmed: bool
+    remarks: str | None = None
+
+
 class AttendanceOverviewItem(BaseModel):
     userId: UUID
     displayName: str
@@ -134,6 +140,8 @@ class AttendanceOverviewItem(BaseModel):
     roleKey: str | None = None
     status: str
     attendance: AttendanceRecord | None = None
+    checkInLocationConfirmation: AttendanceLocationConfirmationSummary | None = None
+    checkOutLocationConfirmation: AttendanceLocationConfirmationSummary | None = None
 
 
 class AttendanceOverviewResponse(BaseModel):
