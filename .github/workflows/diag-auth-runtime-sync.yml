@@ -1,0 +1,110 @@
+name: Diagnose and repair DEV auth runtime sync
+
+on:
+  push:
+    branches: [diag/live-auth-key-sync-20260830]
+    paths: ['.github/workflows/diag-auth-runtime-sync.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SECURITY_SERVICE: security
+      ATTENDANCE_SERVICE: attendance
+      AUDIT_SERVICE: verigence-audit-core
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install --global @railway/cli
+      - name: Compare and repair auth runtime wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SECURITY_SERVICE" --json >/tmp/link.json
+          railway variable list --service "$SECURITY_SERVICE" --environment dev --json >/tmp/security.json
+          railway variable list --service "$ATTENDANCE_SERVICE" --environment dev --json >/tmp/attendance.json
+          railway variable list --service "$AUDIT_SERVICE" --environment dev --json >/tmp/audit.json
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          s=json.loads(Path('/tmp/security.json').read_text())
+          a=json.loads(Path('/tmp/attendance.json').read_text())
+          c=json.loads(Path('/tmp/audit.json').read_text())
+          sp=str(s.get('SECURITY_PUBLIC_KEY_PEM') or '').replace('\\n','\n').strip()
+          ap=str(a.get('ATTENDANCE_SECURITY_PUBLIC_KEY_PEM') or '').replace('\\n','\n').strip()
+          sd=str(s.get('RAILWAY_PUBLIC_DOMAIN') or s.get('RAILWAY_STATIC_URL') or '').strip()
+          if sd and not sd.startswith(('http://','https://')): sd='https://'+sd
+          expected_base=sd.rstrip('/')
+          expected_jwks=expected_base+'/.well-known/jwks.json' if expected_base else ''
+          def fp(v): return hashlib.sha256(v.encode()).hexdigest()[:16] if v else 'MISSING'
+          print('SECURITY_PUBLIC_KEY_PRESENT='+str(bool(sp)).lower())
+          print('ATTENDANCE_PUBLIC_KEY_PRESENT='+str(bool(ap)).lower())
+          print('PUBLIC_KEY_MATCH='+str(sp==ap and bool(sp)).lower())
+          print('SECURITY_PUBLIC_KEY_FP='+fp(sp))
+          print('ATTENDANCE_PUBLIC_KEY_FP='+fp(ap))
+          print('ATTENDANCE_SECURITY_BASE_MATCH='+str(str(a.get('ATTENDANCE_SECURITY_BASE_URL') or '').rstrip('/')==expected_base).lower())
+          print('ATTENDANCE_CLIENT_ID='+str(a.get('ATTENDANCE_SECURITY_CLIENT_ID') or 'MISSING'))
+          print('ATTENDANCE_CLIENT_SECRET_PRESENT='+str(bool(str(a.get('ATTENDANCE_SECURITY_CLIENT_SECRET') or '').strip())).lower())
+          print('AUDIT_JWKS_MATCH='+str(str(c.get('SECURITY_JWKS_URL') or '').rstrip('/')==expected_jwks.rstrip('/')).lower())
+          print('EXPECTED_SECURITY_BASE='+expected_base)
+          print('EXPECTED_JWKS='+expected_jwks)
+          Path('/tmp/security-public.pem').write_text(sp)
+          Path('/tmp/expected-base').write_text(expected_base)
+          Path('/tmp/expected-jwks').write_text(expected_jwks)
+          Path('/tmp/need-attendance').write_text('1' if sp!=ap or not ap or str(a.get('ATTENDANCE_SECURITY_BASE_URL') or '').rstrip('/')!=expected_base else '0')
+          Path('/tmp/need-audit').write_text('1' if str(c.get('SECURITY_JWKS_URL') or '').rstrip('/')!=expected_jwks.rstrip('/') else '0')
+          PY
+          expected_base="$(cat /tmp/expected-base)"
+          expected_jwks="$(cat /tmp/expected-jwks)"
+          [ -n "$expected_base" ] || { echo '::error::Security public base URL missing'; exit 1; }
+          curl --fail --silent --show-error "$expected_jwks" >/tmp/jwks.json
+          jq -e '.keys | type=="array" and length>0' /tmp/jwks.json >/dev/null
+          echo "LIVE_JWKS_KIDS=$(jq -r '[.keys[].kid] | join(",")' /tmp/jwks.json)"
+          echo "SECURITY_CONFIGURED_KID=$(jq -r '.SECURITY_KEY_ID // "MISSING"' /tmp/security.json)"
+          attendance_before="$(railway deployment list --service "$ATTENDANCE_SERVICE" --limit 1 --json | jq -r '.[0].id // empty')"
+          audit_before="$(railway deployment list --service "$AUDIT_SERVICE" --limit 1 --json | jq -r '.[0].id // empty')"
+          if [ "$(cat /tmp/need-attendance)" = 1 ]; then
+            cat /tmp/security-public.pem | railway variable set ATTENDANCE_SECURITY_PUBLIC_KEY_PEM --stdin --service "$ATTENDANCE_SERVICE" --environment dev --skip-deploys >/dev/null
+            railway variable set "ATTENDANCE_SECURITY_BASE_URL=$expected_base" --service "$ATTENDANCE_SERVICE" --environment dev >/dev/null
+            echo ATTENDANCE_RUNTIME_REPAIR=SUBMITTED
+          else
+            echo ATTENDANCE_RUNTIME_REPAIR=NOT_NEEDED
+          fi
+          if [ "$(cat /tmp/need-audit)" = 1 ]; then
+            railway variable set "SECURITY_JWKS_URL=$expected_jwks" --service "$AUDIT_SERVICE" --environment dev >/dev/null
+            echo AUDIT_JWKS_REPAIR=SUBMITTED
+          else
+            echo AUDIT_JWKS_REPAIR=NOT_NEEDED
+          fi
+          echo "ATTENDANCE_BEFORE=$attendance_before" >> "$GITHUB_ENV"
+          echo "AUDIT_BEFORE=$audit_before" >> "$GITHUB_ENV"
+          echo "NEED_ATTENDANCE=$(cat /tmp/need-attendance)" >> "$GITHUB_ENV"
+          echo "NEED_AUDIT=$(cat /tmp/need-audit)" >> "$GITHUB_ENV"
+      - name: Wait for repaired services
+        shell: bash
+        run: |
+          set -euo pipefail
+          wait_new() {
+            svc="$1" before="$2" needed="$3"
+            [ "$needed" = 1 ] || return 0
+            for i in $(seq 1 45); do
+              row="$(railway deployment list --service "$svc" --limit 1 --json)"
+              id="$(echo "$row"|jq -r '.[0].id // empty')"; st="$(echo "$row"|jq -r '.[0].status // empty')"
+              if [ -n "$id" ] && [ "$id" != "$before" ]; then
+                case "$st" in SUCCESS) echo "$svc REDEPLOY=PASS"; return 0;; FAILED|CRASHED|REMOVED) echo "::error::$svc redeploy $st"; return 1;; esac
+              fi
+              sleep 8
+            done
+            echo "::error::Timed out waiting for $svc redeploy"; return 1
+          }
+          wait_new "$ATTENDANCE_SERVICE" "$ATTENDANCE_BEFORE" "$NEED_ATTENDANCE"
+          wait_new "$AUDIT_SERVICE" "$AUDIT_BEFORE" "$NEED_AUDIT"
+          curl --fail --silent --show-error https://security-dev.up.railway.app/.well-known/jwks.json >/dev/null
+          curl --fail --silent --show-error https://attendance-dev.up.railway.app/ready >/dev/null
+          curl --fail --silent --show-error https://verigence-audit-core-production.up.railway.app/health >/dev/null
+          echo AUTH_RUNTIME_REPAIR=PASS
