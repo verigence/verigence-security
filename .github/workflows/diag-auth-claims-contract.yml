@@ -1,0 +1,89 @@
+name: Diagnose DEV auth claims contract
+
+on:
+  push:
+    branches: [diag/live-auth-key-sync-20260830]
+    paths: ['.github/workflows/diag-auth-claims-contract.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SECURITY_SERVICE: security
+      ATTENDANCE_SERVICE: attendance
+      AUDIT_SERVICE: verigence-audit-core
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          npm install --global @railway/cli
+          python -m pip install --quiet PyJWT cryptography
+      - name: Read-only auth contract comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SECURITY_SERVICE" --json >/tmp/link.json
+          railway variable list --service "$SECURITY_SERVICE" --environment dev --json >/tmp/security.json
+          railway variable list --service "$ATTENDANCE_SERVICE" --environment dev --json >/tmp/attendance.json
+          railway variable list --service "$AUDIT_SERVICE" --environment dev --json >/tmp/audit.json
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          import jwt
+
+          s=json.loads(Path('/tmp/security.json').read_text())
+          a=json.loads(Path('/tmp/attendance.json').read_text())
+          c=json.loads(Path('/tmp/audit.json').read_text())
+
+          issuer=str(s.get('SECURITY_TOKEN_ISSUER') or 'verigence-security').strip()
+          audience=str(s.get('SECURITY_TOKEN_AUDIENCE') or 'verigence-platform').strip()
+          audit_issuer=str(c.get('SECURITY_ISSUER') or '').strip()
+          audit_audience=str(c.get('SECURITY_AUDIENCE') or '').strip()
+          attendance_issuer=str(a.get('ATTENDANCE_SECURITY_TOKEN_ISSUER') or 'verigence-security').strip()
+          attendance_audience=str(a.get('ATTENDANCE_SECURITY_TOKEN_AUDIENCE') or 'verigence-platform').strip()
+          private_key=str(s.get('SECURITY_PRIVATE_KEY_PEM') or '').replace('\\n','\n').strip()
+          public_key=str(s.get('SECURITY_PUBLIC_KEY_PEM') or '').replace('\\n','\n').strip()
+          kid=str(s.get('SECURITY_KEY_ID') or '').strip()
+
+          print('AUDIT_ISSUER_MATCH='+str(audit_issuer==issuer).lower())
+          print('AUDIT_AUDIENCE_MATCH='+str(audit_audience==audience).lower())
+          print('ATTENDANCE_ISSUER_MATCH='+str(attendance_issuer==issuer).lower())
+          print('ATTENDANCE_AUDIENCE_MATCH='+str(attendance_audience==audience).lower())
+          print('SECURITY_PRIVATE_KEY_PRESENT='+str(bool(private_key)).lower())
+          print('SECURITY_PUBLIC_KEY_PRESENT='+str(bool(public_key)).lower())
+          print('SECURITY_KID_PRESENT='+str(bool(kid)).lower())
+
+          if not private_key or not public_key or not kid:
+              raise SystemExit('Security signing material incomplete')
+          if audit_issuer != issuer or audit_audience != audience:
+              raise SystemExit('Audit Core issuer/audience contract mismatch')
+          if attendance_issuer != issuer or attendance_audience != audience:
+              raise SystemExit('Attendance issuer/audience contract mismatch')
+
+          now=datetime.now(timezone.utc)
+          payload={
+              'iss':issuer,
+              'sub':'00000000-0000-0000-0000-000000000001',
+              'aud':audience,
+              'iat':now,
+              'exp':now+timedelta(minutes=5),
+              'jti':'diagnostic-only',
+              'actor_type':'USER',
+              'session_id':'00000000-0000-0000-0000-000000000002',
+              'device_id':'00000000-0000-0000-0000-000000000003',
+          }
+          token=jwt.encode(payload, private_key, algorithm='RS256', headers={'kid':kid})
+          decoded=jwt.decode(token, public_key, algorithms=['RS256'], issuer=audit_issuer, audience=audit_audience,
+                             options={'require':['exp','iss','aud','sub','iat','jti','actor_type']})
+          forbidden={'tenant_id','permissions','roles','location_id','act'}
+          if decoded.get('actor_type')!='USER' or forbidden.intersection(decoded):
+              raise SystemExit('Synthetic human-token shape violates Audit Core human boundary')
+          print('SYNTHETIC_HUMAN_TOKEN_CONTRACT=PASS')
+          PY
+          echo READ_ONLY_DIAGNOSTIC=PASS
