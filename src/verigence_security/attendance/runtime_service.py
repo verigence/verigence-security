@@ -101,7 +101,10 @@ class RuntimeAttendanceService(AttendanceService):
             if not reason:
                 raise AttendanceRuleError(
                     "GEOFENCE_EXCEPTION_REASON_REQUIRED",
-                    "Your assigned work location could not be verified. Please tell us why you are working from a different location today.",
+                    (
+                        "Your assigned work location could not be verified. "
+                        "Please tell us why you are working from a different location today."
+                    ),
                 )
             return GeofenceDecision(
                 required=True,
@@ -121,7 +124,10 @@ class RuntimeAttendanceService(AttendanceService):
         if not reason:
             raise AttendanceRuleError(
                 "GEOFENCE_EXCEPTION_REASON_REQUIRED",
-                "You are away from your assigned work location. Please tell us why you are working from a different location today.",
+                (
+                    "You are away from your assigned work location. "
+                    "Please tell us why you are working from a different location today."
+                ),
             )
         return GeofenceDecision(
             required=True,
