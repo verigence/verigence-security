@@ -1,0 +1,159 @@
+name: Fix Attendance DEV downstream timeout only
+
+on:
+  push:
+    branches: [diag/live-auth-key-sync-20260830]
+    paths: ['.github/workflows/fix-attendance-timeout-dev.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  attendance-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      ATTENDANCE_SERVICE: attendance
+      SECURITY_SERVICE: security
+      AUDIT_SERVICE: verigence-audit-core
+      ATTENDANCE_URL: https://attendance-dev.up.railway.app
+      SECURITY_URL: https://security-dev.up.railway.app
+      AUDIT_URL: https://verigence-audit-core-production.up.railway.app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tooling
+        run: |
+          npm install --global @railway/cli
+          python -m pip install --quiet PyJWT cryptography
+
+      - name: Safety-gate exact DEV Attendance target
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$ATTENDANCE_SERVICE" --json >/tmp/link.json
+          railway status --json >/tmp/status.json
+          actual_project="$(jq -r '.id // empty' /tmp/status.json)"
+          [ "$actual_project" = "$PLATFORM_PROJECT_ID" ] || {
+            echo "::error::Refusing change: Railway project mismatch"
+            exit 1
+          }
+          railway service list --json >/tmp/services.json
+          attendance_id="$(jq -r --arg name "$ATTENDANCE_SERVICE" '[.[] | select(.name == $name)] | first | .id // empty' /tmp/services.json)"
+          [ -n "$attendance_id" ] || {
+            echo "::error::Refusing change: Attendance service not found"
+            exit 1
+          }
+          before="$(railway deployment list --service "$ATTENDANCE_SERVICE" --limit 1 --json | jq -r '.[0].id // empty')"
+          [ -n "$before" ] || {
+            echo "::error::Refusing change: current Attendance deployment not found"
+            exit 1
+          }
+          railway variable list --service "$ATTENDANCE_SERVICE" --environment dev --json >/tmp/attendance-before.json
+          current="$(jq -r '.ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS // "UNSET_DEFAULT_1.5"' /tmp/attendance-before.json)"
+          echo "ATTENDANCE_TIMEOUT_BEFORE=$current"
+          echo "ATTENDANCE_SERVICE_ID=$attendance_id"
+          echo "ATTENDANCE_DEPLOYMENT_BEFORE=$before" >> "$GITHUB_ENV"
+          echo "ATTENDANCE_SERVICE_ID=$attendance_id" >> "$GITHUB_ENV"
+          echo 'SAFETY_GATE=PASS target=attendance environment=dev'
+
+      - name: Set only Attendance DEV timeout to 5 seconds
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable set \
+            ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS=5.0 \
+            --service "$ATTENDANCE_SERVICE" \
+            --environment dev >/dev/null
+          railway variable list --service "$ATTENDANCE_SERVICE" --environment dev --json >/tmp/attendance-after.json
+          resolved="$(jq -r '.ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS // empty' /tmp/attendance-after.json)"
+          [ "$resolved" = '5.0' ] || [ "$resolved" = '5' ] || {
+            echo "::error::Attendance timeout value was not persisted"
+            exit 1
+          }
+          echo 'ATTENDANCE_TIMEOUT_CONFIG=PASS value=5.0'
+          echo 'OTHER_SERVICE_VARIABLE_WRITES=NONE'
+
+      - name: Wait for Attendance-only config deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            row="$(railway deployment list --service "$ATTENDANCE_SERVICE" --limit 1 --json)"
+            id="$(printf '%s' "$row" | jq -r '.[0].id // empty')"
+            status="$(printf '%s' "$row" | jq -r '.[0].status // empty')"
+            if [ -n "$id" ] && [ "$id" != "$ATTENDANCE_DEPLOYMENT_BEFORE" ]; then
+              echo "ATTENDANCE_NEW_DEPLOYMENT=$id status=$status"
+              case "$status" in
+                SUCCESS)
+                  echo 'ATTENDANCE_ONLY_REDEPLOY=PASS'
+                  exit 0
+                  ;;
+                FAILED|CRASHED|REMOVED)
+                  echo "::error::Attendance config deployment failed with $status"
+                  exit 1
+                  ;;
+              esac
+            fi
+            sleep 5
+          done
+          echo '::error::Timed out waiting for Attendance-only deployment'
+          exit 1
+
+      - name: Verify all services healthy and live Attendance no longer returns dependency 503
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$ATTENDANCE_URL/ready" >/tmp/attendance-ready.json
+          curl --fail --silent --show-error "$SECURITY_URL/health/ready" >/dev/null
+          curl --fail --silent --show-error "$AUDIT_URL/health" >/dev/null
+
+          railway variable list --service "$SECURITY_SERVICE" --environment dev --json >/tmp/security-vars.json
+          python - <<'PY'
+          import json
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from uuid import uuid4
+          import jwt
+
+          values=json.loads(Path('/tmp/security-vars.json').read_text())
+          private_key=str(values.get('SECURITY_PRIVATE_KEY_PEM') or '').replace('\\n','\n').strip()
+          issuer=str(values.get('SECURITY_TOKEN_ISSUER') or 'verigence-security').strip()
+          audience=str(values.get('SECURITY_TOKEN_AUDIENCE') or 'verigence-platform').strip()
+          kid=str(values.get('SECURITY_KEY_ID') or '').strip()
+          if not private_key or not kid:
+              raise SystemExit('Security signing material unavailable for safe synthetic probe')
+          now=datetime.now(timezone.utc)
+          payload={
+              'iss':issuer,
+              'sub':str(uuid4()),
+              'aud':audience,
+              'iat':now,
+              'exp':now+timedelta(minutes=2),
+              'jti':str(uuid4()),
+              'actor_type':'USER',
+              'session_id':str(uuid4()),
+              'device_id':str(uuid4()),
+          }
+          token=jwt.encode(payload, private_key, algorithm='RS256', headers={'kid':kid})
+          Path('/tmp/synthetic-human-token').write_text(token, encoding='utf-8')
+          Path('/tmp/random-tenant').write_text(str(uuid4()), encoding='utf-8')
+          PY
+          token="$(cat /tmp/synthetic-human-token)"
+          tenant="$(cat /tmp/random-tenant)"
+          echo "::add-mask::$token"
+          code="$(curl --silent --show-error --output /tmp/attendance-probe.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $token" \
+            "$ATTENDANCE_URL/attendance/v1/tenants/$tenant/me/today" || true)"
+          echo "ATTENDANCE_SYNTHETIC_HUMAN_HTTP=$code"
+          cat /tmp/attendance-probe.json | jq -c '{code,detail}' || true
+          [ "$code" = '403' ] || {
+            echo "::error::Expected safe Security permission DENY (403) after Attendance auth round-trip; got HTTP $code"
+            exit 1
+          }
+          jq -e '.code == "ATTENDANCE_PERMISSION_DENIED"' /tmp/attendance-probe.json >/dev/null
+          echo 'ATTENDANCE_LIVE_SECURITY_ROUND_TRIP=PASS'
+          echo 'SECURITY_POST_CHANGE_HEALTH=PASS'
+          echo 'AUDIT_CORE_POST_CHANGE_HEALTH=PASS'
+          echo 'BLAST_RADIUS=ATTENDANCE_DEV_RUNTIME_VARIABLE_ONLY'
