@@ -23,6 +23,18 @@ jobs:
         run: |
           set -euo pipefail
           railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service security --json >/dev/null
+
+          railway variable list --service attendance --environment dev --json >/tmp/attendance-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          values = json.loads(Path('/tmp/attendance-vars.json').read_text())
+          timeout = str(values.get('ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS') or '').strip()
+          print('ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS=' + (timeout or 'UNSET_DEFAULT_1.5'))
+          print('ATTENDANCE_SECURITY_BASE_CONFIGURED=' + str(bool(str(values.get('ATTENDANCE_SECURITY_BASE_URL') or '').strip())).lower())
+          print('ATTENDANCE_SECURITY_CLIENT_ID=' + str(values.get('ATTENDANCE_SECURITY_CLIENT_ID') or 'MISSING'))
+          PY
+
           for svc in security attendance verigence-audit-core; do
             echo "===== ${svc} ====="
             railway logs --service "$svc" --environment dev --lines 500 2>&1 \
