@@ -9,9 +9,14 @@ from verigence_security.attendance.location_confirmation_repository import (
 from verigence_security.attendance.schemas import (
     AttendanceActionRequest,
     AttendanceActionResponse,
+    AttendancePolicyResponse,
     AttendanceWorkContext,
 )
-from verigence_security.attendance.service import AttendanceRuleError, AttendanceService
+from verigence_security.attendance.service import (
+    AttendanceRuleError,
+    AttendanceService,
+    GeofenceDecision,
+)
 
 
 class RuntimeAttendanceService(AttendanceService):
@@ -19,9 +24,10 @@ class RuntimeAttendanceService(AttendanceService):
 
     TL/PM/CRM/Executive operating users do not call Audit Core during attendance
     actions because their Phase-1 rule is location capture only. PC resolves Outlet
-    coordinates because geofencing is mandatory. A secondary HRADMIN assignment may
-    mask an underlying operating role in the Security decision, so that case performs
-    the optional Audit Core lookup to preserve PC geofencing when roles coexist.
+    coordinates because geofencing is used as review evidence. A secondary HRADMIN
+    assignment may mask an underlying operating role in the Security decision, so
+    that case performs the optional Audit Core lookup to preserve PC location checks
+    when roles coexist.
     """
 
     def _work_context_for_action(
@@ -67,9 +73,63 @@ class RuntimeAttendanceService(AttendanceService):
         if context.operatingRole == "PC" and not context.geofenceRequired:
             raise AttendanceRuleError(
                 "PC_GEOFENCE_CONTEXT_INVALID",
-                "PC attendance requires geofence validation.",
+                "PC attendance requires assigned work-location evidence.",
             )
         return context
+
+    def _geofence(
+        self,
+        *,
+        request: AttendanceActionRequest,
+        context: AttendanceWorkContext,
+        policy: AttendancePolicyResponse,
+    ) -> GeofenceDecision:
+        """Use geofence data as review evidence, never as an attendance blocker.
+
+        A PC at the assigned location is recorded normally. If the employee is away
+        from the assigned location, or the assigned Outlet has no usable coordinates,
+        a business remark is mandatory and the punch is recorded as an exception for
+        later PM/Executive review.
+        """
+
+        if not context.geofenceRequired:
+            return GeofenceDecision(required=False, result_code="LOCATION_CAPTURED")
+
+        reason = (request.exceptionReason or "").strip()
+        nearest = self._nearest_outlet(request=request, context=context)
+        if nearest is None:
+            if not reason:
+                raise AttendanceRuleError(
+                    "GEOFENCE_EXCEPTION_REASON_REQUIRED",
+                    "Your assigned work location could not be verified. Please tell us why you are working from a different location today.",
+                )
+            return GeofenceDecision(
+                required=True,
+                result_code="GEOFENCE_UNVERIFIABLE_EXCEPTION",
+                exception=True,
+            )
+
+        outlet, distance = nearest
+        if distance <= policy.pcGeofenceRadiusMeters:
+            return GeofenceDecision(
+                required=True,
+                result_code="WITHIN_GEOFENCE",
+                matched_outlet=outlet,
+                distance_m=distance,
+            )
+
+        if not reason:
+            raise AttendanceRuleError(
+                "GEOFENCE_EXCEPTION_REASON_REQUIRED",
+                "You are away from your assigned work location. Please tell us why you are working from a different location today.",
+            )
+        return GeofenceDecision(
+            required=True,
+            result_code="OUTSIDE_GEOFENCE_EXCEPTION",
+            matched_outlet=outlet,
+            distance_m=distance,
+            exception=True,
+        )
 
     def _record_location_confirmation(
         self,
