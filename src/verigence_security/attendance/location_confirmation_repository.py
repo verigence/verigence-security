@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 
 class AttendanceLocationConfirmationRepository:
-    """Persist the employee declaration separately from GPS/geofence evidence."""
+    """Persist and read employee declarations separately from GPS/geofence evidence."""
 
     def __init__(self, session: Session) -> None:
         self.s = session
@@ -57,3 +58,35 @@ class AttendanceLocationConfirmationRepository:
                 "remarks": remarks,
             },
         )
+
+    def for_tenant_day(
+        self,
+        *,
+        tenant_id: UUID,
+        attendance_date: date,
+    ) -> dict[UUID, dict[str, dict[str, Any]]]:
+        rows = self.s.execute(
+            text(
+                """
+                SELECT lc.attendance_id,lc.action,lc.display_address,
+                       lc.employee_confirmed,lc.remarks
+                FROM attendance.location_confirmation lc
+                JOIN attendance.daily_attendance da
+                  ON da.attendance_id=lc.attendance_id
+                 AND da.tenant_id=lc.tenant_id
+                WHERE lc.tenant_id=:tenant_id
+                  AND da.attendance_date=:attendance_date
+                ORDER BY lc.created_at_utc
+                """
+            ),
+            {"tenant_id": tenant_id, "attendance_date": attendance_date},
+        ).mappings()
+        result: dict[UUID, dict[str, dict[str, Any]]] = {}
+        for row in rows:
+            attendance_id = UUID(str(row["attendance_id"]))
+            result.setdefault(attendance_id, {})[str(row["action"])] = {
+                "displayAddress": str(row["display_address"]),
+                "employeeConfirmed": bool(row["employee_confirmed"]),
+                "remarks": str(row["remarks"]) if row["remarks"] is not None else None,
+            }
+        return result
