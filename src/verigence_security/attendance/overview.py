@@ -37,9 +37,10 @@ def build_attendance_overview(
         tenant_id=tenant_id,
         attendance_date=attendance_date,
     )
+    rows_by_user = {UUID(str(row["user_id"])): row for row in attendance_rows}
     records_by_user = {
-        UUID(str(row["user_id"])): service._record(row)  # noqa: SLF001
-        for row in attendance_rows
+        user: service._record(row)  # noqa: SLF001
+        for user, row in rows_by_user.items()
     }
     confirmations_by_attendance = AttendanceLocationConfirmationRepository(
         service.repository.s
@@ -55,6 +56,7 @@ def build_attendance_overview(
 
     for member in roster:
         attendance = records_by_user.get(member.userId)
+        raw_row = rows_by_user.get(member.userId)
         check_in_confirmation: AttendanceLocationConfirmationSummary | None = None
         check_out_confirmation: AttendanceLocationConfirmationSummary | None = None
         if attendance is None:
@@ -73,10 +75,26 @@ def build_attendance_overview(
                 check_in_confirmation = AttendanceLocationConfirmationSummary.model_validate(
                     confirmations["CHECK_IN"]
                 )
+                if (
+                    not check_in_confirmation.remarks
+                    and raw_row is not None
+                    and raw_row.get("check_in_exception_reason")
+                ):
+                    check_in_confirmation = check_in_confirmation.model_copy(
+                        update={"remarks": str(raw_row["check_in_exception_reason"])}
+                    )
             if "CHECK_OUT" in confirmations:
                 check_out_confirmation = AttendanceLocationConfirmationSummary.model_validate(
                     confirmations["CHECK_OUT"]
                 )
+                if (
+                    not check_out_confirmation.remarks
+                    and raw_row is not None
+                    and raw_row.get("check_out_exception_reason")
+                ):
+                    check_out_confirmation = check_out_confirmation.model_copy(
+                        update={"remarks": str(raw_row["check_out_exception_reason"])}
+                    )
 
         items.append(
             AttendanceOverviewItem(
