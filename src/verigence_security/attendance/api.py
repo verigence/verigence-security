@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from verigence_security.attendance.audit_core import AuditCoreAttendanceClient
 from verigence_security.attendance.config import AttendanceSettings, get_attendance_settings
 from verigence_security.attendance.db import attendance_session
+from verigence_security.attendance.geocoding import AttendanceReverseGeocoder
 from verigence_security.attendance.overview import build_attendance_overview
 from verigence_security.attendance.repository import AttendanceRepository
 from verigence_security.attendance.runtime_service import RuntimeAttendanceService as AttendanceService
@@ -24,6 +25,8 @@ from verigence_security.attendance.schemas import (
     AttendancePolicyUpdate,
     AttendanceRecord,
     CorrectionRequest,
+    LocationResolutionRequest,
+    LocationResolutionResponse,
     TodayResponse,
 )
 from verigence_security.attendance.security import (
@@ -68,6 +71,11 @@ def audit_core_client() -> AuditCoreAttendanceClient:
     return AuditCoreAttendanceClient(get_attendance_settings())
 
 
+@lru_cache
+def reverse_geocoder() -> AttendanceReverseGeocoder:
+    return AttendanceReverseGeocoder(get_attendance_settings())
+
+
 def attendance_service(
     session: Annotated[Session, Depends(attendance_session)],
     settings: Annotated[AttendanceSettings, Depends(get_attendance_settings)],
@@ -87,6 +95,20 @@ def today(
     service: Annotated[AttendanceService, Depends(attendance_service)],
 ) -> TodayResponse:
     return service.today(tenant_id=tenant_id, user_id=context.human.user_id)
+
+
+@router.post("/tenants/{tenant_id}/me/location/resolve", response_model=LocationResolutionResponse)
+def resolve_location(
+    tenant_id: UUID,
+    body: LocationResolutionRequest,
+    context: Annotated[AttendanceRequestContext, Depends(attendance_request_context)],
+) -> LocationResolutionResponse:
+    security_client().check(
+        user_id=context.human.user_id,
+        tenant_id=tenant_id,
+        permission_key="attendance.self.read",
+    )
+    return reverse_geocoder().resolve(body.location)
 
 
 @router.post("/tenants/{tenant_id}/me/check-in", response_model=AttendanceActionResponse)
