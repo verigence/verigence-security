@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID
 
+from verigence_security.attendance.location_confirmation_repository import (
+    AttendanceLocationConfirmationRepository,
+)
 from verigence_security.attendance.schemas import (
+    AttendanceLocationConfirmationSummary,
     AttendanceOverviewItem,
     AttendanceOverviewResponse,
 )
@@ -37,6 +41,12 @@ def build_attendance_overview(
         UUID(str(row["user_id"])): service._record(row)  # noqa: SLF001
         for row in attendance_rows
     }
+    confirmations_by_attendance = AttendanceLocationConfirmationRepository(
+        service.repository.s
+    ).for_tenant_day(
+        tenant_id=tenant_id,
+        attendance_date=attendance_date,
+    )
 
     items: list[AttendanceOverviewItem] = []
     checked_in = 0
@@ -45,6 +55,8 @@ def build_attendance_overview(
 
     for member in roster:
         attendance = records_by_user.get(member.userId)
+        check_in_confirmation: AttendanceLocationConfirmationSummary | None = None
+        check_out_confirmation: AttendanceLocationConfirmationSummary | None = None
         if attendance is None:
             status = "NOT_CHECKED_IN"
         else:
@@ -56,6 +68,16 @@ def build_attendance_overview(
             if "EXCEPTION" in attendance.status:
                 exceptions += 1
 
+            confirmations = confirmations_by_attendance.get(attendance.attendanceId, {})
+            if "CHECK_IN" in confirmations:
+                check_in_confirmation = AttendanceLocationConfirmationSummary.model_validate(
+                    confirmations["CHECK_IN"]
+                )
+            if "CHECK_OUT" in confirmations:
+                check_out_confirmation = AttendanceLocationConfirmationSummary.model_validate(
+                    confirmations["CHECK_OUT"]
+                )
+
         items.append(
             AttendanceOverviewItem(
                 userId=member.userId,
@@ -64,6 +86,8 @@ def build_attendance_overview(
                 roleKey=attendance.roleKey if attendance is not None else member.operatingRole,
                 status=status,
                 attendance=attendance,
+                checkInLocationConfirmation=check_in_confirmation,
+                checkOutLocationConfirmation=check_out_confirmation,
             )
         )
 
