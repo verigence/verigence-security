@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
+from verigence_security.attendance.location_confirmation_repository import (
+    AttendanceLocationConfirmationRepository,
+)
 from verigence_security.attendance.schemas import (
     AttendanceActionRequest,
     AttendanceActionResponse,
@@ -68,6 +71,45 @@ class RuntimeAttendanceService(AttendanceService):
             )
         return context
 
+    def _record_location_confirmation(
+        self,
+        *,
+        attendance_id: UUID,
+        tenant_id: UUID,
+        user_id: UUID,
+        action: str,
+        request: AttendanceActionRequest,
+    ) -> None:
+        # Backward-compatible during rollout: older Web/native bundles may not yet
+        # send the declaration fields. New bundles always send both address and choice.
+        if request.displayAddress is None or request.locationConfirmed is None:
+            return
+        remarks = (request.locationRemarks or "").strip() or None
+        AttendanceLocationConfirmationRepository(self.repository.s).record(
+            attendance_id=attendance_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action=action,
+            latitude=request.location.latitude,
+            longitude=request.location.longitude,
+            accuracy_m=request.location.accuracyMeters,
+            captured_at=request.location.capturedAt,
+            display_address=request.displayAddress.strip(),
+            confirmed=request.locationConfirmed,
+            remarks=remarks,
+        )
+
+    @staticmethod
+    def _location_confirmation_metadata(request: AttendanceActionRequest) -> dict[str, object]:
+        metadata: dict[str, object] = {"capturedAt": request.location.capturedAt.isoformat()}
+        if request.displayAddress is not None:
+            metadata["displayAddress"] = request.displayAddress.strip()
+        if request.locationConfirmed is not None:
+            metadata["employeeConfirmedLocation"] = request.locationConfirmed
+        if request.locationRemarks:
+            metadata["employeeLocationRemarks"] = request.locationRemarks.strip()
+        return metadata
+
     def check_in(
         self,
         *,
@@ -122,6 +164,13 @@ class RuntimeAttendanceService(AttendanceService):
             }
         )
         attendance_id = UUID(str(row["attendance_id"]))
+        self._record_location_confirmation(
+            attendance_id=attendance_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action="CHECK_IN",
+            request=request,
+        )
         self.repository.append_event(
             attendance_id=attendance_id,
             tenant_id=tenant_id,
@@ -135,7 +184,7 @@ class RuntimeAttendanceService(AttendanceService):
             distance_m=decision.distance_m,
             result_code=decision.result_code,
             reason=reason if decision.exception else None,
-            metadata={"capturedAt": request.location.capturedAt.isoformat()},
+            metadata=self._location_confirmation_metadata(request),
         )
         return AttendanceActionResponse(
             attendance=self._record(row),
@@ -204,6 +253,13 @@ class RuntimeAttendanceService(AttendanceService):
                 "ALREADY_CHECKED_OUT",
                 "Attendance has already been completed today.",
             )
+        self._record_location_confirmation(
+            attendance_id=attendance_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action="CHECK_OUT",
+            request=request,
+        )
         self.repository.append_event(
             attendance_id=attendance_id,
             tenant_id=tenant_id,
@@ -217,7 +273,7 @@ class RuntimeAttendanceService(AttendanceService):
             distance_m=decision.distance_m,
             result_code=decision.result_code,
             reason=reason if decision.exception else None,
-            metadata={"capturedAt": request.location.capturedAt.isoformat()},
+            metadata=self._location_confirmation_metadata(request),
         )
         return AttendanceActionResponse(
             attendance=self._record(updated),
