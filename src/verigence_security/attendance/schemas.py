@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class HumanContext(BaseModel):
@@ -19,9 +19,28 @@ class LocationEvidence(BaseModel):
     capturedAt: datetime
 
 
+class LocationResolutionRequest(BaseModel):
+    location: LocationEvidence
+
+
+class LocationResolutionResponse(BaseModel):
+    displayAddress: str
+    provider: str
+    attribution: str
+
+
 class AttendanceActionRequest(BaseModel):
     location: LocationEvidence
     exceptionReason: str | None = Field(default=None, max_length=500)
+    displayAddress: str | None = Field(default=None, max_length=1000)
+    locationConfirmed: bool | None = None
+    locationRemarks: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def require_remarks_when_location_not_confirmed(self) -> AttendanceActionRequest:
+        if self.locationConfirmed is False and len((self.locationRemarks or "").strip()) < 3:
+            raise ValueError("Location remarks are required when the employee does not confirm the displayed location.")
+        return self
 
 
 class OutletContext(BaseModel):

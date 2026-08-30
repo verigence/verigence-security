@@ -41,6 +41,10 @@ class AttendanceSettings(BaseSettings):
     default_max_location_accuracy_m: float = Field(default=150.0, gt=0, le=5000)
     default_max_location_age_seconds: int = Field(default=120, ge=10, le=900)
 
+    reverse_geocode_base_url: str = "https://nominatim.openstreetmap.org"
+    reverse_geocode_timeout_seconds: float = Field(default=2.5, gt=0.5, le=5.0)
+    reverse_geocode_user_agent: str = "VerigenceAttendance/0.1 (DEV reverse geocoding)"
+
     db_pool_size: int = Field(default=5, ge=1, le=20)
     db_max_overflow: int = Field(default=5, ge=0, le=20)
     db_pool_timeout_seconds: int = Field(default=2, ge=1, le=10)
