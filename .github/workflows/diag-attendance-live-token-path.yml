@@ -1,0 +1,118 @@
+name: Diagnose Attendance live token path read-only
+
+on:
+  push:
+    branches:
+      - diag/attendance-live-token-path-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  live-read-path:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      ATTENDANCE_URL: https://attendance-dev.up.railway.app
+      SECURITY_URL: https://security-dev.up.railway.app
+      AUDIT_URL: https://verigence-audit-core-production.up.railway.app
+    steps:
+      - name: Check out exact diagnostic revision
+        uses: actions/checkout@v6
+
+      - name: Install read-only diagnostic tooling
+        run: |
+          npm install --global @railway/cli
+          python -m pip install --quiet PyJWT cryptography
+
+      - name: Verify exact DEV targets and generate synthetic human token
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service security --json >/dev/null
+          railway variable list --service security --environment dev --json >/tmp/security-vars.json
+          railway variable list --service attendance --environment dev --json >/tmp/attendance-vars.json
+
+          timeout_value="$(jq -r '.ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS // empty' /tmp/attendance-vars.json)"
+          test "$timeout_value" = "5.0" || test "$timeout_value" = "5"
+          echo "ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS=$timeout_value"
+
+          python - <<'PY'
+          import json
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from uuid import uuid4
+
+          import jwt
+
+          values = json.loads(Path('/tmp/security-vars.json').read_text())
+          private_key = str(values.get('SECURITY_PRIVATE_KEY_PEM') or '').replace('\\n', '\n').strip()
+          issuer = str(values.get('SECURITY_TOKEN_ISSUER') or 'verigence-security').strip()
+          audience = str(values.get('SECURITY_TOKEN_AUDIENCE') or 'verigence-platform').strip()
+          kid = str(values.get('SECURITY_KEY_ID') or '').strip()
+          if not private_key or not kid:
+              raise SystemExit('Security signing material unavailable for synthetic read-only probe')
+
+          now = datetime.now(timezone.utc)
+          payload = {
+              'iss': issuer,
+              'sub': str(uuid4()),
+              'aud': audience,
+              'iat': now,
+              'exp': now + timedelta(minutes=2),
+              'jti': str(uuid4()),
+              'actor_type': 'USER',
+              'session_id': str(uuid4()),
+              'device_id': str(uuid4()),
+          }
+          token = jwt.encode(payload, private_key, algorithm='RS256', headers={'kid': kid})
+          Path('/tmp/synthetic-human-token').write_text(token, encoding='utf-8')
+          Path('/tmp/random-tenant').write_text(str(uuid4()), encoding='utf-8')
+          PY
+
+      - name: Exercise real Attendance page read paths without employee data
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(cat /tmp/synthetic-human-token)"
+          tenant="$(cat /tmp/random-tenant)"
+          echo "::add-mask::$token"
+
+          probe() {
+            label="$1"
+            path="$2"
+            output="/tmp/${label}.json"
+            metrics="$(curl --silent --show-error --max-time 15 \
+              --output "$output" \
+              --write-out '%{http_code} %{time_total}' \
+              --header "Authorization: Bearer $token" \
+              "$ATTENDANCE_URL$path")"
+            code="${metrics%% *}"
+            seconds="${metrics#* }"
+            echo "${label}_HTTP=$code duration_seconds=$seconds"
+            jq -c '{code,detail}' "$output" || true
+            test "$code" = "403"
+            jq -e '.code == "ATTENDANCE_PERMISSION_DENIED"' "$output" >/dev/null
+          }
+
+          probe today "/attendance/v1/tenants/$tenant/me/today"
+          probe policy "/attendance/v1/tenants/$tenant/policy"
+          probe history "/attendance/v1/tenants/$tenant/me/history?limit=31"
+          probe overview "/attendance/v1/tenants/$tenant/overview?attendanceDate=2026-08-30"
+
+          echo 'LIVE_ATTENDANCE_READ_PATH=PASS'
+          echo 'REAL_EMPLOYEE_DATA_TOUCHED=false'
+          echo 'ATTENDANCE_WRITE_ENDPOINT_CALLED=false'
+
+      - name: Verify surrounding services remain healthy
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 10 "$ATTENDANCE_URL/ready" >/dev/null
+          curl --fail --silent --show-error --max-time 10 "$SECURITY_URL/health/ready" >/dev/null
+          curl --fail --silent --show-error --max-time 10 "$AUDIT_URL/health" >/dev/null
+          echo 'ATTENDANCE_READY=PASS'
+          echo 'SECURITY_READY=PASS'
+          echo 'AUDIT_CORE_HEALTH=PASS'
