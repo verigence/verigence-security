@@ -17,8 +17,11 @@ jobs:
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
     steps:
       - uses: actions/checkout@v4
-      - run: npm install --global @railway/cli
-      - name: Read-only recent auth log correlation
+      - name: Install diagnostic tooling
+        run: |
+          npm install --global @railway/cli
+          python -m pip install --quiet -e .
+      - name: Read-only recent auth log correlation and exact client latency
         shell: bash
         run: |
           set -euo pipefail
@@ -27,12 +30,58 @@ jobs:
           railway variable list --service attendance --environment dev --json >/tmp/attendance-vars.json
           python - <<'PY'
           import json
+          import time
           from pathlib import Path
+          from uuid import uuid4
+
+          from verigence_security.attendance.config import AttendanceSettings
+          from verigence_security.attendance.security import (
+              AttendanceAuthorizationError,
+              AttendanceDependencyError,
+              SecurityAuthorizationClient,
+          )
+
           values = json.loads(Path('/tmp/attendance-vars.json').read_text())
-          timeout = str(values.get('ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS') or '').strip()
-          print('ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS=' + (timeout or 'UNSET_DEFAULT_1.5'))
-          print('ATTENDANCE_SECURITY_BASE_CONFIGURED=' + str(bool(str(values.get('ATTENDANCE_SECURITY_BASE_URL') or '').strip())).lower())
-          print('ATTENDANCE_SECURITY_CLIENT_ID=' + str(values.get('ATTENDANCE_SECURITY_CLIENT_ID') or 'MISSING'))
+          timeout_text = str(values.get('ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS') or '').strip()
+          timeout = float(timeout_text) if timeout_text else 1.5
+          base_url = str(values.get('ATTENDANCE_SECURITY_BASE_URL') or '').strip()
+          client_id = str(values.get('ATTENDANCE_SECURITY_CLIENT_ID') or '').strip()
+          client_secret = str(values.get('ATTENDANCE_SECURITY_CLIENT_SECRET') or '')
+
+          print('ATTENDANCE_DOWNSTREAM_TIMEOUT_SECONDS=' + (timeout_text or 'UNSET_DEFAULT_1.5'))
+          print('ATTENDANCE_SECURITY_BASE_CONFIGURED=' + str(bool(base_url)).lower())
+          print('ATTENDANCE_SECURITY_CLIENT_ID=' + (client_id or 'MISSING'))
+
+          settings = AttendanceSettings(
+              security_base_url=base_url,
+              security_client_id=client_id,
+              security_client_secret=client_secret,
+              downstream_timeout_seconds=timeout,
+          )
+          client = SecurityAuthorizationClient(settings)
+          durations = []
+          dependency_errors = 0
+          for attempt in range(1, 6):
+              started = time.perf_counter()
+              outcome = 'UNKNOWN'
+              try:
+                  client.check(
+                      user_id=uuid4(),
+                      tenant_id=uuid4(),
+                      permission_key='attendance.self.read',
+                  )
+                  outcome = 'ALLOW_RESPONSE'
+              except AttendanceAuthorizationError:
+                  # A DENY is still a successful, correctly parsed Security decision.
+                  outcome = 'DENY_RESPONSE'
+              except AttendanceDependencyError as exc:
+                  dependency_errors += 1
+                  outcome = f'DEPENDENCY_ERROR:{exc}'
+              duration_ms = (time.perf_counter() - started) * 1000.0
+              durations.append(duration_ms)
+              print(f'ATTENDANCE_SECURITY_PROBE_{attempt}={outcome} duration_ms={duration_ms:.1f}')
+          print(f'ATTENDANCE_SECURITY_PROBE_MAX_MS={max(durations):.1f}')
+          print(f'ATTENDANCE_SECURITY_PROBE_DEPENDENCY_ERRORS={dependency_errors}')
           PY
 
           for svc in security attendance verigence-audit-core; do
