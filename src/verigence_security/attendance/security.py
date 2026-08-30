@@ -231,7 +231,7 @@ class SecurityAuthorizationClient:
             token = self._token()
             try:
                 response = self._call_with_retry(
-                    lambda: self._client.post(
+                    lambda token=token: self._client.post(
                         "/security/v1/authorization/check",
                         headers={"Authorization": f"Bearer {token}"},
                         json={
@@ -304,7 +304,7 @@ class SecurityAuthorizationClient:
             token = self._token()
             try:
                 response = self._call_with_retry(
-                    lambda: self._client.get(
+                    lambda token=token: self._client.get(
                         f"/security/v1/internal/attendance/tenants/{tenant_id}/roster",
                         headers={"Authorization": f"Bearer {token}"},
                     )
