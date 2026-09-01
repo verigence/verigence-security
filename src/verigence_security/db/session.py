@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from functools import lru_cache
+from uuid import uuid4
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -33,10 +34,31 @@ def _runtime_database_url(database_url: str) -> str:
 
 @lru_cache(maxsize=8)
 def _engine_for_url(database_url: str) -> Engine:
+    """Create a sync psycopg v3 engine with full Neon-safe pool configuration.
+
+    Security is a FastAPI async app but all DB route handlers are plain def
+    (FastAPI threadpool). The sync engine is correct here; the pool settings
+    match §1.2 of the engineering standards to prevent Neon idle-connection
+    drops and asyncpg DuplicatePreparedStatementError under PgBouncer.
+    """
     return create_engine(
         database_url,
-        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=2,
+        pool_timeout=10,
+        pool_recycle=300,        # Neon drops idle connections after ~5 min
+        pool_pre_ping=True,      # survives Neon autosuspend / cold start
         future=True,
+        connect_args={
+            "prepare_threshold": None,   # psycopg v3: disable server-side prepared stmts
+            "options": (
+                "-c statement_timeout=8000 "
+                "-c idle_in_transaction_session_timeout=10000 "
+                "-c jit=off "
+                "-c application_name=verigence-security "
+                "-c search_path=security,public"
+            ),
+        },
     )
 
 
