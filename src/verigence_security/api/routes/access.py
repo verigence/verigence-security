@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
 from uuid import UUID, uuid4
@@ -37,6 +38,8 @@ from verigence_security.services.geo import GeoSample
 from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.token_service import HumanTokenClaims, TokenService
 from verigence_security.services.v2_human_actor import HumanActorAuthenticationService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/security/v1", tags=["Runtime Access"])
 oauth_router = APIRouter(tags=["OAuth"])
@@ -346,7 +349,17 @@ def _oauth_success(result: dict[str, object]) -> JSONResponse:
     )
 
 
-def _oauth_security_error(exc: SecurityError) -> JSONResponse:
+def _oauth_security_error(exc: SecurityError, *, correlation_id: str | None = None) -> JSONResponse:
+    logger.warning(
+        "security_machine_token_denied %s",
+        exc.code,
+        extra={
+            "event_name": "security_machine_token_denied",
+            "error_code": exc.code,
+            "outcome": "DENIED",
+            "correlation_id": correlation_id,
+        },
+    )
     if exc.code in {
         "MACHINE_CREDENTIAL_INVALID",
         "MACHINE_CREDENTIAL_EXPIRED",
@@ -416,7 +429,7 @@ async def oauth_token(
         else:
             return _oauth_error("unsupported_grant_type", "unsupported grant_type")
     except SecurityError as exc:
-        return _oauth_security_error(exc)
+        return _oauth_security_error(exc, correlation_id=getattr(request.state, "correlation_id", None))
     except ValueError:
         return _oauth_error("invalid_scope", "requested permission is not authorized")
 
