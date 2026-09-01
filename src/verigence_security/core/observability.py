@@ -164,6 +164,10 @@ def configure_observability(app: FastAPI, settings: Settings) -> bool:
     local bootstrap warning instead of failing application startup.
     """
 
+    # Always attach StructuredJsonFormatter regardless of OTel status so that
+    # structured JSON logs with correlation_id are available in all environments.
+    _configure_application_logging(settings, logger_provider=None)
+
     if not settings.observability_enabled:
         return False
     if not _otlp_endpoints_configured():
@@ -216,6 +220,7 @@ def configure_observability(app: FastAPI, settings: Settings) -> bool:
         trace.set_tracer_provider(tracer_provider)
         metrics.set_meter_provider(meter_provider)
         set_logger_provider(logger_provider)
+        # When OTel is active, re-call to attach the OTel LoggingHandler.
         _configure_application_logging(settings, logger_provider=logger_provider)
 
         FastAPIInstrumentor.instrument_app(
