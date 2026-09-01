@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     app_env: AppEnvironment = AppEnvironment.DEV
     app_name: str = "verigence-security"
     log_level: str = "INFO"
+    success_events_enabled: bool = True
 
     # Phase-1 observability is opt-in at runtime. Standard OTEL_EXPORTER_OTLP_* environment
     # variables configure signal-specific endpoints/headers; tokens never belong in source code.
