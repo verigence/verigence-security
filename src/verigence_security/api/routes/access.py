@@ -197,6 +197,13 @@ def credential_login(
             device_id=str(device_id),
         )
     )
+    logger.info(
+        "security_user_login_success",
+        extra={
+            "event_name": "security_user_login_success",
+            "outcome": "SUCCESS",
+        },
+    )
     return {
         "accessToken": token,
         "expiresAtUtc": expires_at,
@@ -433,4 +440,11 @@ async def oauth_token(
     except ValueError:
         return _oauth_error("invalid_scope", "requested permission is not authorized")
 
+    logger.info(
+        "security_machine_token_issued",
+        extra={
+            "event_name": "security_machine_token_issued",
+            "outcome": "SUCCESS",
+        },
+    )
     return _oauth_success(result)
