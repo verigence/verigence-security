@@ -4,11 +4,18 @@ import hashlib
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Response
 
-from verigence_security.api.dependencies import repository, token_service
-from verigence_security.api.schemas import HumanLoginResponse, HumanLogoutRequest, HumanResumeRequest
+from verigence_security.api.dependencies import bearer_token, repository, token_service
+from verigence_security.api.schemas import (
+    HumanLogoutRequest,
+    HumanRememberRequest,
+    HumanRememberResponse,
+    HumanResumeRequest,
+    HumanResumeResponse,
+)
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
 from verigence_security.core.observability import attach_trusted_user_id
@@ -63,7 +70,7 @@ def clear_web_remember_cookie(response: Response) -> None:
     )
 
 
-def issue_login_remember_credential(
+def _issue_remember_credential(
     *,
     repo: SecurityRepository,
     user_id: str,
@@ -85,15 +92,6 @@ def issue_login_remember_credential(
     return credential, expires_at
 
 
-def revoke_existing_remember_sessions(
-    *,
-    repo: SecurityRepository,
-    user_id: str,
-    now: datetime,
-) -> None:
-    HumanRememberRepository(repo.s).revoke_active_for_user(user_id=user_id, now=now)
-
-
 def _supplied_credential(
     body: HumanResumeRequest | HumanLogoutRequest,
     cookie: str | None,
@@ -104,7 +102,91 @@ def _supplied_credential(
     return cookie
 
 
-@router.post("/resume", response_model=HumanLoginResponse)
+def _valid_claim_uuid(claims: dict[str, object], name: str) -> UUID:
+    value = claims.get(name)
+    if not isinstance(value, str):
+        raise security_error("AUTH_TOKEN_INVALID")
+    try:
+        return UUID(value)
+    except ValueError:
+        raise security_error("AUTH_TOKEN_INVALID") from None
+
+
+def _assert_session_resumable(
+    *,
+    repo: SecurityRepository,
+    user_id: str,
+    session_id: UUID,
+    device_id: UUID,
+) -> None:
+    status = HumanObservationRepository(repo.s).session_status(
+        user_id=user_id,
+        session_id=session_id,
+        device_id=device_id,
+    )
+    # Observation registration is intentionally asynchronous and fail-open. A missing row therefore
+    # does not create a new availability dependency, but any explicit terminal state blocks resume.
+    if status == "SUPERSEDED":
+        raise security_error("SESSION_SUPERSEDED")
+    if status in {"ENDED", "REVOKED"}:
+        raise security_error("SESSION_REVOKED")
+
+
+@router.post("/remember", response_model=HumanRememberResponse)
+def remember_human_session(
+    body: HumanRememberRequest,
+    response: Response,
+    authorization_token: str = Depends(bearer_token),
+    settings: Settings = Depends(get_settings),
+    repo: SecurityRepository = Depends(repository),
+    tokens: TokenService = Depends(token_service),
+) -> dict[str, object]:
+    """Enable persistent sign-in without changing the normal short-lived access-token contract.
+
+    This endpoint is deliberately separate from credential login so remember-session persistence can
+    fail without making successful password authentication unavailable or slower.
+    """
+
+    claims = tokens.verify_human_token(authorization_token)
+    user_id = str(claims["sub"])
+    session_id = _valid_claim_uuid(claims, "session_id")
+    token_device_id = _valid_claim_uuid(claims, "device_id")
+    if body.device.deviceId != token_device_id:
+        raise security_error("AUTH_TOKEN_INVALID")
+
+    actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(user_id)
+    attach_trusted_user_id(actor.user_id)
+    _assert_session_resumable(
+        repo=repo,
+        user_id=user_id,
+        session_id=session_id,
+        device_id=token_device_id,
+    )
+
+    now = datetime.now(UTC)
+    credential, expires_at = _issue_remember_credential(
+        repo=repo,
+        user_id=user_id,
+        session_id=str(session_id),
+        device_id=str(token_device_id),
+        settings=settings,
+        now=now,
+    )
+
+    if body.device.deviceType == "WEB":
+        set_web_remember_cookie(response, credential, expires_at, now)
+        mobile_credential: str | None = None
+    else:
+        mobile_credential = credential
+
+    return {
+        "remembered": True,
+        "rememberToken": mobile_credential,
+        "rememberExpiresAtUtc": expires_at,
+    }
+
+
+@router.post("/resume", response_model=HumanResumeResponse)
 def resume_human_session(
     body: HumanResumeRequest,
     response: Response,
@@ -113,6 +195,8 @@ def resume_human_session(
     repo: SecurityRepository = Depends(repository),
     tokens: TokenService = Depends(token_service),
 ) -> dict[str, object]:
+    """Exchange a rotating remembered-session credential for a normal short-lived access token."""
+
     credential = _supplied_credential(body, remember_cookie)
     if not credential:
         raise security_error("AUTH_TOKEN_INVALID")
@@ -123,37 +207,41 @@ def resume_human_session(
     if record is None:
         raise security_error("AUTH_TOKEN_INVALID")
 
-    session_id = str(record["access_session_id"])
+    session_id = UUID(str(record["access_session_id"]))
     user_id = str(record["user_id"])
-    device_id = str(record["device_id"])
+    device_id = UUID(str(record["device_id"]))
     now = datetime.now(UTC)
 
-    # A replay of the immediately previous rotated credential is strong evidence of theft/copying.
-    # Revoke the active family rather than allowing either holder to continue.
+    # A replay of the immediately previous rotated credential is strong evidence of copying. Revoke
+    # the active family rather than allowing either holder to continue using the remembered session.
     if record.get("previous_token_hash") == credential_hash:
-        remember.revoke_session(session_id=session_id, now=now)
-        logger.warning("security_remember_token_replay", extra={"event_name": "security_remember_token_replay"})
+        remember.revoke_session(session_id=str(session_id), now=now)
+        logger.warning(
+            "security_remember_token_replay",
+            extra={"event_name": "security_remember_token_replay", "outcome": "DENIED"},
+        )
         raise security_error("AUTH_TOKEN_INVALID")
 
     if record.get("token_hash") != credential_hash or record.get("status") != "ACTIVE":
         raise security_error("AUTH_TOKEN_INVALID")
     if record["expires_at_utc"] <= now:
-        remember.revoke_session(session_id=session_id, now=now)
+        remember.revoke_session(session_id=str(session_id), now=now)
         raise security_error("AUTH_TOKEN_EXPIRED")
-    if str(body.device.deviceId) != device_id:
+    if body.device.deviceId != device_id:
         raise security_error("AUTH_TOKEN_INVALID")
 
     actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(user_id)
     attach_trusted_user_id(actor.user_id)
-
-    observed_status = HumanObservationRepository(repo.s).session_status(
-        user_id=user_id,
-        session_id=body.device.deviceId.__class__(session_id),
-        device_id=body.device.deviceId,
-    )
-    if observed_status in {"SUPERSEDED", "ENDED", "REVOKED"}:
-        remember.revoke_session(session_id=session_id, now=now)
-        raise security_error("SESSION_REVOKED")
+    try:
+        _assert_session_resumable(
+            repo=repo,
+            user_id=user_id,
+            session_id=session_id,
+            device_id=device_id,
+        )
+    except Exception:
+        remember.revoke_session(session_id=str(session_id), now=now)
+        raise
 
     ttl = settings.platform_admin_token_ttl_minutes
     if ttl is None:
@@ -163,14 +251,14 @@ def resume_human_session(
         HumanTokenClaims(
             user_id=user_id,
             expires_at=access_expires_at,
-            session_id=session_id,
-            device_id=device_id,
+            session_id=str(session_id),
+            device_id=str(device_id),
         )
     )
 
     rotated = _new_credential()
     remember.rotate(
-        session_id=session_id,
+        session_id=str(session_id),
         new_token_hash=_hash_credential(rotated),
         now=now,
     )
@@ -201,6 +289,8 @@ def logout_human_session(
     remember_cookie: str | None = Cookie(default=None, alias=REMEMBER_COOKIE),
     repo: SecurityRepository = Depends(repository),
 ) -> Response:
+    """Revoke a remembered session if present; explicit logout remains fast and idempotent."""
+
     credential = _supplied_credential(body, remember_cookie)
     if credential:
         HumanRememberRepository(repo.s).revoke_by_hash(
