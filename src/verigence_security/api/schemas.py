@@ -58,6 +58,7 @@ class HumanLoginRequest(BaseModel):
     identifier: str = Field(min_length=1, max_length=320)
     password: SecretStr
     device: HumanDeviceContext | None = None
+    keepSignedIn: bool = False
 
 
 class HumanLoginResponse(BaseModel):
@@ -68,6 +69,21 @@ class HumanLoginResponse(BaseModel):
     isSuperAdmin: bool = False
     sessionId: UUID
     deviceId: UUID
+    # MOBILE only. WEB receives the opaque remember credential in an HttpOnly Secure cookie.
+    rememberToken: str | None = None
+    rememberExpiresAtUtc: datetime | None = None
+
+
+class HumanResumeRequest(BaseModel):
+    device: HumanDeviceContext
+    # MOBILE supplies the Keystore-protected credential in the request body. WEB deliberately
+    # leaves this null and relies on the HttpOnly cookie so browser JavaScript never sees it.
+    rememberToken: str | None = Field(default=None, min_length=32, max_length=256)
+
+
+class HumanLogoutRequest(BaseModel):
+    device: HumanDeviceContext | None = None
+    rememberToken: str | None = Field(default=None, min_length=32, max_length=256)
 
 
 class HumanGeoObservation(BaseModel):
