@@ -27,15 +27,19 @@ class HumanRememberRepository:
         expires_at: datetime,
         now: datetime,
     ) -> None:
+        # Keep the existing one-active-remembered-session behaviour aligned with the already
+        # enforced one-active-human-session policy. The upsert makes a transient client retry safe.
         self.s.execute(
             text(
                 """
                 UPDATE security.human_remember_sessions
                 SET status='REVOKED',revoked_at_utc=:now
-                WHERE user_id=:user_id AND status='ACTIVE'
+                WHERE user_id=:user_id
+                  AND access_session_id<>:session_id
+                  AND status='ACTIVE'
                 """
             ),
-            {"user_id": user_id, "now": now},
+            {"user_id": user_id, "session_id": session_id, "now": now},
         )
         self.s.execute(
             text(
@@ -46,6 +50,16 @@ class HumanRememberRepository:
                 VALUES
                   (:session_id,:user_id,:device_id,:token_hash,NULL,'ACTIVE',
                    :now,:expires_at,:now,NULL)
+                ON CONFLICT (access_session_id) DO UPDATE SET
+                  user_id=EXCLUDED.user_id,
+                  device_id=EXCLUDED.device_id,
+                  token_hash=EXCLUDED.token_hash,
+                  previous_token_hash=NULL,
+                  status='ACTIVE',
+                  created_at_utc=EXCLUDED.created_at_utc,
+                  expires_at_utc=EXCLUDED.expires_at_utc,
+                  last_used_at_utc=EXCLUDED.last_used_at_utc,
+                  revoked_at_utc=NULL
                 """
             ),
             {
@@ -56,19 +70,6 @@ class HumanRememberRepository:
                 "now": now,
                 "expires_at": expires_at,
             },
-        )
-        self.s.commit()
-
-    def revoke_active_for_user(self, *, user_id: str, now: datetime) -> None:
-        self.s.execute(
-            text(
-                """
-                UPDATE security.human_remember_sessions
-                SET status='REVOKED',revoked_at_utc=:now
-                WHERE user_id=:user_id AND status='ACTIVE'
-                """
-            ),
-            {"user_id": user_id, "now": now},
         )
         self.s.commit()
 
