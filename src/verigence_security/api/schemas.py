@@ -70,6 +70,35 @@ class HumanLoginResponse(BaseModel):
     deviceId: UUID
 
 
+class HumanRememberRequest(BaseModel):
+    device: HumanDeviceContext
+
+
+class HumanRememberResponse(BaseModel):
+    remembered: bool = True
+    # MOBILE only. WEB receives the opaque credential in an HttpOnly Secure cookie.
+    rememberToken: str | None = None
+    rememberExpiresAtUtc: datetime
+
+
+class HumanResumeRequest(BaseModel):
+    device: HumanDeviceContext
+    # MOBILE supplies the Keystore-protected credential in the request body. WEB deliberately
+    # leaves this null and relies on the HttpOnly cookie so browser JavaScript never sees it.
+    rememberToken: str | None = Field(default=None, min_length=32, max_length=256)
+
+
+class HumanResumeResponse(HumanLoginResponse):
+    remembered: bool = True
+    rememberToken: str | None = None
+    rememberExpiresAtUtc: datetime
+
+
+class HumanLogoutRequest(BaseModel):
+    device: HumanDeviceContext | None = None
+    rememberToken: str | None = Field(default=None, min_length=32, max_length=256)
+
+
 class HumanGeoObservation(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)

@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     platform_bootstrap_password: str = ""
     platform_admin_token_ttl_minutes: int = Field(default=15, gt=0)
 
+    # "Keep me signed in" uses a separate opaque, rotating resume credential. Normal API access
+    # tokens remain short-lived. Thirty days is an absolute lifetime, not a sliding session.
+    human_remember_session_ttl_days: int = Field(default=30, gt=0, le=90)
+
     # Global-human device registration is observation-only in the first rollout. Exceeding this
     # number is recorded and surfaced to the client but does not block authentication.
     human_device_observation_limit: int = Field(default=2, gt=0, le=20)

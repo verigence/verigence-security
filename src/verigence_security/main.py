@@ -13,6 +13,7 @@ from verigence_security.api.routes import (
     health,
     human_observation,
     human_refresh,
+    human_remember,
     jwks,
     legacy_onboarding_compat,
     password_recovery,
@@ -60,6 +61,7 @@ app.include_router(jwks.router)
 app.include_router(access.oauth_router)
 app.include_router(access.router)
 app.include_router(human_refresh.router)
+app.include_router(human_remember.router)
 app.include_router(human_observation.router)
 app.include_router(password_recovery.router)
 app.include_router(service_tokens.router)
