@@ -12,7 +12,6 @@ from verigence_security.api.routes import (
     dev_mock,
     health,
     human_observation,
-    human_refresh,
     human_remember,
     jwks,
     legacy_onboarding_compat,
@@ -60,7 +59,6 @@ app.include_router(jwks.router)
 # dev still calls /oauth/token; it is not the target machine-token contract.
 app.include_router(access.oauth_router)
 app.include_router(access.router)
-app.include_router(human_refresh.router)
 app.include_router(human_remember.router)
 app.include_router(human_observation.router)
 app.include_router(password_recovery.router)
