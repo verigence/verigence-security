@@ -17,7 +17,7 @@ from verigence_security.api.schemas import (
     HumanResumeResponse,
 )
 from verigence_security.config import Settings, get_settings
-from verigence_security.core.errors import security_error
+from verigence_security.core.errors import SecurityError, security_error
 from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.core.types import ActorType
 from verigence_security.repositories.human_observation_repository import HumanObservationRepository
@@ -197,6 +197,32 @@ def resume_human_session(
 ) -> dict[str, object]:
     """Exchange a rotating remembered-session credential for a normal short-lived access token."""
 
+    try:
+        return _resume_human_session(body, response, remember_cookie, settings, repo, tokens)
+    except SecurityError:
+        raise
+    except Exception as exc:
+        # Temporary diagnostic: a real, reproducible 500 on this route has no
+        # server-log access from the reporting side. SecurityError's own
+        # handler puts `detail` directly in the JSON response body (unlike
+        # the generic 500 handler's fixed "Internal Server Error" text), so
+        # this turns "check Railway logs" into "read the Network tab" for
+        # whoever reproduces it next. Revert once the real cause is found.
+        logger.exception("security_resume_unexpected_error")
+        raise security_error(
+            "RESUME_INTERNAL_ERROR",
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+
+def _resume_human_session(
+    body: HumanResumeRequest,
+    response: Response,
+    remember_cookie: str | None,
+    settings: Settings,
+    repo: SecurityRepository,
+    tokens: TokenService,
+) -> dict[str, object]:
     credential = _supplied_credential(body, remember_cookie)
     if not credential:
         raise security_error("AUTH_TOKEN_INVALID")
