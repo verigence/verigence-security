@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -257,3 +258,36 @@ def test_logout_revokes_remember_credential() -> None:
     )
     assert response.status_code == 204
     assert _FakeRememberRepository.record["status"] == "REVOKED"
+
+
+def test_web_resume_rotates_cookie_with_a_driver_returned_utc_tzinfo() -> None:
+    # Every fixture above builds expires_at_utc as `datetime.now(UTC) + timedelta(...)`, which
+    # already carries the exact `datetime.timezone.utc` singleton and can never exercise the real
+    # failure: a `timestamptz` column read back through the DB driver carries an offset-equal but
+    # not object-equal UTC tzinfo (psycopg's own tz class, or zoneinfo/pytz depending on driver).
+    # `email.utils.format_datetime(..., usegmt=True)` -- which Starlette's cookie `expires` goes
+    # through -- rejects that with "usegmt option requires a UTC datetime". ZoneInfo("UTC") is a
+    # real, commonly-returned stand-in for that driver behavior.
+    token = "e" * 48
+    _FakeRememberRepository.record = {
+        "access_session_id": SESSION_ID,
+        "user_id": USER_ID,
+        "device_id": DEVICE_ID,
+        "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+        "previous_token_hash": None,
+        "status": "ACTIVE",
+        "created_at_utc": datetime.now(ZoneInfo("UTC")),
+        "expires_at_utc": datetime.now(ZoneInfo("UTC")) + timedelta(days=30),
+        "last_used_at_utc": datetime.now(ZoneInfo("UTC")),
+    }
+
+    response = client.post(
+        "/security/v1/auth/resume",
+        headers={"Cookie": f"verigence_remember={token}"},
+        json={"device": _device("WEB")},
+    )
+
+    assert response.status_code == 200
+    cookie = response.headers["set-cookie"].lower()
+    assert "verigence_remember=" in cookie
+    assert "httponly" in cookie

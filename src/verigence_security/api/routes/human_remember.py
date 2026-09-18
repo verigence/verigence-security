@@ -41,12 +41,24 @@ def _new_credential() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _as_canonical_utc(value: datetime) -> datetime:
+    # Starlette's cookie `expires` goes through email.utils.format_datetime(usegmt=True), which
+    # rejects anything whose tzinfo is not the exact `datetime.timezone.utc` object (`!=`, not an
+    # offset check). A datetime built in this process as `datetime.now(UTC) + timedelta(...)`
+    # already carries that exact object and passes. One fetched back from Postgres via the DB
+    # driver carries the driver's own UTC tzinfo class instead, which is offset-equal but not
+    # object-equal, and raises "usegmt option requires a UTC datetime". Every datetime handed to
+    # set_web_remember_cookie must therefore be re-normalized here, not just freshly-constructed ones.
+    return value.astimezone(UTC)
+
+
 def set_web_remember_cookie(
     response: Response,
     credential: str,
     expires_at: datetime,
     now: datetime,
 ) -> None:
+    expires_at = _as_canonical_utc(expires_at)
     max_age = max(1, int((expires_at - now).total_seconds()))
     response.set_cookie(
         key=REMEMBER_COOKIE,
