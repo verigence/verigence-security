@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
+from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_human_dependencies import security_human_actor
-from verigence_security.api.v2_user_directory_schemas import GlobalUserDirectoryResponse
+from verigence_security.api.v2_user_directory_schemas import (
+    GlobalUserDirectoryResponse,
+    PlatformUserCreateRequest,
+)
+from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
 from verigence_security.services.v2_human_actor import HumanActorContext
+from verigence_security.services.v2_platform_user_create import (
+    InvalidUserInput,
+    V2PlatformUserCreateService,
+)
 from verigence_security.services.v2_user_directory import V2UserDirectoryService
 
 router = APIRouter(prefix="/security/v1/platform", tags=["Security v2 USER Administration"])
@@ -66,4 +75,60 @@ def get_global_user(
     row = V2UserDirectoryService(session).get_user(userId)
     if row is None:
         raise HTTPException(status_code=404, detail="USER not found")
+    return _user_response(row)
+
+
+def _clerk_create_failure(exc: ClerkBackendError) -> HTTPException:
+    # provider_detail is shown only for form validation errors, which describe the submitted
+    # values (e.g. a breached password) and never carry other users' data.
+    code = exc.provider_code
+    if code == "form_identifier_exists":
+        return HTTPException(status_code=409, detail="This email address already exists in the identity provider.")
+    if code in {"form_password_pwned", "form_password_validation_failed", "form_password_length_too_short"}:
+        return HTTPException(
+            status_code=422,
+            detail=exc.provider_detail or "Password does not meet the identity provider security requirements.",
+        )
+    if exc.status_code in {400, 409, 422}:
+        suffix = f" ({code})" if code else ""
+        return HTTPException(status_code=422, detail=f"Identity provider rejected the new user{suffix}.")
+    return HTTPException(status_code=503, detail="Identity provider is temporarily unavailable")
+
+
+@router.post("/users", response_model=GlobalUserDirectoryResponse, status_code=201)
+def create_global_user(
+    body: PlatformUserCreateRequest,
+    request: Request,
+    actor: HumanActorContext = Depends(security_human_actor),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> GlobalUserDirectoryResponse:
+    """SuperAdmin creates an ACTIVE user directly; no self-registration or email OTP."""
+    _require_super_admin(actor)
+    try:
+        clerk = ClerkBackendClient(settings)
+    except ClerkBackendError as exc:
+        raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
+    try:
+        created = V2PlatformUserCreateService(session).create(
+            first_name=body.firstName,
+            last_name=body.lastName,
+            email=body.email,
+            mobile=body.mobile,
+            password=body.password.get_secret_value(),
+            actor=actor,
+            correlation_id=request.state.correlation_id,
+            clerk=clerk,
+        )
+    except PermissionError as exc:
+        raise security_error("PERMISSION_DENIED") from exc
+    except InvalidUserInput as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ClerkBackendError as exc:
+        raise _clerk_create_failure(exc) from exc
+    row = V2UserDirectoryService(session).get_user(created.user_id)
+    if row is None:
+        raise HTTPException(status_code=500, detail="Created USER could not be read back")
     return _user_response(row)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class GlobalUserDirectoryResponse(BaseModel):
@@ -20,3 +20,11 @@ class GlobalUserDirectoryResponse(BaseModel):
 class OnboardingKeyAdminRequest(BaseModel):
     onboardingKey: str = Field(min_length=8, max_length=64)
     enabled: bool = True
+
+
+class PlatformUserCreateRequest(BaseModel):
+    firstName: str = Field(min_length=1, max_length=120)
+    lastName: str = Field(default="", max_length=120)
+    email: str = Field(min_length=3, max_length=320)
+    mobile: str = Field(min_length=10, max_length=40)
+    password: SecretStr = Field(min_length=1, max_length=256)
