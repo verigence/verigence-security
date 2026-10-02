@@ -57,7 +57,7 @@ def test_employee_geofence_accepts_within_500m_and_rejects_far_point() -> None:
     assert not within_geofence(far, office, 500)
 
 
-def test_monthly_finance_threshold_is_strictly_over_3000() -> None:
+def test_legacy_single_expense_threshold_helper_remains_compatible() -> None:
     assert not finance_approval_required(Decimal(2500), Decimal(500))
     assert finance_approval_required(Decimal(2500), Decimal(501))
 
@@ -124,3 +124,70 @@ def test_employee_payment_status_has_only_two_states() -> None:
     assert 'Literal["PENDING_PAYMENT", "PROCESSED"] | None' in schemas
     assert "PROCESSING" not in schemas
     assert "FAILED" not in schemas
+
+
+
+def test_v2_finance_threshold_uses_claim_total_only() -> None:
+    service = (
+        ROOT / "src/verigence_security/attendance/employee/service.py"
+    ).read_text(encoding="utf-8")
+    professional = service.split("def submit_reimbursement_claim(", 1)[1].split(
+        "def submit_reimbursement(", 1
+    )[0]
+    assert "needs_finance = claimed_total > threshold" in professional
+    assert "month_claim_total(" not in professional
+
+
+def test_v2_processed_payment_must_match_final_approved_total() -> None:
+    repository = (
+        ROOT / "src/verigence_security/attendance/employee/repository.py"
+    ).read_text(encoding="utf-8")
+    payment = repository.split("def update_reimbursement_payment(", 1)[1].split(
+        "def list_payslips(", 1
+    )[0]
+    assert 'row.get("approved_total")' in payment
+    assert "if paid_amount != approved_total:" in payment
+
+
+def test_v2_pc_geofence_is_fixed_at_500m() -> None:
+    service = (
+        ROOT / "src/verigence_security/attendance/employee/service.py"
+    ).read_text(encoding="utf-8")
+    assert "DEFAULT_GEOFENCE_METERS" in service
+    assert 'normalized_role == "PC" and pc_geofence_required' in service
+
+
+def test_v2_hr_attendance_review_waits_until_checkout() -> None:
+    repository = (
+        ROOT / "src/verigence_security/attendance/employee/repository.py"
+    ).read_text(encoding="utf-8")
+    review = repository.split("def list_hr_attendance_reviews(", 1)[1].split(
+        "def resolve_attendance_review(", 1
+    )[0]
+    assert "a.hr_review_status='PENDING_HR'" in review
+    assert "a.status='COMPLETED'" in review
+
+
+def test_v2_payroll_blocks_unresolved_attendance_and_leave() -> None:
+    payroll = (
+        ROOT / "src/verigence_security/attendance/employee/payroll.py"
+    ).read_text(encoding="utf-8")
+    assert "def _assert_payroll_ready(" in payroll
+    assert "PAYROLL_ATTENDANCE_REVIEW_PENDING" in payroll
+    assert "PAYROLL_LEAVE_REVIEW_PENDING" in payroll
+    generate = payroll.split("def generate_payroll(", 1)[1].split(
+        "def payroll_summary(", 1
+    )[0]
+    assert "_assert_payroll_ready(connection, month=month)" in generate
+
+
+def test_v2_reports_include_hr_review_and_statutory_payroll_breakdown() -> None:
+    reports = (
+        ROOT / "src/verigence_security/attendance/employee/reports.py"
+    ).read_text(encoding="utf-8")
+    assert '"HR Review Status"' in reports
+    assert '"HR Review Comment"' in reports
+    assert '"Employee PF"' in reports
+    assert '"Employee ESI"' in reports
+    assert '"Professional Tax"' in reports
+    assert '"Employer Cost"' in reports
