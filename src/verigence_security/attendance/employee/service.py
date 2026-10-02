@@ -460,17 +460,10 @@ def submit_reimbursement_claim(
     first_date = min(item["expense_date"] for item in prepared)
     claim_month = first_date.replace(day=1)
     employee_id = UUID(str(employee["employee_id"]))
-    month_total = month_claim_total(
-        connection,
-        employee_id=employee_id,
-        expense_date=first_date,
-    )
     threshold = reimbursement_threshold(connection)
-    needs_finance = finance_approval_required(
-        month_total,
-        claimed_total,
-        threshold,
-    )
+    # For the professional claim workflow, the Finance threshold applies to
+    # the total of this claim. Individual lines and prior claims do not alter it.
+    needs_finance = claimed_total > threshold
     return create_reimbursement_claim(
         connection,
         employee_id=employee_id,
