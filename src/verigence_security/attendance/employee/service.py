@@ -257,13 +257,15 @@ def submit_reimbursement_claim(
         meal_type = (str(line.get("meal_type") or "").strip().upper() or None)
         description = (str(line.get("description") or "").strip() or None)
 
-        if category in {"TRAVEL", "LOCAL_CONVEYANCE"}:
-            if not travel_from or not travel_to or not transport_mode:
-                raise AttendanceRuleError(
-                    "REIMBURSEMENT_TRAVEL_DETAILS_REQUIRED",
-                    f"Expense line {line_number} requires From, To and mode of transport.",
-                    status_code=400,
-                )
+        if (
+            category in {"TRAVEL", "LOCAL_CONVEYANCE"}
+            and (not travel_from or not travel_to or not transport_mode)
+        ):
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_TRAVEL_DETAILS_REQUIRED",
+                f"Expense line {line_number} requires From, To and mode of transport.",
+                status_code=400,
+            )
         if category == "FOOD" and not meal_type:
             raise AttendanceRuleError(
                 "REIMBURSEMENT_MEAL_TYPE_REQUIRED",
