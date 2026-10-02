@@ -42,6 +42,12 @@ END
 WHERE payment_status IS NULL
   AND status IN ('APPROVED','PAID');
 
+-- Approval and payment are separate concerns in v2. Historical PAID claims become
+-- finally approved claims with a PROCESSED payment status.
+UPDATE verigence_attendance.reimbursement_claims
+SET status='APPROVED'
+WHERE status='PAID';
+
 CREATE INDEX IF NOT EXISTS ix_va_reimbursement_payment_queue
   ON verigence_attendance.reimbursement_claims(payment_status,updated_at_utc DESC)
   WHERE payment_status='PENDING_PAYMENT';
