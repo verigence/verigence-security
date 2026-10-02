@@ -343,6 +343,37 @@ class PayrollItemResponse(BaseModel):
     employerCost: Decimal
 
 
+class PayrollStatutoryConfigUpsertRequest(BaseModel):
+    effectiveFrom: date
+    pfEmployeeRate: Decimal = Field(ge=0, le=1)
+    pfEmployerRate: Decimal = Field(ge=0, le=1)
+    pfWageCeiling: Decimal = Field(gt=0)
+    epsEmployerRate: Decimal = Field(ge=0, le=1)
+    epsWageCeiling: Decimal = Field(gt=0)
+    esiEmployeeRate: Decimal = Field(ge=0, le=1)
+    esiEmployerRate: Decimal = Field(ge=0, le=1)
+    esiWageCeiling: Decimal = Field(gt=0)
+    gratuityProvisionRate: Decimal = Field(ge=0, le=1)
+    salaryTdsSection: str = Field(min_length=1, max_length=40)
+
+
+class PayrollStatutoryConfigResponse(BaseModel):
+    statutoryConfigId: UUID
+    effectiveFrom: date
+    effectiveTo: date | None = None
+    pfEmployeeRate: Decimal
+    pfEmployerRate: Decimal
+    pfWageCeiling: Decimal
+    epsEmployerRate: Decimal
+    epsWageCeiling: Decimal
+    esiEmployeeRate: Decimal
+    esiEmployerRate: Decimal
+    esiWageCeiling: Decimal
+    gratuityProvisionRate: Decimal
+    salaryTdsSection: str
+    createdAtUtc: datetime
+
+
 class PayrollProfileUpsertRequest(BaseModel):
     effectiveFrom: date
     pfApplicable: bool = False
