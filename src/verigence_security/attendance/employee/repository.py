@@ -788,6 +788,29 @@ def list_reimbursements_by_status(
     ]
 
 
+
+def list_reimbursements_by_payment_status(
+    connection: Connection,
+    payment_status: str,
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT c.*,e.display_name
+                FROM verigence_attendance.reimbursement_claims c
+                JOIN verigence_attendance.employees e ON e.employee_id=c.employee_id
+                WHERE c.payment_status=:payment_status
+                  AND c.status IN ('APPROVED','PAID')
+                ORDER BY c.updated_at_utc,c.created_at_utc
+                """
+            ),
+            {"payment_status": payment_status},
+        ).mappings()
+    ]
+
+
 def decide_reimbursement(
     connection: Connection,
     *,
