@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -574,6 +574,61 @@ def update_attendance_day(
         )
 
 
+def _leave_scheduled_days(
+    connection: Connection,
+    *,
+    employee_id: UUID,
+    start_date: date,
+    end_date: date,
+) -> list[date]:
+    employee = employee_by_id(connection, employee_id)
+    config = connection.execute(
+        text(
+            """
+            SELECT config_value_json
+            FROM verigence_attendance.module_configuration
+            WHERE config_key='payroll.weekly_off_iso_weekdays'
+            """
+        )
+    ).scalar_one_or_none()
+    weekly_offs = {7}
+    if isinstance(config, list):
+        weekly_offs = {
+            int(value)
+            for value in config
+            if isinstance(value, (int, float, str)) and 1 <= int(value) <= 7
+        } or {7}
+
+    holidays = set(
+        connection.execute(
+            text(
+                """
+                SELECT holiday_date
+                FROM verigence_attendance.holidays
+                WHERE status='ACTIVE'
+                  AND holiday_date BETWEEN :start_date AND :end_date
+                  AND (
+                    work_location_id IS NULL
+                    OR work_location_id=:work_location_id
+                  )
+                """
+            ),
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "work_location_id": employee.get("work_location_id"),
+            },
+        ).scalars()
+    )
+    days: list[date] = []
+    current = start_date
+    while current <= end_date:
+        if current.isoweekday() not in weekly_offs and current not in holidays:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
 def create_leave_request(
     connection: Connection,
     *,
@@ -581,13 +636,15 @@ def create_leave_request(
     leave_type_id: UUID,
     start_date: date,
     end_date: date,
-    requested_days: Decimal,
+    day_mode: str,
+    half_day_session: str | None,
     reason: str | None,
 ) -> dict[str, Any]:
     leave_type = connection.execute(
         text(
             """
-            SELECT leave_type_id,leave_name,status
+            SELECT leave_type_id,leave_name,status,allow_half_day,
+                   min_notice_days,max_consecutive_days,requires_reason
             FROM verigence_attendance.leave_types
             WHERE leave_type_id=:leave_type_id
             """
@@ -595,14 +652,95 @@ def create_leave_request(
         {"leave_type_id": leave_type_id},
     ).mappings().first()
     if leave_type is None or leave_type["status"] != "ACTIVE":
-        raise AttendanceRuleError("LEAVE_TYPE_INVALID", "Leave type is not active.", status_code=400)
+        raise AttendanceRuleError(
+            "LEAVE_TYPE_INVALID",
+            "Leave type is not active.",
+            status_code=400,
+        )
+    if end_date < start_date:
+        raise AttendanceRuleError(
+            "LEAVE_DATES_INVALID",
+            "Leave end date cannot be before start date.",
+            status_code=400,
+        )
+
+    normalized_reason = (reason or "").strip() or None
+    if bool(leave_type["requires_reason"]) and not normalized_reason:
+        raise AttendanceRuleError(
+            "LEAVE_REASON_REQUIRED",
+            "A reason is required for this leave type.",
+            status_code=400,
+        )
+
+    current_date = connection.execute(text("SELECT CURRENT_DATE")).scalar_one()
+    min_notice = int(leave_type["min_notice_days"] or 0)
+    if (start_date - current_date).days < min_notice:
+        raise AttendanceRuleError(
+            "LEAVE_NOTICE_INSUFFICIENT",
+            f"This leave type requires at least {min_notice} day(s) notice.",
+            status_code=400,
+        )
+
+    scheduled_days = _leave_scheduled_days(
+        connection,
+        employee_id=employee_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not scheduled_days:
+        raise AttendanceRuleError(
+            "LEAVE_NO_WORKING_DAYS",
+            "The selected dates contain no working days after weekly offs and holidays.",
+            status_code=400,
+        )
+
+    normalized_mode = day_mode.strip().upper()
+    normalized_session = (
+        half_day_session.strip().upper()
+        if half_day_session
+        else None
+    )
+    if normalized_mode == "HALF_DAY":
+        if not bool(leave_type["allow_half_day"]):
+            raise AttendanceRuleError(
+                "LEAVE_HALF_DAY_NOT_ALLOWED",
+                "Half-day leave is not allowed for this leave type.",
+                status_code=400,
+            )
+        if start_date != end_date or len(scheduled_days) != 1:
+            raise AttendanceRuleError(
+                "LEAVE_HALF_DAY_SINGLE_DATE_REQUIRED",
+                "Half-day leave must be for one working date.",
+                status_code=400,
+            )
+        if normalized_session not in {"FIRST_HALF", "SECOND_HALF"}:
+            raise AttendanceRuleError(
+                "LEAVE_HALF_DAY_SESSION_REQUIRED",
+                "Choose first half or second half.",
+                status_code=400,
+            )
+        requested_days = Decimal("0.5")
+    else:
+        normalized_mode = "FULL_DAY"
+        normalized_session = None
+        requested_days = Decimal(len(scheduled_days))
+
+    max_days = leave_type["max_consecutive_days"]
+    if max_days is not None and requested_days > Decimal(str(max_days)):
+        raise AttendanceRuleError(
+            "LEAVE_MAX_DURATION_EXCEEDED",
+            f"This leave type allows a maximum of {max_days} day(s) per request.",
+            status_code=400,
+        )
+
     overlap = connection.execute(
         text(
             """
             SELECT 1 FROM verigence_attendance.leave_requests
             WHERE employee_id=:employee_id
               AND status IN ('PENDING_OPERATIONAL','PENDING_HR','APPROVED')
-              AND daterange(start_date,end_date,'[]') && daterange(:start_date,:end_date,'[]')
+              AND daterange(start_date,end_date,'[]')
+                  && daterange(:start_date,:end_date,'[]')
             LIMIT 1
             """
         ),
@@ -613,17 +751,21 @@ def create_leave_request(
         },
     ).scalar_one_or_none()
     if overlap is not None:
-        raise AttendanceRuleError("LEAVE_OVERLAP", "A leave request already overlaps these dates.")
+        raise AttendanceRuleError(
+            "LEAVE_OVERLAP",
+            "A leave request already overlaps these dates.",
+        )
+
     leave_id = uuid4()
     connection.execute(
         text(
             """
             INSERT INTO verigence_attendance.leave_requests (
                 leave_request_id,employee_id,leave_type_id,start_date,end_date,
-                requested_days,reason
+                requested_days,calculated_days,day_mode,half_day_session,reason
             ) VALUES (
                 :leave_id,:employee_id,:leave_type_id,:start_date,:end_date,
-                :requested_days,:reason
+                :requested_days,:requested_days,:day_mode,:half_day_session,:reason
             )
             """
         ),
@@ -634,11 +776,12 @@ def create_leave_request(
             "start_date": start_date,
             "end_date": end_date,
             "requested_days": requested_days,
-            "reason": reason,
+            "day_mode": normalized_mode,
+            "half_day_session": normalized_session,
+            "reason": normalized_reason,
         },
     )
     return leave_request(connection, leave_id)
-
 
 def leave_request(connection: Connection, leave_id: UUID) -> dict[str, Any]:
     row = connection.execute(
@@ -777,6 +920,26 @@ def decide_team_leave(
             "comment": comment,
         },
     )
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.leave_review_actions (
+                leave_request_id,stage,decision,approved_days,
+                actor_user_id,actor_role,comment
+            ) VALUES (
+                :leave_id,'TL_OR_PMO',:decision,NULL,
+                CAST(:actor AS uuid),:role,:comment
+            )
+            """
+        ),
+        {
+            "leave_id": leave_id,
+            "decision": decision,
+            "actor": actor_user_id,
+            "role": role,
+            "comment": comment,
+        },
+    )
     return leave_request(connection, leave_id)
 
 
@@ -786,23 +949,52 @@ def decide_hr_leave(
     leave_id: UUID,
     actor_user_id: str,
     decision: str,
+    approved_days: Decimal | None,
     comment: str | None,
 ) -> dict[str, Any]:
     row = leave_request(connection, leave_id)
     if row["status"] != "PENDING_HR":
-        raise AttendanceRuleError("LEAVE_STATE_INVALID", "Leave request is not awaiting HR validation.")
-    next_status = "APPROVED" if decision == "APPROVE" else "REJECTED"
+        raise AttendanceRuleError(
+            "LEAVE_STATE_INVALID",
+            "Leave request is not awaiting HR validation.",
+        )
+
+    requested = Decimal(str(row["requested_days"]))
+    normalized_comment = (comment or "").strip() or None
     if decision == "APPROVE":
-        if row["start_date"].year != row["end_date"].year:
+        credited_days = requested
+        outcome = "APPROVED"
+    elif decision == "ADJUST":
+        if approved_days is None or approved_days <= 0 or approved_days >= requested:
             raise AttendanceRuleError(
-                "LEAVE_YEAR_SPAN_UNSUPPORTED",
-                "A leave request must stay within one calendar year.",
+                "LEAVE_ADJUSTMENT_INVALID",
+                "Adjusted approved days must be greater than zero and lower than requested days.",
                 status_code=400,
             )
+        if not normalized_comment:
+            raise AttendanceRuleError(
+                "LEAVE_ADJUSTMENT_REASON_REQUIRED",
+                "HR must provide a reason when adjusting leave days.",
+                status_code=400,
+            )
+        credited_days = approved_days
+        outcome = "ADJUSTED"
+    else:
+        if not normalized_comment:
+            raise AttendanceRuleError(
+                "LEAVE_REJECTION_REASON_REQUIRED",
+                "HR must provide a reason when rejecting leave.",
+                status_code=400,
+            )
+        credited_days = Decimal(0)
+        outcome = "REJECTED"
+
+    next_status = "REJECTED" if credited_days <= 0 else "APPROVED"
+    if credited_days > 0:
         balance = connection.execute(
             text(
                 """
-                SELECT lt.is_paid,
+                SELECT lt.is_paid,lt.allow_negative_balance,
                        COALESCE(lb.opening_days,0)
                        + COALESCE(lb.entitled_days,lt.default_entitlement_days)
                        + COALESCE(lb.adjustment_days,0)
@@ -821,13 +1013,17 @@ def decide_hr_leave(
                 "leave_type_id": row["leave_type_id"],
             },
         ).mappings().one()
+        if (
+            bool(balance["is_paid"])
+            and not bool(balance["allow_negative_balance"])
+            and Decimal(str(balance["available_days"])) < credited_days
+        ):
+            raise AttendanceRuleError(
+                "LEAVE_BALANCE_INSUFFICIENT",
+                "Insufficient leave balance for the approved leave days.",
+                status_code=409,
+            )
         if bool(balance["is_paid"]):
-            if Decimal(str(balance["available_days"])) < Decimal(str(row["requested_days"])):
-                raise AttendanceRuleError(
-                    "LEAVE_BALANCE_INSUFFICIENT",
-                    "Insufficient leave balance for this request.",
-                    status_code=409,
-                )
             connection.execute(
                 text(
                     """
@@ -849,36 +1045,68 @@ def decide_hr_leave(
                     "employee_id": row["employee_id"],
                     "leave_type_id": row["leave_type_id"],
                     "leave_year": row["start_date"].year,
-                    "used_days": row["requested_days"],
+                    "used_days": credited_days,
                 },
             )
+
     connection.execute(
         text(
             """
             UPDATE verigence_attendance.leave_requests
-            SET status=:status,updated_at_utc=now()
+            SET status=:status,
+                hr_approved_days=:approved_days,
+                approval_outcome=:outcome,
+                updated_at_utc=now()
             WHERE leave_request_id=:leave_id
             """
         ),
-        {"status": next_status, "leave_id": leave_id},
+        {
+            "status": next_status,
+            "approved_days": credited_days,
+            "outcome": outcome,
+            "leave_id": leave_id,
+        },
     )
+    aggregate_decision = "REJECT" if credited_days <= 0 else "APPROVE"
     connection.execute(
         text(
             """
             INSERT INTO verigence_attendance.approval_actions (
                 entity_type,entity_id,stage,decision,actor_user_id,actor_role,comment
-            ) VALUES ('LEAVE',:leave_id,'HR',:decision,CAST(:actor AS uuid),'HRADMIN',:comment)
+            ) VALUES (
+                'LEAVE',:leave_id,'HR',:decision,
+                CAST(:actor AS uuid),'HRADMIN',:comment
+            )
+            """
+        ),
+        {
+            "leave_id": leave_id,
+            "decision": aggregate_decision,
+            "actor": actor_user_id,
+            "comment": normalized_comment,
+        },
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.leave_review_actions (
+                leave_request_id,stage,decision,approved_days,
+                actor_user_id,actor_role,comment
+            ) VALUES (
+                :leave_id,'HR',:decision,:approved_days,
+                CAST(:actor AS uuid),'HRADMIN',:comment
+            )
             """
         ),
         {
             "leave_id": leave_id,
             "decision": decision,
+            "approved_days": credited_days,
             "actor": actor_user_id,
-            "comment": comment,
+            "comment": normalized_comment,
         },
     )
     return leave_request(connection, leave_id)
-
 
 def reimbursement_threshold(connection: Connection) -> Decimal:
     value = connection.execute(
