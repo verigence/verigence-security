@@ -94,7 +94,7 @@ def test_reimbursement_payment_lifecycle_is_auditable() -> None:
     assert "payment_status" in migration
     assert "paid_at_utc" in migration
     assert "payment_reference" in migration
-    assert "reimbursement_payment_events" in migration
+    assert "reimbursement_payment_transactions" in migration
     assert "def update_reimbursement_payment(" in repository
     assert '"/admin/reimbursements/payments"' in api
     assert '"/admin/reimbursements/{claim_id}/payment"' in api
@@ -109,3 +109,18 @@ def test_finance_payment_permission_is_attendance_only() -> None:
     assert "'attendance','FINANCEADMIN'" in compact
     assert "audit." not in migration
     assert "di." not in migration
+
+
+
+def test_employee_payment_status_has_only_two_states() -> None:
+    migration = (
+        ROOT / "attendance_migrations/0004_reimbursement_payment_lifecycle.sql"
+    ).read_text(encoding="utf-8")
+    schemas = (
+        ROOT / "src/verigence_security/attendance/employee/schemas.py"
+    ).read_text(encoding="utf-8")
+    assert "PENDING_PAYMENT" in migration
+    assert "PROCESSED" in migration
+    assert 'Literal["PENDING_PAYMENT", "PROCESSED"] | None' in schemas
+    assert "PROCESSING" not in schemas
+    assert "FAILED" not in schemas
