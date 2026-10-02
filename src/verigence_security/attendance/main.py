@@ -8,6 +8,8 @@ from sqlalchemy import text
 from verigence_security.attendance.api import router
 from verigence_security.attendance.config import get_attendance_settings
 from verigence_security.attendance.db import attendance_engine
+from verigence_security.attendance.employee.api import router as employee_router
+from verigence_security.attendance.employee.errors import AttendanceRuleError as EmployeeAttendanceRuleError
 from verigence_security.attendance.security import (
     AttendanceAuthenticationError,
     AttendanceAuthorizationError,
@@ -50,7 +52,15 @@ def create_app() -> FastAPI:
     async def rule_error(_: Request, exc: AttendanceRuleError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"code": exc.code, "detail": exc.detail})
 
+    @application.exception_handler(EmployeeAttendanceRuleError)
+    async def employee_rule_error(_: Request, exc: EmployeeAttendanceRuleError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code, "detail": exc.detail},
+        )
+
     application.include_router(router)
+    application.include_router(employee_router)
 
     @application.get("/health")
     def health() -> dict[str, str]:
