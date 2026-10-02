@@ -1,11 +1,15 @@
 -- Employee reimbursement payment lifecycle.
 -- Additive only. Existing Attendance and Verigence tables/routes remain unchanged.
+--
+-- Employee-facing payment status has only two values:
+--   PENDING_PAYMENT -> PROCESSED
+-- Payment-rail/transaction failures are finance-internal transaction outcomes and do
+-- not change the employee-facing claim payment status.
 
 BEGIN;
 
 ALTER TABLE verigence_attendance.reimbursement_claims
-  ADD COLUMN IF NOT EXISTS payment_status varchar(24) NOT NULL DEFAULT 'NOT_READY',
-  ADD COLUMN IF NOT EXISTS payment_initiated_at_utc timestamptz,
+  ADD COLUMN IF NOT EXISTS payment_status varchar(24),
   ADD COLUMN IF NOT EXISTS paid_at_utc timestamptz,
   ADD COLUMN IF NOT EXISTS paid_amount numeric(14,2),
   ADD COLUMN IF NOT EXISTS payment_mode varchar(40),
@@ -22,38 +26,44 @@ BEGIN
   ) THEN
     ALTER TABLE verigence_attendance.reimbursement_claims
       ADD CONSTRAINT ck_va_reimbursement_payment_status
-      CHECK (payment_status IN ('NOT_READY','PENDING','PROCESSING','PAID','FAILED'));
+      CHECK (
+        payment_status IS NULL
+        OR payment_status IN ('PENDING_PAYMENT','PROCESSED')
+      );
   END IF;
 END $$;
 
 UPDATE verigence_attendance.reimbursement_claims
 SET payment_status = CASE
-  WHEN status='PAID' THEN 'PAID'
-  WHEN status='APPROVED' THEN 'PENDING'
-  ELSE 'NOT_READY'
+  WHEN status='PAID' THEN 'PROCESSED'
+  WHEN status='APPROVED' THEN 'PENDING_PAYMENT'
+  ELSE NULL
 END
-WHERE payment_status='NOT_READY'
+WHERE payment_status IS NULL
   AND status IN ('APPROVED','PAID');
 
 CREATE INDEX IF NOT EXISTS ix_va_reimbursement_payment_queue
   ON verigence_attendance.reimbursement_claims(payment_status,updated_at_utc DESC)
-  WHERE status IN ('APPROVED','PAID');
+  WHERE payment_status='PENDING_PAYMENT';
 
-CREATE TABLE IF NOT EXISTS verigence_attendance.reimbursement_payment_events (
-  payment_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE IF NOT EXISTS verigence_attendance.reimbursement_payment_transactions (
+  payment_transaction_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   claim_id uuid NOT NULL
     REFERENCES verigence_attendance.reimbursement_claims(claim_id),
-  from_status varchar(24) NOT NULL,
-  to_status varchar(24) NOT NULL,
-  paid_amount numeric(14,2),
+  transaction_status varchar(20) NOT NULL
+    CHECK (transaction_status IN ('INITIATED','SUCCESS','FAILED')),
+  amount numeric(14,2),
   payment_mode varchar(40),
   payment_reference varchar(160),
   actor_user_id uuid NOT NULL,
+  failure_reason text,
   comment text,
   occurred_at_utc timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ix_va_reimbursement_payment_events_claim
-  ON verigence_attendance.reimbursement_payment_events(claim_id,occurred_at_utc DESC);
+CREATE INDEX IF NOT EXISTS ix_va_reimbursement_payment_txn_claim
+  ON verigence_attendance.reimbursement_payment_transactions(
+    claim_id,occurred_at_utc DESC
+  );
 
 COMMIT;
