@@ -3,25 +3,21 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+from fastapi import APIRouter
+
+from verigence_security.attendance.api import router as attendance_router
+from verigence_security.attendance.employee.api import router as employee_router
 from verigence_security.attendance.employee.domain import (
     GeoPoint,
     finance_approval_required,
     leave_can_move_to_hr,
     within_geofence,
 )
-from verigence_security.attendance.api import router as attendance_router
-from verigence_security.attendance.employee.api import router as employee_router
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _router_paths(router: object) -> set[str]:
-    routes = getattr(router, "routes")
-    return {
-        path
-        for route in routes
-        if (path := getattr(route, "path", None)) is not None
-    }
+def _router_paths(router: APIRouter) -> set[str]:
+    return {route.path for route in router.routes if hasattr(route, "path")}
 
 
 def test_existing_and_employee_attendance_routes_coexist() -> None:
