@@ -31,8 +31,10 @@ from verigence_security.attendance.employee.errors import AttendanceRuleError
 from verigence_security.attendance.employee.payroll import (
     finalize_payroll,
     generate_payroll,
+    list_payroll_profiles,
     payroll_items,
     payroll_summary,
+    upsert_payroll_profile,
 )
 from verigence_security.attendance.employee.reports import attendance_report, payroll_report
 from verigence_security.attendance.employee.repository import (
@@ -84,6 +86,8 @@ from verigence_security.attendance.employee.schemas import (
     LeaveTypeCreateRequest,
     LeaveTypeResponse,
     PayrollItemResponse,
+    PayrollProfileResponse,
+    PayrollProfileUpsertRequest,
     PayrollSummaryResponse,
     PayslipResponse,
     ReimbursementClaimCreate,
@@ -1156,6 +1160,87 @@ def admin_create_holiday(
         status=row["status"],
     )
 
+@router.get(
+    "/admin/payroll-profiles",
+    response_model=list[PayrollProfileResponse],
+)
+def admin_payroll_profiles(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[PayrollProfileResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.payroll.manage",
+    )
+    return [
+        PayrollProfileResponse(
+            employeeId=row["employee_id"],
+            employeeCode=row.get("employee_code"),
+            employeeName=row.get("display_name"),
+            effectiveFrom=row["effective_from"],
+            effectiveTo=row.get("effective_to"),
+            pfApplicable=bool(row["pf_applicable"]),
+            pfOnActualWages=bool(row["pf_on_actual_wages"]),
+            esiApplicable=bool(row["esi_applicable"]),
+            professionalTaxState=row.get("professional_tax_state"),
+            professionalTaxMonthly=row["professional_tax_monthly"],
+            tdsMonthly=row["tds_monthly"],
+            taxRegime=row["tax_regime"],
+            gratuityApplicable=bool(row["gratuity_applicable"]),
+            uanMasked=row.get("uan_masked"),
+            esicNumberMasked=row.get("esic_number_masked"),
+        )
+        for row in list_payroll_profiles(connection)
+    ]
+
+
+@router.put(
+    "/admin/payroll-profiles/{employee_id}",
+    response_model=PayrollProfileResponse,
+)
+def admin_update_payroll_profile(
+    employee_id: UUID,
+    body: PayrollProfileUpsertRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> PayrollProfileResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.payroll.manage",
+    )
+    row = upsert_payroll_profile(
+        connection,
+        employee_id=employee_id,
+        effective_from=body.effectiveFrom,
+        pf_applicable=body.pfApplicable,
+        pf_on_actual_wages=body.pfOnActualWages,
+        esi_applicable=body.esiApplicable,
+        professional_tax_state=body.professionalTaxState,
+        professional_tax_monthly=body.professionalTaxMonthly,
+        tds_monthly=body.tdsMonthly,
+        tax_regime=body.taxRegime,
+        gratuity_applicable=body.gratuityApplicable,
+        uan_masked=body.uanMasked,
+        esic_number_masked=body.esicNumberMasked,
+        actor_user_id=principal.subject,
+    )
+    return PayrollProfileResponse(
+        employeeId=employee_id,
+        effectiveFrom=row["effective_from"],
+        effectiveTo=row.get("effective_to"),
+        pfApplicable=bool(row["pf_applicable"]),
+        pfOnActualWages=bool(row["pf_on_actual_wages"]),
+        esiApplicable=bool(row["esi_applicable"]),
+        professionalTaxState=row.get("professional_tax_state"),
+        professionalTaxMonthly=row["professional_tax_monthly"],
+        tdsMonthly=row["tds_monthly"],
+        taxRegime=row["tax_regime"],
+        gratuityApplicable=bool(row["gratuity_applicable"]),
+        uanMasked=row.get("uan_masked"),
+        esicNumberMasked=row.get("esic_number_masked"),
+    )
+
+
 @router.post("/admin/payroll/calculate", response_model=PayrollSummaryResponse)
 def calculate_payroll(
     month: date,
@@ -1212,9 +1297,24 @@ def get_payroll_items(
             paidLeaveDays=row["paid_leave_days"],
             unpaidLeaveDays=row["unpaid_leave_days"],
             payableDays=row["payable_days"],
+            basicAmount=row["basic_amount"],
+            hraAmount=row["hra_amount"],
+            allowancesAmount=row["allowances_amount"],
+            otherEarningsAmount=row["other_earnings_amount"],
+            lopAmount=row["lop_amount"],
             grossAmount=row["gross_amount"],
+            employeePf=row["employee_pf"],
+            employeeEsi=row["employee_esi"],
+            professionalTax=row["professional_tax"],
+            tdsAmount=row["tds_amount"],
+            otherDeductions=row["other_deductions"],
             deductionAmount=row["deduction_amount"],
             netAmount=row["net_amount"],
+            employerPf=row["employer_pf"],
+            employerEps=row["employer_eps"],
+            employerEsi=row["employer_esi"],
+            gratuityProvision=row["gratuity_provision"],
+            employerCost=row["employer_cost"],
         )
         for row in payroll_items(connection, run_id)
     ]
