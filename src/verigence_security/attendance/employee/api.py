@@ -32,9 +32,11 @@ from verigence_security.attendance.employee.payroll import (
     finalize_payroll,
     generate_payroll,
     list_payroll_profiles,
+    list_payroll_statutory_configs,
     payroll_items,
     payroll_summary,
     upsert_payroll_profile,
+    upsert_payroll_statutory_config,
 )
 from verigence_security.attendance.employee.reports import attendance_report, payroll_report
 from verigence_security.attendance.employee.repository import (
@@ -88,6 +90,8 @@ from verigence_security.attendance.employee.schemas import (
     PayrollItemResponse,
     PayrollProfileResponse,
     PayrollProfileUpsertRequest,
+    PayrollStatutoryConfigResponse,
+    PayrollStatutoryConfigUpsertRequest,
     PayrollSummaryResponse,
     PayslipResponse,
     ReimbursementClaimCreate,
@@ -1162,6 +1166,84 @@ def admin_create_holiday(
         workLocationId=row.get("work_location_id"),
         status=row["status"],
     )
+
+@router.get(
+    "/admin/payroll-statutory-config",
+    response_model=list[PayrollStatutoryConfigResponse],
+)
+def admin_payroll_statutory_config(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[PayrollStatutoryConfigResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.config.manage",
+    )
+    return [
+        PayrollStatutoryConfigResponse(
+            statutoryConfigId=row["statutory_config_id"],
+            effectiveFrom=row["effective_from"],
+            effectiveTo=row.get("effective_to"),
+            pfEmployeeRate=row["pf_employee_rate"],
+            pfEmployerRate=row["pf_employer_rate"],
+            pfWageCeiling=row["pf_wage_ceiling"],
+            epsEmployerRate=row["eps_employer_rate"],
+            epsWageCeiling=row["eps_wage_ceiling"],
+            esiEmployeeRate=row["esi_employee_rate"],
+            esiEmployerRate=row["esi_employer_rate"],
+            esiWageCeiling=row["esi_wage_ceiling"],
+            gratuityProvisionRate=row["gratuity_provision_rate"],
+            salaryTdsSection=row["salary_tds_section"],
+            createdAtUtc=row["created_at_utc"],
+        )
+        for row in list_payroll_statutory_configs(connection)
+    ]
+
+
+@router.put(
+    "/admin/payroll-statutory-config",
+    response_model=PayrollStatutoryConfigResponse,
+)
+def admin_update_payroll_statutory_config(
+    body: PayrollStatutoryConfigUpsertRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> PayrollStatutoryConfigResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.config.manage",
+    )
+    row = upsert_payroll_statutory_config(
+        connection,
+        effective_from=body.effectiveFrom,
+        pf_employee_rate=body.pfEmployeeRate,
+        pf_employer_rate=body.pfEmployerRate,
+        pf_wage_ceiling=body.pfWageCeiling,
+        eps_employer_rate=body.epsEmployerRate,
+        eps_wage_ceiling=body.epsWageCeiling,
+        esi_employee_rate=body.esiEmployeeRate,
+        esi_employer_rate=body.esiEmployerRate,
+        esi_wage_ceiling=body.esiWageCeiling,
+        gratuity_provision_rate=body.gratuityProvisionRate,
+        salary_tds_section=body.salaryTdsSection,
+    )
+    return PayrollStatutoryConfigResponse(
+        statutoryConfigId=row["statutory_config_id"],
+        effectiveFrom=row["effective_from"],
+        effectiveTo=row.get("effective_to"),
+        pfEmployeeRate=row["pf_employee_rate"],
+        pfEmployerRate=row["pf_employer_rate"],
+        pfWageCeiling=row["pf_wage_ceiling"],
+        epsEmployerRate=row["eps_employer_rate"],
+        epsWageCeiling=row["eps_wage_ceiling"],
+        esiEmployeeRate=row["esi_employee_rate"],
+        esiEmployerRate=row["esi_employer_rate"],
+        esiWageCeiling=row["esi_wage_ceiling"],
+        gratuityProvisionRate=row["gratuity_provision_rate"],
+        salaryTdsSection=row["salary_tds_section"],
+        createdAtUtc=row["created_at_utc"],
+    )
+
 
 @router.get(
     "/admin/payroll-profiles",
