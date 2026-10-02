@@ -50,16 +50,21 @@ class AttendanceEventResponse(BaseModel):
     attendanceDate: date
     eventType: Literal["CHECK_IN", "CHECK_OUT"]
     capturedAtUtc: datetime
-    distanceMeters: float
-    geofenceRadiusMeters: int
+    distanceMeters: float | None = None
+    geofenceRadiusMeters: int | None = None
+    geofenceResult: Literal["WITHIN", "OUTSIDE", "UNVERIFIABLE"]
+    hrReviewRequired: bool = False
 
 
 class AttendanceDayResponse(BaseModel):
+    attendanceDayId: UUID
     attendanceDate: date
     status: str
     presentFraction: Decimal
     checkInAtUtc: datetime | None = None
     checkOutAtUtc: datetime | None = None
+    hrReviewStatus: str = "NOT_REQUIRED"
+    hrReviewComment: str | None = None
 
 
 class TeamAttendanceResponse(BaseModel):
@@ -70,19 +75,65 @@ class TeamAttendanceResponse(BaseModel):
     presentFraction: Decimal
     checkInAtUtc: datetime | None = None
     checkOutAtUtc: datetime | None = None
+    hrReviewStatus: str = "NOT_REQUIRED"
+
+
+class AttendanceFlagResponse(BaseModel):
+    attendanceFlagId: UUID
+    flagType: Literal["OUTSIDE_GEOFENCE", "LATE_CHECK_IN", "EARLY_CHECK_OUT"]
+    flagDetail: str | None = None
+    employeeReason: str | None = None
+    resolutionStatus: str
+    createdAtUtc: datetime
+
+
+class AttendanceHrReviewResponse(BaseModel):
+    attendanceDayId: UUID
+    employeeId: UUID
+    employeeCode: str
+    employeeName: str
+    attendanceDate: date
+    presentFraction: Decimal
+    checkInAtUtc: datetime | None = None
+    checkOutAtUtc: datetime | None = None
+    hrReviewStatus: str
+    hrReviewComment: str | None = None
+    flags: list[AttendanceFlagResponse] = Field(default_factory=list)
+
+
+class AttendanceHrDecisionRequest(BaseModel):
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    presentFraction: Decimal | None = Field(default=None, ge=0, le=1)
+    comment: str | None = Field(default=None, max_length=2000)
 
 
 class LeaveCreateRequest(BaseModel):
     leaveTypeId: UUID
     startDate: date
     endDate: date
-    requestedDays: Decimal = Field(gt=0)
+    dayMode: Literal["FULL_DAY", "HALF_DAY"] = "FULL_DAY"
+    halfDaySession: Literal["FIRST_HALF", "SECOND_HALF"] | None = None
     reason: str | None = Field(default=None, max_length=2000)
 
 
 class LeaveDecisionRequest(BaseModel):
     decision: Literal["APPROVE", "REJECT"]
     comment: str | None = Field(default=None, max_length=2000)
+
+
+class LeaveHrDecisionRequest(BaseModel):
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    approvedDays: Decimal | None = Field(default=None, gt=0)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class LeaveReviewResponse(BaseModel):
+    stage: Literal["TL_OR_PMO", "HR", "EMPLOYEE"]
+    decision: Literal["APPROVE", "ADJUST", "REJECT", "CANCEL"]
+    approvedDays: Decimal | None = None
+    actorRole: str
+    comment: str | None = None
+    decidedAtUtc: datetime
 
 
 class LeaveRequestResponse(BaseModel):
@@ -94,13 +145,115 @@ class LeaveRequestResponse(BaseModel):
     startDate: date
     endDate: date
     requestedDays: Decimal
+    calculatedDays: Decimal
+    dayMode: Literal["FULL_DAY", "HALF_DAY"]
+    halfDaySession: Literal["FIRST_HALF", "SECOND_HALF"] | None = None
+    approvedDays: Decimal | None = None
+    approvalOutcome: Literal["APPROVED", "ADJUSTED", "REJECTED"] | None = None
     reason: str | None = None
     status: str
     createdAtUtc: datetime
+    reviews: list[LeaveReviewResponse] = Field(default_factory=list)
+
+
+class ReimbursementLineCreate(BaseModel):
+    expenseDate: date
+    category: Literal["TRAVEL", "FOOD", "LODGING", "LOCAL_CONVEYANCE", "OTHER"]
+    claimedAmount: Decimal = Field(gt=0)
+    vendorName: str | None = Field(default=None, max_length=240)
+    description: str | None = Field(default=None, max_length=2000)
+    receiptIndex: int | None = Field(default=None, ge=0)
+    travelFrom: str | None = Field(default=None, max_length=240)
+    travelTo: str | None = Field(default=None, max_length=240)
+    transportMode: Literal[
+        "AIR", "RAIL", "CAB", "AUTO", "BUS", "METRO",
+        "PERSONAL_CAR", "PERSONAL_BIKE", "OTHER"
+    ] | None = None
+    distanceKm: Decimal | None = Field(default=None, ge=0)
+    ticketReference: str | None = Field(default=None, max_length=160)
+    mealType: Literal["BREAKFAST", "LUNCH", "DINNER", "SNACKS", "OTHER"] | None = None
+
+
+class ReimbursementClaimCreate(BaseModel):
+    purpose: str = Field(min_length=1, max_length=240)
+    lines: list[ReimbursementLineCreate] = Field(min_length=1, max_length=50)
+
+
+class ReimbursementLineDecision(BaseModel):
+    reimbursementItemId: UUID
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    approvedAmount: Decimal = Field(ge=0)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ReimbursementClaimReviewRequest(BaseModel):
+    lineDecisions: list[ReimbursementLineDecision] = Field(min_length=1, max_length=50)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ReimbursementLineReviewResponse(BaseModel):
+    stage: Literal["HR", "FINANCE"]
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    previousAmount: Decimal | None = None
+    approvedAmount: Decimal
+    actorRole: str
+    comment: str | None = None
+    decidedAtUtc: datetime
+
+
+class ReimbursementLineResponse(BaseModel):
+    reimbursementItemId: UUID
+    lineNumber: int
+    expenseDate: date
+    category: str
+    claimedAmount: Decimal
+    approvedAmount: Decimal | None = None
+    vendorName: str | None = None
+    description: str | None = None
+    receiptUrl: str | None = None
+    travelFrom: str | None = None
+    travelTo: str | None = None
+    transportMode: str | None = None
+    distanceKm: Decimal | None = None
+    ticketReference: str | None = None
+    mealType: str | None = None
+    lineStatus: str
+    reviews: list[ReimbursementLineReviewResponse] = Field(default_factory=list)
+
+
+class ReimbursementClaimResponse(BaseModel):
+    claimId: UUID
+    claimNumber: str
+    employeeId: UUID
+    employeeName: str
+    purpose: str
+    claimMonth: date
+    status: str
+    approvalOutcome: Literal["APPROVED", "PARTIALLY_APPROVED", "REJECTED"] | None = None
+    financeApprovalRequired: bool
+    claimedTotal: Decimal
+    approvedTotal: Decimal | None = None
+    adjustedTotal: Decimal
+    paymentStatus: Literal["PENDING_PAYMENT", "PROCESSED"] | None = None
+    paidAtUtc: datetime | None = None
+    paidAmount: Decimal | None = None
+    paymentMode: str | None = None
+    paymentReference: str | None = None
+    paymentComment: str | None = None
+    submittedAtUtc: datetime
+    lines: list[ReimbursementLineResponse]
 
 
 class ReimbursementDecisionRequest(BaseModel):
     decision: Literal["APPROVE", "REJECT"]
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ReimbursementPaymentRequest(BaseModel):
+    paidAmount: Decimal = Field(gt=0)
+    paidAtUtc: datetime
+    paymentMode: str = Field(min_length=1, max_length=40)
+    paymentReference: str = Field(min_length=1, max_length=160)
     comment: str | None = Field(default=None, max_length=2000)
 
 
@@ -115,6 +268,12 @@ class ReimbursementResponse(BaseModel):
     status: str
     financeApprovalRequired: bool
     receiptUrl: str | None = None
+    paymentStatus: Literal["PENDING_PAYMENT", "PROCESSED"] | None = None
+    paidAtUtc: datetime | None = None
+    paidAmount: Decimal | None = None
+    paymentMode: str | None = None
+    paymentReference: str | None = None
+    paymentComment: str | None = None
     createdAtUtc: datetime
 
 
@@ -128,9 +287,11 @@ class PayslipResponse(BaseModel):
 
 class AdminCapabilities(BaseModel):
     employeeManage: bool
+    attendanceReview: bool
     leaveHrApprove: bool
     reimbursementHrApprove: bool
     reimbursementFinanceApprove: bool
+    reimbursementPaymentManage: bool
     payrollManage: bool
     reportRead: bool
     configManage: bool
@@ -172,9 +333,87 @@ class PayrollItemResponse(BaseModel):
     paidLeaveDays: Decimal
     unpaidLeaveDays: Decimal
     payableDays: Decimal
+    basicAmount: Decimal
+    hraAmount: Decimal
+    allowancesAmount: Decimal
+    otherEarningsAmount: Decimal
+    lopAmount: Decimal
     grossAmount: Decimal
+    employeePf: Decimal
+    employeeEsi: Decimal
+    professionalTax: Decimal
+    tdsAmount: Decimal
+    otherDeductions: Decimal
     deductionAmount: Decimal
     netAmount: Decimal
+    employerPf: Decimal
+    employerEps: Decimal
+    employerEsi: Decimal
+    gratuityProvision: Decimal
+    employerCost: Decimal
+
+
+class PayrollStatutoryConfigUpsertRequest(BaseModel):
+    effectiveFrom: date
+    pfEmployeeRate: Decimal = Field(ge=0, le=1)
+    pfEmployerRate: Decimal = Field(ge=0, le=1)
+    pfWageCeiling: Decimal = Field(gt=0)
+    epsEmployerRate: Decimal = Field(ge=0, le=1)
+    epsWageCeiling: Decimal = Field(gt=0)
+    esiEmployeeRate: Decimal = Field(ge=0, le=1)
+    esiEmployerRate: Decimal = Field(ge=0, le=1)
+    esiWageCeiling: Decimal = Field(gt=0)
+    gratuityProvisionRate: Decimal = Field(ge=0, le=1)
+    salaryTdsSection: str = Field(min_length=1, max_length=40)
+
+
+class PayrollStatutoryConfigResponse(BaseModel):
+    statutoryConfigId: UUID
+    effectiveFrom: date
+    effectiveTo: date | None = None
+    pfEmployeeRate: Decimal
+    pfEmployerRate: Decimal
+    pfWageCeiling: Decimal
+    epsEmployerRate: Decimal
+    epsWageCeiling: Decimal
+    esiEmployeeRate: Decimal
+    esiEmployerRate: Decimal
+    esiWageCeiling: Decimal
+    gratuityProvisionRate: Decimal
+    salaryTdsSection: str
+    createdAtUtc: datetime
+
+
+class PayrollProfileUpsertRequest(BaseModel):
+    effectiveFrom: date
+    pfApplicable: bool = False
+    pfOnActualWages: bool = False
+    esiApplicable: bool = False
+    professionalTaxState: str | None = Field(default=None, max_length=20)
+    professionalTaxMonthly: Decimal = Field(default=Decimal(0), ge=0)
+    tdsMonthly: Decimal = Field(default=Decimal(0), ge=0)
+    taxRegime: Literal["NEW", "OLD"] = "NEW"
+    gratuityApplicable: bool = True
+    uanMasked: str | None = Field(default=None, max_length=40)
+    esicNumberMasked: str | None = Field(default=None, max_length=40)
+
+
+class PayrollProfileResponse(BaseModel):
+    employeeId: UUID
+    employeeCode: str | None = None
+    employeeName: str | None = None
+    effectiveFrom: date
+    effectiveTo: date | None = None
+    pfApplicable: bool
+    pfOnActualWages: bool
+    esiApplicable: bool
+    professionalTaxState: str | None = None
+    professionalTaxMonthly: Decimal
+    tdsMonthly: Decimal
+    taxRegime: Literal["NEW", "OLD"]
+    gratuityApplicable: bool
+    uanMasked: str | None = None
+    esicNumberMasked: str | None = None
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -207,6 +446,10 @@ class LeaveTypeCreateRequest(BaseModel):
     isPaid: bool = True
     defaultEntitlementDays: Decimal = Field(default=Decimal(0), ge=0)
     allowHalfDay: bool = True
+    minNoticeDays: int = Field(default=0, ge=0, le=365)
+    maxConsecutiveDays: Decimal | None = Field(default=None, gt=0)
+    requiresReason: bool = True
+    allowNegativeBalance: bool = False
 
 
 class LeaveTypeResponse(BaseModel):
@@ -216,6 +459,10 @@ class LeaveTypeResponse(BaseModel):
     isPaid: bool
     defaultEntitlementDays: Decimal
     allowHalfDay: bool
+    minNoticeDays: int = 0
+    maxConsecutiveDays: Decimal | None = None
+    requiresReason: bool = True
+    allowNegativeBalance: bool = False
     status: str
 
 

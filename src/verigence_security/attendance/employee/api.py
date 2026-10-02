@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy import Connection
 
 from verigence_security.attendance.employee.admin_config import (
@@ -30,12 +31,17 @@ from verigence_security.attendance.employee.errors import AttendanceRuleError
 from verigence_security.attendance.employee.payroll import (
     finalize_payroll,
     generate_payroll,
+    list_payroll_profiles,
+    list_payroll_statutory_configs,
     payroll_items,
     payroll_summary,
+    upsert_payroll_profile,
+    upsert_payroll_statutory_config,
 )
 from verigence_security.attendance.employee.reports import attendance_report, payroll_report
 from verigence_security.attendance.employee.repository import (
     attendance_history,
+    attendance_supervisory_role,
     create_employee,
     create_leave_request,
     decide_hr_leave,
@@ -44,19 +50,30 @@ from verigence_security.attendance.employee.repository import (
     employee_for_user,
     leave_balances_for_employee,
     list_employees,
+    list_hr_attendance_reviews,
     list_leave_by_status,
     list_leave_for_employee,
     list_payslips,
+    list_pm_team_reimbursement_claims,
     list_pm_team_reimbursements,
+    list_reimbursement_claims_by_payment_status,
+    list_reimbursement_claims_by_status,
+    list_reimbursement_claims_for_employee,
     list_reimbursements_by_status,
     list_reimbursements_for_employee,
     list_team_attendance,
     list_team_leave,
+    resolve_attendance_review,
+    review_reimbursement_claim,
+    update_reimbursement_payment,
 )
 from verigence_security.attendance.employee.schemas import (
     AdminCapabilities,
     AttendanceDayResponse,
     AttendanceEventResponse,
+    AttendanceFlagResponse,
+    AttendanceHrDecisionRequest,
+    AttendanceHrReviewResponse,
     BulkImportResponse,
     ConfigUpdateRequest,
     EmployeeCreateRequest,
@@ -66,13 +83,25 @@ from verigence_security.attendance.employee.schemas import (
     LeaveBalanceResponse,
     LeaveCreateRequest,
     LeaveDecisionRequest,
+    LeaveHrDecisionRequest,
     LeaveRequestResponse,
+    LeaveReviewResponse,
     LeaveTypeCreateRequest,
     LeaveTypeResponse,
     PayrollItemResponse,
+    PayrollProfileResponse,
+    PayrollProfileUpsertRequest,
+    PayrollStatutoryConfigResponse,
+    PayrollStatutoryConfigUpsertRequest,
     PayrollSummaryResponse,
     PayslipResponse,
+    ReimbursementClaimCreate,
+    ReimbursementClaimResponse,
+    ReimbursementClaimReviewRequest,
     ReimbursementDecisionRequest,
+    ReimbursementLineResponse,
+    ReimbursementLineReviewResponse,
+    ReimbursementPaymentRequest,
     ReimbursementResponse,
     TeamAttendanceResponse,
     WorkLocationCreateRequest,
@@ -82,6 +111,7 @@ from verigence_security.attendance.employee.security import HumanPrincipal, huma
 from verigence_security.attendance.employee.service import (
     record_attendance,
     submit_reimbursement,
+    submit_reimbursement_claim,
 )
 from verigence_security.attendance.employee.storage import AttendanceStorageError, storage
 
@@ -131,6 +161,66 @@ def _employee_profile(row: dict[str, Any]) -> EmployeeProfile:
     )
 
 
+def _attendance_actor_role(
+    connection: Connection,
+    principal: HumanPrincipal,
+    event_type: str,
+) -> str:
+    client = security_client()
+    if client.allowed(
+        user_id=principal.subject,
+        permission_key="attendance.exception.resolve",
+    ):
+        return "HRADMIN"
+
+    employee = employee_for_user(connection, principal.subject)
+    tenant_id = employee.get("project_tenant_id")
+    if tenant_id is not None:
+        permission = (
+            "attendance.self.checkin"
+            if event_type == "CHECK_IN"
+            else "attendance.self.checkout"
+        )
+        auth = client.require(
+            user_id=principal.subject,
+            permission_key=permission,
+            tenant_id=tenant_id,
+        )
+        role_key = str(auth.get("roleKey") or "").upper()
+        if role_key in {"TL", "PM"}:
+            return role_key
+        return "PC"
+
+    fallback = attendance_supervisory_role(connection, principal.subject)
+    return fallback if fallback in {"TL", "PM"} else "PC"
+
+
+def _attendance_review(row: dict[str, Any]) -> AttendanceHrReviewResponse:
+    return AttendanceHrReviewResponse(
+        attendanceDayId=row["attendance_day_id"],
+        employeeId=row["employee_id"],
+        employeeCode=row["employee_code"],
+        employeeName=row["display_name"],
+        attendanceDate=row["attendance_date"],
+        presentFraction=row["present_fraction"],
+        checkInAtUtc=row.get("check_in_at_utc"),
+        checkOutAtUtc=row.get("check_out_at_utc"),
+        hrReviewStatus=row["hr_review_status"],
+        hrReviewComment=row.get("hr_review_comment"),
+        flags=[
+            AttendanceFlagResponse(
+                attendanceFlagId=flag["attendance_flag_id"],
+                flagType=flag["flag_type"],
+                flagDetail=flag.get("flag_detail"),
+                employeeReason=flag.get("employee_reason"),
+                resolutionStatus=flag["resolution_status"],
+                createdAtUtc=flag["created_at_utc"],
+            )
+            for flag in row.get("flags", [])
+        ],
+    )
+
+
 def _leave(row: dict[str, Any]) -> LeaveRequestResponse:
     return LeaveRequestResponse(
         leaveRequestId=row["leave_request_id"],
@@ -141,9 +231,25 @@ def _leave(row: dict[str, Any]) -> LeaveRequestResponse:
         startDate=row["start_date"],
         endDate=row["end_date"],
         requestedDays=row["requested_days"],
+        calculatedDays=row.get("calculated_days") or row["requested_days"],
+        dayMode=row.get("day_mode") or "FULL_DAY",
+        halfDaySession=row.get("half_day_session"),
+        approvedDays=row.get("hr_approved_days"),
+        approvalOutcome=row.get("approval_outcome"),
         reason=row.get("reason"),
         status=row["status"],
         createdAtUtc=row["created_at_utc"],
+        reviews=[
+            LeaveReviewResponse(
+                stage=review["stage"],
+                decision=review["decision"],
+                approvedDays=review.get("approved_days"),
+                actorRole=review["actor_role"],
+                comment=review.get("comment"),
+                decidedAtUtc=review["decided_at_utc"],
+            )
+            for review in row.get("reviews", [])
+        ],
     )
 
 
@@ -163,7 +269,77 @@ def _claim(row: dict[str, Any]) -> ReimbursementResponse:
             if row.get("receipt_object_key")
             else None
         ),
+        paymentStatus=row.get("payment_status"),
+        paidAtUtc=row.get("paid_at_utc"),
+        paidAmount=row.get("paid_amount"),
+        paymentMode=row.get("payment_mode"),
+        paymentReference=row.get("payment_reference"),
+        paymentComment=row.get("payment_comment"),
         createdAtUtc=row["created_at_utc"],
+    )
+
+
+def _reimbursement_claim(row: dict[str, Any]) -> ReimbursementClaimResponse:
+    lines: list[ReimbursementLineResponse] = []
+    for item in row.get("lines", []):
+        reviews = [
+            ReimbursementLineReviewResponse(
+                stage=review["stage"],
+                decision=review["decision"],
+                previousAmount=review.get("previous_amount"),
+                approvedAmount=review["approved_amount"],
+                actorRole=review["actor_role"],
+                comment=review.get("comment"),
+                decidedAtUtc=review["decided_at_utc"],
+            )
+            for review in item.get("reviews", [])
+        ]
+        lines.append(
+            ReimbursementLineResponse(
+                reimbursementItemId=item["reimbursement_item_id"],
+                lineNumber=item["line_number"],
+                expenseDate=item["expense_date"],
+                category=item["category"],
+                claimedAmount=item["claimed_amount"],
+                approvedAmount=item.get("approved_amount"),
+                vendorName=item.get("vendor_name"),
+                description=item.get("description"),
+                receiptUrl=(
+                    storage().presign(object_key=item["receipt_object_key"])
+                    if item.get("receipt_object_key")
+                    else None
+                ),
+                travelFrom=item.get("travel_from"),
+                travelTo=item.get("travel_to"),
+                transportMode=item.get("transport_mode"),
+                distanceKm=item.get("distance_km"),
+                ticketReference=item.get("ticket_reference"),
+                mealType=item.get("meal_type"),
+                lineStatus=item["line_status"],
+                reviews=reviews,
+            )
+        )
+    return ReimbursementClaimResponse(
+        claimId=row["claim_id"],
+        claimNumber=row["claim_number"],
+        employeeId=row["employee_id"],
+        employeeName=row["display_name"],
+        purpose=row["purpose"],
+        claimMonth=row["claim_month"],
+        status=row["status"],
+        approvalOutcome=row.get("approval_outcome"),
+        financeApprovalRequired=bool(row["finance_approval_required"]),
+        claimedTotal=row["claimed_total"],
+        approvedTotal=row.get("approved_total"),
+        adjustedTotal=row.get("adjusted_total") or Decimal(0),
+        paymentStatus=row.get("payment_status"),
+        paidAtUtc=row.get("paid_at_utc"),
+        paidAmount=row.get("paid_amount"),
+        paymentMode=row.get("payment_mode"),
+        paymentReference=row.get("payment_reference"),
+        paymentComment=row.get("payment_comment"),
+        submittedAtUtc=row["submitted_at_utc"],
+        lines=lines,
     )
 
 
@@ -189,11 +365,14 @@ def my_attendance(
     )
     return [
         AttendanceDayResponse(
+            attendanceDayId=row["attendance_day_id"],
             attendanceDate=row["attendance_date"],
             status=row["status"],
             presentFraction=row["present_fraction"],
             checkInAtUtc=row.get("check_in_at_utc"),
             checkOutAtUtc=row.get("check_out_at_utc"),
+            hrReviewStatus=row.get("hr_review_status") or "NOT_REQUIRED",
+            hrReviewComment=row.get("hr_review_comment"),
         )
         for row in rows
     ]
@@ -209,8 +388,10 @@ async def _attendance_action(
     accuracy_meters: float,
     captured_at: datetime,
     photo: UploadFile,
+    exception_reason: str | None,
 ) -> AttendanceEventResponse:
     data = await photo.read()
+    actor_role = _attendance_actor_role(connection, principal, event_type)
     result = record_attendance(
         connection,
         user_id=principal.subject,
@@ -221,6 +402,8 @@ async def _attendance_action(
         captured_at=captured_at,
         photo_data=data,
         photo_content_type=(photo.content_type or "").lower(),
+        actor_role=actor_role,
+        exception_reason=exception_reason,
         storage=storage(),
     )
     return AttendanceEventResponse.model_validate(result)
@@ -235,6 +418,7 @@ async def check_in(
     accuracyMeters: Annotated[float, Form(ge=0)],
     capturedAt: Annotated[datetime, Form()],
     photo: Annotated[UploadFile, File(...)],
+    exceptionReason: Annotated[str | None, Form(max_length=2000)] = None,
 ) -> AttendanceEventResponse:
     return await _attendance_action(
         event_type="CHECK_IN",
@@ -245,6 +429,7 @@ async def check_in(
         accuracy_meters=accuracyMeters,
         captured_at=capturedAt,
         photo=photo,
+        exception_reason=exceptionReason,
     )
 
 
@@ -257,6 +442,7 @@ async def check_out(
     accuracyMeters: Annotated[float, Form(ge=0)],
     capturedAt: Annotated[datetime, Form()],
     photo: Annotated[UploadFile, File(...)],
+    exceptionReason: Annotated[str | None, Form(max_length=2000)] = None,
 ) -> AttendanceEventResponse:
     return await _attendance_action(
         event_type="CHECK_OUT",
@@ -267,6 +453,7 @@ async def check_out(
         accuracy_meters=accuracyMeters,
         captured_at=capturedAt,
         photo=photo,
+        exception_reason=exceptionReason,
     )
 
 
@@ -339,7 +526,8 @@ def apply_leave(
             leave_type_id=body.leaveTypeId,
             start_date=body.startDate,
             end_date=body.endDate,
-            requested_days=body.requestedDays,
+            day_mode=body.dayMode,
+            half_day_session=body.halfDaySession,
             reason=body.reason,
         )
     )
@@ -361,6 +549,7 @@ def team_attendance(
             presentFraction=row["present_fraction"] or Decimal(0),
             checkInAtUtc=row.get("check_in_at_utc"),
             checkOutAtUtc=row.get("check_out_at_utc"),
+            hrReviewStatus=row.get("hr_review_status") or "NOT_REQUIRED",
         )
         for row in list_team_attendance(
             connection,
@@ -397,6 +586,47 @@ def team_leave_decision(
 
 
 
+@router.get(
+    "/admin/attendance/reviews",
+    response_model=list[AttendanceHrReviewResponse],
+)
+def hr_attendance_review_queue(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[AttendanceHrReviewResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.exception.resolve",
+    )
+    return [_attendance_review(row) for row in list_hr_attendance_reviews(connection)]
+
+
+@router.post(
+    "/admin/attendance/{attendance_day_id}/review",
+    response_model=AttendanceHrReviewResponse,
+)
+def hr_attendance_review_decision(
+    attendance_day_id: UUID,
+    body: AttendanceHrDecisionRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> AttendanceHrReviewResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.exception.resolve",
+    )
+    return _attendance_review(
+        resolve_attendance_review(
+            connection,
+            attendance_day_id=attendance_day_id,
+            actor_user_id=principal.subject,
+            decision=body.decision,
+            present_fraction=body.presentFraction,
+            comment=body.comment,
+        )
+    )
+
+
 @router.get("/admin/leave", response_model=list[LeaveRequestResponse])
 def hr_leave_queue(
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
@@ -411,7 +641,7 @@ def hr_leave_queue(
 @router.post("/admin/leave/{leave_id}/decision", response_model=LeaveRequestResponse)
 def hr_leave_decision(
     leave_id: UUID,
-    body: LeaveDecisionRequest,
+    body: LeaveHrDecisionRequest,
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
     connection: Annotated[Connection, Depends(get_connection)],
 ) -> LeaveRequestResponse:
@@ -425,6 +655,159 @@ def hr_leave_decision(
             leave_id=leave_id,
             actor_user_id=principal.subject,
             decision=body.decision,
+            approved_days=body.approvedDays,
+            comment=body.comment,
+        )
+    )
+
+
+@router.get(
+    "/me/reimbursement-claims",
+    response_model=list[ReimbursementClaimResponse],
+)
+def my_reimbursement_claims(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[ReimbursementClaimResponse]:
+    employee = employee_for_user(connection, principal.subject)
+    return [
+        _reimbursement_claim(row)
+        for row in list_reimbursement_claims_for_employee(
+            connection,
+            UUID(str(employee["employee_id"])),
+        )
+    ]
+
+
+@router.post(
+    "/me/reimbursement-claims",
+    response_model=ReimbursementClaimResponse,
+)
+async def create_my_reimbursement_claim(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+    payload: Annotated[str, Form(min_length=2)],
+    receipts: Annotated[list[UploadFile] | None, File()] = None,
+) -> ReimbursementClaimResponse:
+    try:
+        request = ReimbursementClaimCreate.model_validate_json(payload)
+    except ValidationError as exc:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_CLAIM_INVALID",
+            "The reimbursement claim contains invalid or incomplete fields.",
+            status_code=400,
+        ) from exc
+
+    uploaded = receipts or []
+    receipt_payloads = [
+        (await item.read(), item.content_type)
+        for item in uploaded
+    ]
+    lines = [
+        {
+            "expense_date": line.expenseDate,
+            "category": line.category,
+            "claimed_amount": line.claimedAmount,
+            "vendor_name": line.vendorName,
+            "description": line.description,
+            "receipt_index": line.receiptIndex,
+            "travel_from": line.travelFrom,
+            "travel_to": line.travelTo,
+            "transport_mode": line.transportMode,
+            "distance_km": line.distanceKm,
+            "ticket_reference": line.ticketReference,
+            "meal_type": line.mealType,
+        }
+        for line in request.lines
+    ]
+    row = submit_reimbursement_claim(
+        connection,
+        user_id=principal.subject,
+        purpose=request.purpose,
+        lines=lines,
+        receipts=receipt_payloads,
+        storage=storage(),
+    )
+    return _reimbursement_claim(row)
+
+
+@router.get(
+    "/team/reimbursement-claims",
+    response_model=list[ReimbursementClaimResponse],
+)
+def pm_team_reimbursement_claims(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[ReimbursementClaimResponse]:
+    return [
+        _reimbursement_claim(row)
+        for row in list_pm_team_reimbursement_claims(
+            connection,
+            principal.subject,
+        )
+    ]
+
+
+@router.get(
+    "/admin/reimbursement-claims",
+    response_model=list[ReimbursementClaimResponse],
+)
+def reimbursement_claim_queue(
+    stage: Literal["HR", "FINANCE"],
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[ReimbursementClaimResponse]:
+    permission = (
+        "attendance.reimbursement.hr.approve"
+        if stage == "HR"
+        else "attendance.reimbursement.finance.approve"
+    )
+    security_client().require(user_id=principal.subject, permission_key=permission)
+    status = "PENDING_HR" if stage == "HR" else "PENDING_FINANCE"
+    return [
+        _reimbursement_claim(row)
+        for row in list_reimbursement_claims_by_status(connection, status)
+    ]
+
+
+@router.post(
+    "/admin/reimbursement-claims/{claim_id}/review",
+    response_model=ReimbursementClaimResponse,
+)
+def reimbursement_claim_review(
+    claim_id: UUID,
+    stage: Literal["HR", "FINANCE"],
+    body: ReimbursementClaimReviewRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> ReimbursementClaimResponse:
+    permission = (
+        "attendance.reimbursement.hr.approve"
+        if stage == "HR"
+        else "attendance.reimbursement.finance.approve"
+    )
+    auth = security_client().require(
+        user_id=principal.subject,
+        permission_key=permission,
+    )
+    role = str(auth.get("roleKey") or auth.get("classification") or stage)
+    decisions = [
+        {
+            "reimbursement_item_id": item.reimbursementItemId,
+            "decision": item.decision,
+            "approved_amount": item.approvedAmount,
+            "comment": item.comment,
+        }
+        for item in body.lineDecisions
+    ]
+    return _reimbursement_claim(
+        review_reimbursement_claim(
+            connection,
+            claim_id=claim_id,
+            actor_user_id=principal.subject,
+            actor_role=role,
+            stage=stage,
+            line_decisions=decisions,
             comment=body.comment,
         )
     )
@@ -524,6 +907,56 @@ def reimbursement_decision(
             actor_role=role,
             stage=stage,
             decision=body.decision,
+            comment=body.comment,
+        )
+    )
+
+
+@router.get(
+    "/admin/reimbursements/payments",
+    response_model=list[ReimbursementClaimResponse],
+)
+def reimbursement_payment_queue(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+    paymentStatus: Literal["PENDING_PAYMENT", "PROCESSED"] = "PENDING_PAYMENT",
+) -> list[ReimbursementClaimResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.reimbursement.payment.manage",
+    )
+    return [
+        _reimbursement_claim(row)
+        for row in list_reimbursement_claims_by_payment_status(
+            connection,
+            paymentStatus,
+        )
+    ]
+
+
+@router.post(
+    "/admin/reimbursements/{claim_id}/payment",
+    response_model=ReimbursementClaimResponse,
+)
+def reimbursement_payment(
+    claim_id: UUID,
+    body: ReimbursementPaymentRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> ReimbursementClaimResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.reimbursement.payment.manage",
+    )
+    return _reimbursement_claim(
+        update_reimbursement_payment(
+            connection,
+            claim_id=claim_id,
+            actor_user_id=principal.subject,
+            paid_amount=body.paidAmount,
+            paid_at_utc=body.paidAtUtc,
+            payment_mode=body.paymentMode,
+            payment_reference=body.paymentReference,
             comment=body.comment,
         )
     )
@@ -654,6 +1087,10 @@ def admin_leave_types(
             isPaid=row["is_paid"],
             defaultEntitlementDays=row["default_entitlement_days"],
             allowHalfDay=row["allow_half_day"],
+            minNoticeDays=row.get("min_notice_days") or 0,
+            maxConsecutiveDays=row.get("max_consecutive_days"),
+            requiresReason=bool(row.get("requires_reason", True)),
+            allowNegativeBalance=bool(row.get("allow_negative_balance", False)),
             status=row["status"],
         )
         for row in list_leave_types(connection)
@@ -677,6 +1114,10 @@ def admin_create_leave_type(
         is_paid=body.isPaid,
         entitlement_days=body.defaultEntitlementDays,
         allow_half_day=body.allowHalfDay,
+        min_notice_days=body.minNoticeDays,
+        max_consecutive_days=body.maxConsecutiveDays,
+        requires_reason=body.requiresReason,
+        allow_negative_balance=body.allowNegativeBalance,
     )
     return LeaveTypeResponse(
         leaveTypeId=row["leave_type_id"],
@@ -685,6 +1126,10 @@ def admin_create_leave_type(
         isPaid=row["is_paid"],
         defaultEntitlementDays=row["default_entitlement_days"],
         allowHalfDay=row["allow_half_day"],
+        minNoticeDays=row.get("min_notice_days") or 0,
+        maxConsecutiveDays=row.get("max_consecutive_days"),
+        requiresReason=bool(row.get("requires_reason", True)),
+        allowNegativeBalance=bool(row.get("allow_negative_balance", False)),
         status=row["status"],
     )
 
@@ -733,6 +1178,165 @@ def admin_create_holiday(
         workLocationId=row.get("work_location_id"),
         status=row["status"],
     )
+
+@router.get(
+    "/admin/payroll-statutory-config",
+    response_model=list[PayrollStatutoryConfigResponse],
+)
+def admin_payroll_statutory_config(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[PayrollStatutoryConfigResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.config.manage",
+    )
+    return [
+        PayrollStatutoryConfigResponse(
+            statutoryConfigId=row["statutory_config_id"],
+            effectiveFrom=row["effective_from"],
+            effectiveTo=row.get("effective_to"),
+            pfEmployeeRate=row["pf_employee_rate"],
+            pfEmployerRate=row["pf_employer_rate"],
+            pfWageCeiling=row["pf_wage_ceiling"],
+            epsEmployerRate=row["eps_employer_rate"],
+            epsWageCeiling=row["eps_wage_ceiling"],
+            esiEmployeeRate=row["esi_employee_rate"],
+            esiEmployerRate=row["esi_employer_rate"],
+            esiWageCeiling=row["esi_wage_ceiling"],
+            gratuityProvisionRate=row["gratuity_provision_rate"],
+            salaryTdsSection=row["salary_tds_section"],
+            createdAtUtc=row["created_at_utc"],
+        )
+        for row in list_payroll_statutory_configs(connection)
+    ]
+
+
+@router.put(
+    "/admin/payroll-statutory-config",
+    response_model=PayrollStatutoryConfigResponse,
+)
+def admin_update_payroll_statutory_config(
+    body: PayrollStatutoryConfigUpsertRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> PayrollStatutoryConfigResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.config.manage",
+    )
+    row = upsert_payroll_statutory_config(
+        connection,
+        effective_from=body.effectiveFrom,
+        pf_employee_rate=body.pfEmployeeRate,
+        pf_employer_rate=body.pfEmployerRate,
+        pf_wage_ceiling=body.pfWageCeiling,
+        eps_employer_rate=body.epsEmployerRate,
+        eps_wage_ceiling=body.epsWageCeiling,
+        esi_employee_rate=body.esiEmployeeRate,
+        esi_employer_rate=body.esiEmployerRate,
+        esi_wage_ceiling=body.esiWageCeiling,
+        gratuity_provision_rate=body.gratuityProvisionRate,
+        salary_tds_section=body.salaryTdsSection,
+    )
+    return PayrollStatutoryConfigResponse(
+        statutoryConfigId=row["statutory_config_id"],
+        effectiveFrom=row["effective_from"],
+        effectiveTo=row.get("effective_to"),
+        pfEmployeeRate=row["pf_employee_rate"],
+        pfEmployerRate=row["pf_employer_rate"],
+        pfWageCeiling=row["pf_wage_ceiling"],
+        epsEmployerRate=row["eps_employer_rate"],
+        epsWageCeiling=row["eps_wage_ceiling"],
+        esiEmployeeRate=row["esi_employee_rate"],
+        esiEmployerRate=row["esi_employer_rate"],
+        esiWageCeiling=row["esi_wage_ceiling"],
+        gratuityProvisionRate=row["gratuity_provision_rate"],
+        salaryTdsSection=row["salary_tds_section"],
+        createdAtUtc=row["created_at_utc"],
+    )
+
+
+@router.get(
+    "/admin/payroll-profiles",
+    response_model=list[PayrollProfileResponse],
+)
+def admin_payroll_profiles(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[PayrollProfileResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.payroll.manage",
+    )
+    return [
+        PayrollProfileResponse(
+            employeeId=row["employee_id"],
+            employeeCode=row.get("employee_code"),
+            employeeName=row.get("display_name"),
+            effectiveFrom=row["effective_from"],
+            effectiveTo=row.get("effective_to"),
+            pfApplicable=bool(row["pf_applicable"]),
+            pfOnActualWages=bool(row["pf_on_actual_wages"]),
+            esiApplicable=bool(row["esi_applicable"]),
+            professionalTaxState=row.get("professional_tax_state"),
+            professionalTaxMonthly=row["professional_tax_monthly"],
+            tdsMonthly=row["tds_monthly"],
+            taxRegime=row["tax_regime"],
+            gratuityApplicable=bool(row["gratuity_applicable"]),
+            uanMasked=row.get("uan_masked"),
+            esicNumberMasked=row.get("esic_number_masked"),
+        )
+        for row in list_payroll_profiles(connection)
+    ]
+
+
+@router.put(
+    "/admin/payroll-profiles/{employee_id}",
+    response_model=PayrollProfileResponse,
+)
+def admin_update_payroll_profile(
+    employee_id: UUID,
+    body: PayrollProfileUpsertRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> PayrollProfileResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.payroll.manage",
+    )
+    row = upsert_payroll_profile(
+        connection,
+        employee_id=employee_id,
+        effective_from=body.effectiveFrom,
+        pf_applicable=body.pfApplicable,
+        pf_on_actual_wages=body.pfOnActualWages,
+        esi_applicable=body.esiApplicable,
+        professional_tax_state=body.professionalTaxState,
+        professional_tax_monthly=body.professionalTaxMonthly,
+        tds_monthly=body.tdsMonthly,
+        tax_regime=body.taxRegime,
+        gratuity_applicable=body.gratuityApplicable,
+        uan_masked=body.uanMasked,
+        esic_number_masked=body.esicNumberMasked,
+        actor_user_id=principal.subject,
+    )
+    return PayrollProfileResponse(
+        employeeId=employee_id,
+        effectiveFrom=row["effective_from"],
+        effectiveTo=row.get("effective_to"),
+        pfApplicable=bool(row["pf_applicable"]),
+        pfOnActualWages=bool(row["pf_on_actual_wages"]),
+        esiApplicable=bool(row["esi_applicable"]),
+        professionalTaxState=row.get("professional_tax_state"),
+        professionalTaxMonthly=row["professional_tax_monthly"],
+        tdsMonthly=row["tds_monthly"],
+        taxRegime=row["tax_regime"],
+        gratuityApplicable=bool(row["gratuity_applicable"]),
+        uanMasked=row.get("uan_masked"),
+        esicNumberMasked=row.get("esic_number_masked"),
+    )
+
 
 @router.post("/admin/payroll/calculate", response_model=PayrollSummaryResponse)
 def calculate_payroll(
@@ -790,9 +1394,24 @@ def get_payroll_items(
             paidLeaveDays=row["paid_leave_days"],
             unpaidLeaveDays=row["unpaid_leave_days"],
             payableDays=row["payable_days"],
+            basicAmount=row["basic_amount"],
+            hraAmount=row["hra_amount"],
+            allowancesAmount=row["allowances_amount"],
+            otherEarningsAmount=row["other_earnings_amount"],
+            lopAmount=row["lop_amount"],
             grossAmount=row["gross_amount"],
+            employeePf=row["employee_pf"],
+            employeeEsi=row["employee_esi"],
+            professionalTax=row["professional_tax"],
+            tdsAmount=row["tds_amount"],
+            otherDeductions=row["other_deductions"],
             deductionAmount=row["deduction_amount"],
             netAmount=row["net_amount"],
+            employerPf=row["employer_pf"],
+            employerEps=row["employer_eps"],
+            employerEsi=row["employer_esi"],
+            gratuityProvision=row["gratuity_provision"],
+            employerCost=row["employer_cost"],
         )
         for row in payroll_items(connection, run_id)
     ]
@@ -880,6 +1499,10 @@ def admin_capabilities(
     user_id = principal.subject
     return AdminCapabilities(
         employeeManage=client.allowed(user_id=user_id, permission_key="attendance.employee.manage"),
+        attendanceReview=client.allowed(
+            user_id=user_id,
+            permission_key="attendance.exception.resolve",
+        ),
         leaveHrApprove=client.allowed(user_id=user_id, permission_key="attendance.leave.hr.approve"),
         reimbursementHrApprove=client.allowed(
             user_id=user_id,
@@ -888,6 +1511,10 @@ def admin_capabilities(
         reimbursementFinanceApprove=client.allowed(
             user_id=user_id,
             permission_key="attendance.reimbursement.finance.approve",
+        ),
+        reimbursementPaymentManage=client.allowed(
+            user_id=user_id,
+            permission_key="attendance.reimbursement.payment.manage",
         ),
         payrollManage=client.allowed(user_id=user_id, permission_key="attendance.payroll.manage"),
         reportRead=client.allowed(user_id=user_id, permission_key="attendance.report.read"),

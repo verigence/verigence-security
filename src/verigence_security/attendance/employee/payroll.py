@@ -149,6 +149,373 @@ def _salary_for_month(
     return {key: Decimal(str(row[key])) for key in row}
 
 
+
+def statutory_config_for_month(
+    connection: Connection,
+    *,
+    month: date,
+) -> dict[str, Any]:
+    row = connection.execute(
+        text(
+            """
+            SELECT *
+            FROM verigence_attendance.payroll_statutory_config
+            WHERE effective_from<=:month_end
+              AND (effective_to IS NULL OR effective_to>=:month_start)
+            ORDER BY effective_from DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "month_start": _month_start(month),
+            "month_end": _month_end(month),
+        },
+    ).mappings().first()
+    if row is None:
+        raise AttendanceRuleError(
+            "PAYROLL_STATUTORY_CONFIG_MISSING",
+            "No statutory payroll configuration applies to this payroll month.",
+            status_code=409,
+        )
+    return dict(row)
+
+
+def list_payroll_statutory_configs(
+    connection: Connection,
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT statutory_config_id,effective_from,effective_to,
+                       pf_employee_rate,pf_employer_rate,pf_wage_ceiling,
+                       eps_employer_rate,eps_wage_ceiling,
+                       esi_employee_rate,esi_employer_rate,esi_wage_ceiling,
+                       gratuity_provision_rate,salary_tds_section,created_at_utc
+                FROM verigence_attendance.payroll_statutory_config
+                ORDER BY effective_from DESC
+                """
+            )
+        ).mappings()
+    ]
+
+
+def upsert_payroll_statutory_config(
+    connection: Connection,
+    *,
+    effective_from: date,
+    pf_employee_rate: Decimal,
+    pf_employer_rate: Decimal,
+    pf_wage_ceiling: Decimal,
+    eps_employer_rate: Decimal,
+    eps_wage_ceiling: Decimal,
+    esi_employee_rate: Decimal,
+    esi_employer_rate: Decimal,
+    esi_wage_ceiling: Decimal,
+    gratuity_provision_rate: Decimal,
+    salary_tds_section: str,
+) -> dict[str, Any]:
+    rates = {
+        "PF employee rate": pf_employee_rate,
+        "PF employer rate": pf_employer_rate,
+        "EPS employer rate": eps_employer_rate,
+        "ESI employee rate": esi_employee_rate,
+        "ESI employer rate": esi_employer_rate,
+        "Gratuity provision rate": gratuity_provision_rate,
+    }
+    for label, value in rates.items():
+        if value < 0 or value > 1:
+            raise AttendanceRuleError(
+                "PAYROLL_STATUTORY_RATE_INVALID",
+                f"{label} must be between 0 and 1.",
+                status_code=400,
+            )
+    for label, value in {
+        "PF wage ceiling": pf_wage_ceiling,
+        "EPS wage ceiling": eps_wage_ceiling,
+        "ESI wage ceiling": esi_wage_ceiling,
+    }.items():
+        if value <= 0:
+            raise AttendanceRuleError(
+                "PAYROLL_STATUTORY_CEILING_INVALID",
+                f"{label} must be greater than zero.",
+                status_code=400,
+            )
+
+    normalized_tds_section = salary_tds_section.strip()
+    if not normalized_tds_section:
+        raise AttendanceRuleError(
+            "PAYROLL_TDS_SECTION_REQUIRED",
+            "Salary TDS section/reference is required.",
+            status_code=400,
+        )
+
+    next_effective = connection.execute(
+        text(
+            """
+            SELECT min(effective_from)
+            FROM verigence_attendance.payroll_statutory_config
+            WHERE effective_from>:effective_from
+            """
+        ),
+        {"effective_from": effective_from},
+    ).scalar_one_or_none()
+    new_effective_to = (
+        next_effective - timedelta(days=1)
+        if next_effective is not None
+        else None
+    )
+
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.payroll_statutory_config
+            SET effective_to=:previous_to
+            WHERE effective_from<:effective_from
+              AND (effective_to IS NULL OR effective_to>=:effective_from)
+            """
+        ),
+        {
+            "effective_from": effective_from,
+            "previous_to": effective_from - timedelta(days=1),
+        },
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.payroll_statutory_config (
+                effective_from,effective_to,pf_employee_rate,pf_employer_rate,
+                pf_wage_ceiling,eps_employer_rate,eps_wage_ceiling,
+                esi_employee_rate,esi_employer_rate,esi_wage_ceiling,
+                gratuity_provision_rate,salary_tds_section
+            ) VALUES (
+                :effective_from,:effective_to,:pf_employee_rate,:pf_employer_rate,
+                :pf_wage_ceiling,:eps_employer_rate,:eps_wage_ceiling,
+                :esi_employee_rate,:esi_employer_rate,:esi_wage_ceiling,
+                :gratuity_provision_rate,:salary_tds_section
+            )
+            ON CONFLICT (effective_from) DO UPDATE SET
+                effective_to=EXCLUDED.effective_to,
+                pf_employee_rate=EXCLUDED.pf_employee_rate,
+                pf_employer_rate=EXCLUDED.pf_employer_rate,
+                pf_wage_ceiling=EXCLUDED.pf_wage_ceiling,
+                eps_employer_rate=EXCLUDED.eps_employer_rate,
+                eps_wage_ceiling=EXCLUDED.eps_wage_ceiling,
+                esi_employee_rate=EXCLUDED.esi_employee_rate,
+                esi_employer_rate=EXCLUDED.esi_employer_rate,
+                esi_wage_ceiling=EXCLUDED.esi_wage_ceiling,
+                gratuity_provision_rate=EXCLUDED.gratuity_provision_rate,
+                salary_tds_section=EXCLUDED.salary_tds_section
+            """
+        ),
+        {
+            "effective_from": effective_from,
+            "effective_to": new_effective_to,
+            "pf_employee_rate": pf_employee_rate,
+            "pf_employer_rate": pf_employer_rate,
+            "pf_wage_ceiling": pf_wage_ceiling,
+            "eps_employer_rate": eps_employer_rate,
+            "eps_wage_ceiling": eps_wage_ceiling,
+            "esi_employee_rate": esi_employee_rate,
+            "esi_employer_rate": esi_employer_rate,
+            "esi_wage_ceiling": esi_wage_ceiling,
+            "gratuity_provision_rate": gratuity_provision_rate,
+            "salary_tds_section": normalized_tds_section,
+        },
+    )
+    row = connection.execute(
+        text(
+            """
+            SELECT statutory_config_id,effective_from,effective_to,
+                   pf_employee_rate,pf_employer_rate,pf_wage_ceiling,
+                   eps_employer_rate,eps_wage_ceiling,
+                   esi_employee_rate,esi_employer_rate,esi_wage_ceiling,
+                   gratuity_provision_rate,salary_tds_section,created_at_utc
+            FROM verigence_attendance.payroll_statutory_config
+            WHERE effective_from=:effective_from
+            """
+        ),
+        {"effective_from": effective_from},
+    ).mappings().one()
+    return dict(row)
+
+
+def payroll_profile_for_month(
+    connection: Connection,
+    *,
+    employee_id: UUID,
+    month: date,
+) -> dict[str, Any]:
+    row = connection.execute(
+        text(
+            """
+            SELECT *
+            FROM verigence_attendance.employee_payroll_profiles
+            WHERE employee_id=:employee_id
+              AND effective_from<=:month_end
+              AND (effective_to IS NULL OR effective_to>=:month_start)
+            ORDER BY effective_from DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "employee_id": employee_id,
+            "month_start": _month_start(month),
+            "month_end": _month_end(month),
+        },
+    ).mappings().first()
+    if row is None:
+        return {
+            "employee_id": employee_id,
+            "effective_from": _month_start(month),
+            "pf_applicable": False,
+            "pf_on_actual_wages": False,
+            "esi_applicable": False,
+            "professional_tax_state": None,
+            "professional_tax_monthly": Decimal(0),
+            "tds_monthly": Decimal(0),
+            "tax_regime": "NEW",
+            "gratuity_applicable": True,
+            "uan_masked": None,
+            "esic_number_masked": None,
+        }
+    return dict(row)
+
+
+def list_payroll_profiles(connection: Connection) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT DISTINCT ON (e.employee_id)
+                       e.employee_id,e.employee_code,e.display_name,
+                       p.payroll_profile_id,
+                       COALESCE(p.effective_from,e.joining_date) AS effective_from,
+                       p.effective_to,
+                       COALESCE(p.pf_applicable,false) AS pf_applicable,
+                       COALESCE(p.pf_on_actual_wages,false) AS pf_on_actual_wages,
+                       COALESCE(p.esi_applicable,false) AS esi_applicable,
+                       p.professional_tax_state,
+                       COALESCE(p.professional_tax_monthly,0) AS professional_tax_monthly,
+                       COALESCE(p.tds_monthly,0) AS tds_monthly,
+                       COALESCE(p.tax_regime,'NEW') AS tax_regime,
+                       COALESCE(p.gratuity_applicable,true) AS gratuity_applicable,
+                       p.uan_masked,p.esic_number_masked
+                FROM verigence_attendance.employees e
+                LEFT JOIN verigence_attendance.employee_payroll_profiles p
+                  ON p.employee_id=e.employee_id
+                 AND p.effective_from<=CURRENT_DATE
+                 AND (p.effective_to IS NULL OR p.effective_to>=CURRENT_DATE)
+                WHERE e.employment_status='ACTIVE'
+                ORDER BY e.employee_id,p.effective_from DESC NULLS LAST
+                """
+            )
+        ).mappings()
+    ]
+
+
+def upsert_payroll_profile(
+    connection: Connection,
+    *,
+    employee_id: UUID,
+    effective_from: date,
+    pf_applicable: bool,
+    pf_on_actual_wages: bool,
+    esi_applicable: bool,
+    professional_tax_state: str | None,
+    professional_tax_monthly: Decimal,
+    tds_monthly: Decimal,
+    tax_regime: str,
+    gratuity_applicable: bool,
+    uan_masked: str | None,
+    esic_number_masked: str | None,
+    actor_user_id: str,
+) -> dict[str, Any]:
+    exists = connection.execute(
+        text(
+            """
+            SELECT 1 FROM verigence_attendance.employees
+            WHERE employee_id=:employee_id
+            """
+        ),
+        {"employee_id": employee_id},
+    ).scalar_one_or_none()
+    if exists is None:
+        raise AttendanceNotFoundError("Employee not found.")
+    if professional_tax_monthly < 0 or tds_monthly < 0:
+        raise AttendanceRuleError(
+            "PAYROLL_PROFILE_AMOUNT_INVALID",
+            "Professional Tax and TDS cannot be negative.",
+            status_code=400,
+        )
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.employee_payroll_profiles
+            SET effective_to=:previous_to,updated_at_utc=now()
+            WHERE employee_id=:employee_id
+              AND effective_from<:effective_from
+              AND (effective_to IS NULL OR effective_to>=:effective_from)
+            """
+        ),
+        {
+            "employee_id": employee_id,
+            "effective_from": effective_from,
+            "previous_to": effective_from - timedelta(days=1),
+        },
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.employee_payroll_profiles (
+                employee_id,effective_from,pf_applicable,pf_on_actual_wages,
+                esi_applicable,professional_tax_state,professional_tax_monthly,
+                tds_monthly,tax_regime,gratuity_applicable,uan_masked,
+                esic_number_masked,created_by_user_id
+            ) VALUES (
+                :employee_id,:effective_from,:pf_applicable,:pf_on_actual_wages,
+                :esi_applicable,:pt_state,:pt_amount,:tds_amount,:tax_regime,
+                :gratuity_applicable,:uan,:esic,CAST(:actor AS uuid)
+            )
+            ON CONFLICT (employee_id,effective_from) DO UPDATE SET
+                pf_applicable=EXCLUDED.pf_applicable,
+                pf_on_actual_wages=EXCLUDED.pf_on_actual_wages,
+                esi_applicable=EXCLUDED.esi_applicable,
+                professional_tax_state=EXCLUDED.professional_tax_state,
+                professional_tax_monthly=EXCLUDED.professional_tax_monthly,
+                tds_monthly=EXCLUDED.tds_monthly,
+                tax_regime=EXCLUDED.tax_regime,
+                gratuity_applicable=EXCLUDED.gratuity_applicable,
+                uan_masked=EXCLUDED.uan_masked,
+                esic_number_masked=EXCLUDED.esic_number_masked,
+                updated_at_utc=now()
+            """
+        ),
+        {
+            "employee_id": employee_id,
+            "effective_from": effective_from,
+            "pf_applicable": pf_applicable,
+            "pf_on_actual_wages": pf_on_actual_wages,
+            "esi_applicable": esi_applicable,
+            "pt_state": (professional_tax_state or "").strip().upper() or None,
+            "pt_amount": professional_tax_monthly,
+            "tds_amount": tds_monthly,
+            "tax_regime": tax_regime,
+            "gratuity_applicable": gratuity_applicable,
+            "uan": (uan_masked or "").strip() or None,
+            "esic": (esic_number_masked or "").strip() or None,
+            "actor": actor_user_id,
+        },
+    )
+    return payroll_profile_for_month(
+        connection,
+        employee_id=employee_id,
+        month=effective_from,
+    )
+
+
 def _present_days(
     connection: Connection,
     *,
@@ -193,7 +560,9 @@ def _leave_days(
     rows = connection.execute(
         text(
             """
-            SELECT l.start_date,l.end_date,l.requested_days,lt.is_paid
+            SELECT l.start_date,l.end_date,
+                   COALESCE(l.hr_approved_days,l.requested_days) AS approved_days,
+                   lt.is_paid
             FROM verigence_attendance.leave_requests l
             JOIN verigence_attendance.leave_types lt ON lt.leave_type_id=l.leave_type_id
             WHERE l.employee_id=:employee_id
@@ -218,13 +587,58 @@ def _leave_days(
         ]
         if not full_scheduled:
             continue
-        requested = Decimal(str(row["requested_days"]))
-        credited = min(requested, Decimal(len(full_scheduled)))
+        approved = Decimal(str(row["approved_days"]))
+        credited = min(approved, Decimal(len(full_scheduled)))
         if bool(row["is_paid"]):
             paid += credited
         else:
             unpaid += credited
     return paid, unpaid
+
+
+def _assert_payroll_ready(
+    connection: Connection,
+    *,
+    month: date,
+) -> None:
+    start = _month_start(month)
+    end = _month_end(month)
+    pending_attendance = connection.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM verigence_attendance.attendance_days
+            WHERE attendance_date BETWEEN :start AND :end
+              AND hr_review_status='PENDING_HR'
+            """
+        ),
+        {"start": start, "end": end},
+    ).scalar_one()
+    if int(pending_attendance or 0) > 0:
+        raise AttendanceRuleError(
+            "PAYROLL_ATTENDANCE_REVIEW_PENDING",
+            f"{pending_attendance} attendance day(s) still require HR review for this payroll month.",
+            status_code=409,
+        )
+
+    pending_leave = connection.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM verigence_attendance.leave_requests
+            WHERE status IN ('PENDING_OPERATIONAL','PENDING_HR')
+              AND end_date>=:start
+              AND start_date<=:end
+            """
+        ),
+        {"start": start, "end": end},
+    ).scalar_one()
+    if int(pending_leave or 0) > 0:
+        raise AttendanceRuleError(
+            "PAYROLL_LEAVE_REVIEW_PENDING",
+            f"{pending_leave} leave request(s) still require approval for this payroll month.",
+            status_code=409,
+        )
 
 
 def generate_payroll(
@@ -234,6 +648,7 @@ def generate_payroll(
     actor_user_id: str,
 ) -> dict[str, object]:
     month = _month_start(payroll_month)
+    _assert_payroll_ready(connection, month=month)
     existing = connection.execute(
         text(
             """
@@ -334,14 +749,103 @@ def generate_payroll(
             + salary["other_earnings"]
         )
         ratio = payable / scheduled_days if scheduled_days else Decimal(0)
-        gross = _money(monthly_gross * ratio)
+        basic = _money(salary["basic_salary"] * ratio)
+        hra = _money(salary["hra"] * ratio)
+        allowances = _money(salary["allowances"] * ratio)
+        other_earnings = _money(salary["other_earnings"] * ratio)
+        gross = _money(basic + hra + allowances + other_earnings)
+        lop_amount = _money(max(Decimal(0), monthly_gross - gross))
+
+        statutory = statutory_config_for_month(connection, month=month)
+        profile = payroll_profile_for_month(
+            connection,
+            employee_id=employee_id,
+            month=month,
+        )
+
+        pf_employee_rate = Decimal(str(statutory["pf_employee_rate"]))
+        pf_employer_rate = Decimal(str(statutory["pf_employer_rate"]))
+        pf_ceiling = Decimal(str(statutory["pf_wage_ceiling"]))
+        eps_rate = Decimal(str(statutory["eps_employer_rate"]))
+        eps_ceiling = Decimal(str(statutory["eps_wage_ceiling"]))
+        esi_employee_rate = Decimal(str(statutory["esi_employee_rate"]))
+        esi_employer_rate = Decimal(str(statutory["esi_employer_rate"]))
+        esi_ceiling = Decimal(str(statutory["esi_wage_ceiling"]))
+        gratuity_rate = Decimal(str(statutory["gratuity_provision_rate"]))
+
+        pf_wage = basic
+        if not bool(profile["pf_on_actual_wages"]):
+            pf_wage = min(pf_wage, pf_ceiling)
+        employee_pf = (
+            _money(pf_wage * pf_employee_rate)
+            if bool(profile["pf_applicable"])
+            else Decimal(0)
+        )
+        employer_pf_total = (
+            _money(pf_wage * pf_employer_rate)
+            if bool(profile["pf_applicable"])
+            else Decimal(0)
+        )
+        employer_eps = (
+            _money(min(basic, eps_ceiling) * eps_rate)
+            if bool(profile["pf_applicable"])
+            else Decimal(0)
+        )
+        employer_eps = min(employer_eps, employer_pf_total)
+        employer_pf = _money(max(Decimal(0), employer_pf_total - employer_eps))
+
+        esi_eligible = (
+            bool(profile["esi_applicable"])
+            and monthly_gross <= esi_ceiling
+        )
+        employee_esi = _money(gross * esi_employee_rate) if esi_eligible else Decimal(0)
+        employer_esi = _money(gross * esi_employer_rate) if esi_eligible else Decimal(0)
+
+        professional_tax = _money(Decimal(str(profile["professional_tax_monthly"] or 0)))
+        tds_amount = _money(Decimal(str(profile["tds_monthly"] or 0)))
         fixed_deduction = salary["fixed_deductions"]
-        deduction = _money(fixed_deduction * ratio if prorate_deductions else fixed_deduction)
+        other_deductions = _money(
+            fixed_deduction * ratio if prorate_deductions else fixed_deduction
+        )
+        deduction = _money(
+            employee_pf
+            + employee_esi
+            + professional_tax
+            + tds_amount
+            + other_deductions
+        )
+        gratuity_provision = (
+            _money(basic * gratuity_rate)
+            if bool(profile["gratuity_applicable"])
+            else Decimal(0)
+        )
+        employer_cost = _money(
+            gross + employer_pf + employer_eps + employer_esi + gratuity_provision
+        )
         net = _money(max(Decimal(0), gross - deduction))
         calculation = {
             "monthlyGross": str(_money(monthly_gross)),
             "ratio": str(ratio.quantize(Decimal("0.0001"))),
             "salary": {key: str(_money(value)) for key, value in salary.items()},
+            "statutory": {
+                "pfEmployeeRate": str(pf_employee_rate),
+                "pfEmployerRate": str(pf_employer_rate),
+                "pfWageCeiling": str(pf_ceiling),
+                "epsEmployerRate": str(eps_rate),
+                "epsWageCeiling": str(eps_ceiling),
+                "esiEmployeeRate": str(esi_employee_rate),
+                "esiEmployerRate": str(esi_employer_rate),
+                "esiWageCeiling": str(esi_ceiling),
+                "salaryTdsSection": statutory["salary_tds_section"],
+            },
+            "payrollProfile": {
+                "pfApplicable": bool(profile["pf_applicable"]),
+                "pfOnActualWages": bool(profile["pf_on_actual_wages"]),
+                "esiApplicable": bool(profile["esi_applicable"]),
+                "professionalTaxState": profile.get("professional_tax_state"),
+                "taxRegime": profile["tax_regime"],
+                "gratuityApplicable": bool(profile["gratuity_applicable"]),
+            },
             "weeklyOffIsoWeekdays": sorted(_weekly_offs(connection)),
         }
         connection.execute(
@@ -350,10 +854,18 @@ def generate_payroll(
                 INSERT INTO verigence_attendance.payroll_items (
                     payroll_run_id,employee_id,scheduled_days,present_days,
                     paid_leave_days,unpaid_leave_days,payable_days,gross_amount,
-                    deduction_amount,net_amount,calculation_json
+                    deduction_amount,net_amount,calculation_json,
+                    basic_amount,hra_amount,allowances_amount,other_earnings_amount,
+                    lop_amount,employee_pf,employee_esi,professional_tax,tds_amount,
+                    other_deductions,employer_pf,employer_eps,employer_esi,
+                    gratuity_provision,employer_cost
                 ) VALUES (
                     :run_id,:employee_id,:scheduled,:present,:paid_leave,:unpaid_leave,
-                    :payable,:gross,:deduction,:net,CAST(:calculation AS jsonb)
+                    :payable,:gross,:deduction,:net,CAST(:calculation AS jsonb),
+                    :basic,:hra,:allowances,:other_earnings,:lop_amount,
+                    :employee_pf,:employee_esi,:professional_tax,:tds_amount,
+                    :other_deductions,:employer_pf,:employer_eps,:employer_esi,
+                    :gratuity_provision,:employer_cost
                 )
                 """
             ),
@@ -369,6 +881,21 @@ def generate_payroll(
                 "deduction": deduction,
                 "net": net,
                 "calculation": json.dumps(calculation),
+                "basic": basic,
+                "hra": hra,
+                "allowances": allowances,
+                "other_earnings": other_earnings,
+                "lop_amount": lop_amount,
+                "employee_pf": employee_pf,
+                "employee_esi": employee_esi,
+                "professional_tax": professional_tax,
+                "tds_amount": tds_amount,
+                "other_deductions": other_deductions,
+                "employer_pf": employer_pf,
+                "employer_eps": employer_eps,
+                "employer_esi": employer_esi,
+                "gratuity_provision": gratuity_provision,
+                "employer_cost": employer_cost,
             },
         )
         item_count += 1
@@ -475,9 +1002,29 @@ def finalize_payroll(
             f"Unpaid Leave Days: {item['unpaid_leave_days']}",
             f"Payable Days: {item['payable_days']}",
             "",
+            "EARNINGS",
+            f"Basic: INR {item['basic_amount']}",
+            f"HRA: INR {item['hra_amount']}",
+            f"Allowances: INR {item['allowances_amount']}",
+            f"Other Earnings: INR {item['other_earnings_amount']}",
             f"Gross Pay: INR {item['gross_amount']}",
-            f"Deductions: INR {item['deduction_amount']}",
+            f"LOP Impact: INR {item['lop_amount']}",
+            "",
+            "DEDUCTIONS",
+            f"Employee PF: INR {item['employee_pf']}",
+            f"Employee ESI: INR {item['employee_esi']}",
+            f"Professional Tax: INR {item['professional_tax']}",
+            f"TDS: INR {item['tds_amount']}",
+            f"Other Deductions: INR {item['other_deductions']}",
+            f"Total Deductions: INR {item['deduction_amount']}",
             f"Net Pay: INR {item['net_amount']}",
+            "",
+            "EMPLOYER CONTRIBUTIONS / PROVISIONS",
+            f"Employer PF: INR {item['employer_pf']}",
+            f"Employer EPS: INR {item['employer_eps']}",
+            f"Employer ESI: INR {item['employer_esi']}",
+            f"Gratuity Provision: INR {item['gratuity_provision']}",
+            f"Employer Cost: INR {item['employer_cost']}",
             "",
             "System-generated payslip.",
         ]
