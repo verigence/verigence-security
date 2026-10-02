@@ -111,12 +111,19 @@ class LeaveCreateRequest(BaseModel):
     leaveTypeId: UUID
     startDate: date
     endDate: date
-    requestedDays: Decimal = Field(gt=0)
+    dayMode: Literal["FULL_DAY", "HALF_DAY"] = "FULL_DAY"
+    halfDaySession: Literal["FIRST_HALF", "SECOND_HALF"] | None = None
     reason: str | None = Field(default=None, max_length=2000)
 
 
 class LeaveDecisionRequest(BaseModel):
     decision: Literal["APPROVE", "REJECT"]
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class LeaveHrDecisionRequest(BaseModel):
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    approvedDays: Decimal | None = Field(default=None, gt=0)
     comment: str | None = Field(default=None, max_length=2000)
 
 
@@ -129,6 +136,11 @@ class LeaveRequestResponse(BaseModel):
     startDate: date
     endDate: date
     requestedDays: Decimal
+    calculatedDays: Decimal
+    dayMode: Literal["FULL_DAY", "HALF_DAY"]
+    halfDaySession: Literal["FIRST_HALF", "SECOND_HALF"] | None = None
+    approvedDays: Decimal | None = None
+    approvalOutcome: Literal["APPROVED", "ADJUSTED", "REJECTED"] | None = None
     reason: str | None = None
     status: str
     createdAtUtc: datetime
@@ -346,6 +358,10 @@ class LeaveTypeCreateRequest(BaseModel):
     isPaid: bool = True
     defaultEntitlementDays: Decimal = Field(default=Decimal(0), ge=0)
     allowHalfDay: bool = True
+    minNoticeDays: int = Field(default=0, ge=0, le=365)
+    maxConsecutiveDays: Decimal | None = Field(default=None, gt=0)
+    requiresReason: bool = True
+    allowNegativeBalance: bool = False
 
 
 class LeaveTypeResponse(BaseModel):
@@ -355,6 +371,10 @@ class LeaveTypeResponse(BaseModel):
     isPaid: bool
     defaultEntitlementDays: Decimal
     allowHalfDay: bool
+    minNoticeDays: int = 0
+    maxConsecutiveDays: Decimal | None = None
+    requiresReason: bool = True
+    allowNegativeBalance: bool = False
     status: str
 
 
