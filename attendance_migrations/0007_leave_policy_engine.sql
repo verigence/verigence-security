@@ -49,6 +49,25 @@ BEGIN
   END IF;
 END $$;
 
+CREATE TABLE IF NOT EXISTS verigence_attendance.leave_review_actions (
+  leave_review_action_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  leave_request_id uuid NOT NULL
+    REFERENCES verigence_attendance.leave_requests(leave_request_id) ON DELETE CASCADE,
+  stage varchar(20) NOT NULL CHECK (stage IN ('TL_OR_PMO','HR','EMPLOYEE')),
+  decision varchar(24) NOT NULL
+    CHECK (decision IN ('APPROVE','ADJUST','REJECT','CANCEL')),
+  approved_days numeric(6,2),
+  actor_user_id uuid NOT NULL,
+  actor_role varchar(40) NOT NULL,
+  comment text,
+  decided_at_utc timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_va_leave_review_actions
+  ON verigence_attendance.leave_review_actions(
+    leave_request_id,decided_at_utc
+  );
+
 UPDATE verigence_attendance.leave_requests
 SET calculated_days=COALESCE(calculated_days,requested_days),
     hr_approved_days=COALESCE(
