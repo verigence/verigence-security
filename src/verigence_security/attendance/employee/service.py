@@ -16,6 +16,7 @@ from verigence_security.attendance.employee.domain import (
 from verigence_security.attendance.employee.errors import AttendanceRuleError
 from verigence_security.attendance.employee.repository import (
     create_reimbursement,
+    create_reimbursement_claim,
     employee_for_user,
     insert_attendance_event,
     lock_attendance_day,
@@ -196,6 +197,191 @@ def record_attendance(
         "distanceMeters": round(distance, 2),
         "geofenceRadiusMeters": radius,
     }
+
+
+
+def submit_reimbursement_claim(
+    connection: Connection,
+    *,
+    user_id: str,
+    purpose: str,
+    lines: list[dict[str, object]],
+    receipts: list[tuple[bytes, str | None]],
+    storage: AttendanceStorage,
+) -> dict[str, object]:
+    employee = employee_for_user(connection, user_id)
+    normalized_purpose = purpose.strip()
+    if not normalized_purpose:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_PURPOSE_REQUIRED",
+            "Claim purpose is required.",
+            status_code=400,
+        )
+    if not lines or len(lines) > 50:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_LINES_INVALID",
+            "A claim must contain between 1 and 50 expense lines.",
+            status_code=400,
+        )
+
+    months = {
+        (line["expense_date"].year, line["expense_date"].month)
+        for line in lines
+        if isinstance(line.get("expense_date"), date)
+    }
+    if len(months) != 1:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_MONTH_MIXED",
+            "All expense lines in one claim must belong to the same calendar month.",
+            status_code=400,
+        )
+
+    receipt_indexes: set[int] = set()
+    prepared: list[dict[str, object]] = []
+    claimed_total = Decimal(0)
+
+    for line_number, line in enumerate(lines, start=1):
+        category = str(line["category"]).strip().upper()
+        amount = Decimal(str(line["claimed_amount"]))
+        if amount <= 0:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_AMOUNT_INVALID",
+                f"Expense line {line_number} amount must be greater than zero.",
+                status_code=400,
+            )
+
+        travel_from = (str(line.get("travel_from") or "").strip() or None)
+        travel_to = (str(line.get("travel_to") or "").strip() or None)
+        transport_mode = (str(line.get("transport_mode") or "").strip().upper() or None)
+        vendor_name = (str(line.get("vendor_name") or "").strip() or None)
+        meal_type = (str(line.get("meal_type") or "").strip().upper() or None)
+        description = (str(line.get("description") or "").strip() or None)
+
+        if category in {"TRAVEL", "LOCAL_CONVEYANCE"}:
+            if not travel_from or not travel_to or not transport_mode:
+                raise AttendanceRuleError(
+                    "REIMBURSEMENT_TRAVEL_DETAILS_REQUIRED",
+                    f"Expense line {line_number} requires From, To and mode of transport.",
+                    status_code=400,
+                )
+        if category == "FOOD" and not meal_type:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_MEAL_TYPE_REQUIRED",
+                f"Expense line {line_number} requires a meal type.",
+                status_code=400,
+            )
+        if category == "LODGING" and not vendor_name:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_LODGING_VENDOR_REQUIRED",
+                f"Expense line {line_number} requires the hotel/vendor name.",
+                status_code=400,
+            )
+
+        receipt_key: str | None = None
+        receipt_sha: str | None = None
+        receipt_index = line.get("receipt_index")
+        if receipt_index is not None:
+            index = int(receipt_index)
+            if index < 0 or index >= len(receipts):
+                raise AttendanceRuleError(
+                    "REIMBURSEMENT_RECEIPT_INDEX_INVALID",
+                    f"Expense line {line_number} references an invalid receipt.",
+                    status_code=400,
+                )
+            if index in receipt_indexes:
+                raise AttendanceRuleError(
+                    "REIMBURSEMENT_RECEIPT_REUSED",
+                    "Each uploaded receipt must belong to only one expense line.",
+                    status_code=400,
+                )
+            receipt_indexes.add(index)
+            receipt_data, receipt_type = receipts[index]
+            content_type = (receipt_type or "").strip().lower()
+            if content_type not in _ALLOWED_RECEIPT_TYPES:
+                raise AttendanceRuleError(
+                    "RECEIPT_TYPE_INVALID",
+                    f"Expense line {line_number} receipt must be a photo or PDF.",
+                    status_code=400,
+                )
+            if not receipt_data or len(receipt_data) > _MAX_RECEIPT_BYTES:
+                raise AttendanceRuleError(
+                    "RECEIPT_SIZE_INVALID",
+                    f"Expense line {line_number} receipt is empty or too large.",
+                    status_code=400,
+                )
+            receipt_id = uuid4()
+            extension = (
+                "pdf"
+                if content_type == "application/pdf"
+                else content_type.split("/")[-1]
+            )
+            receipt_key = (
+                f"employee-reimbursement-items/{employee['employee_id']}/"
+                f"{line['expense_date'].isoformat()}/{receipt_id}.{extension}"
+            )
+            receipt_sha = hashlib.sha256(receipt_data).hexdigest()
+            try:
+                storage.put(
+                    object_key=receipt_key,
+                    data=receipt_data,
+                    content_type=content_type,
+                )
+            except AttendanceStorageError as exc:
+                raise AttendanceRuleError(
+                    "REIMBURSEMENT_STORAGE_UNAVAILABLE",
+                    "Could not store an expense receipt. Please retry.",
+                    status_code=503,
+                ) from exc
+        elif not description:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_EVIDENCE_REQUIRED",
+                f"Expense line {line_number} needs either a receipt or a description.",
+                status_code=400,
+            )
+
+        prepared.append(
+            {
+                "expense_date": line["expense_date"],
+                "category": category,
+                "claimed_amount": amount,
+                "vendor_name": vendor_name,
+                "description": description,
+                "receipt_object_key": receipt_key,
+                "receipt_sha256": receipt_sha,
+                "travel_from": travel_from,
+                "travel_to": travel_to,
+                "transport_mode": transport_mode,
+                "distance_km": line.get("distance_km"),
+                "ticket_reference": (
+                    str(line.get("ticket_reference") or "").strip() or None
+                ),
+                "meal_type": meal_type,
+            }
+        )
+        claimed_total += amount
+
+    first_date = min(item["expense_date"] for item in prepared)
+    claim_month = first_date.replace(day=1)
+    employee_id = UUID(str(employee["employee_id"]))
+    month_total = month_claim_total(
+        connection,
+        employee_id=employee_id,
+        expense_date=first_date,
+    )
+    threshold = reimbursement_threshold(connection)
+    needs_finance = finance_approval_required(
+        month_total,
+        claimed_total,
+        threshold,
+    )
+    return create_reimbursement_claim(
+        connection,
+        employee_id=employee_id,
+        purpose=normalized_purpose,
+        claim_month=claim_month,
+        items=prepared,
+        finance_required=needs_finance,
+    )
 
 
 def submit_reimbursement(
