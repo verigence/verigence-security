@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import Connection
 
 from verigence_security.attendance.employee.domain import (
+    DEFAULT_GEOFENCE_METERS,
     GeoPoint,
     distance_meters,
     finance_approval_required,
@@ -126,7 +127,11 @@ def record_attendance(
     distance: float | None = None
     geofence_result = "UNVERIFIABLE"
     if work_location_available:
-        radius = int(employee.get("geofence_radius_meters") or 500)
+        radius = (
+            DEFAULT_GEOFENCE_METERS
+            if normalized_role == "PC" and pc_geofence_required
+            else int(employee.get("geofence_radius_meters") or DEFAULT_GEOFENCE_METERS)
+        )
         distance = distance_meters(
             GeoPoint(latitude=latitude, longitude=longitude),
             GeoPoint(
