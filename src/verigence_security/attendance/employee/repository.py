@@ -1785,10 +1785,17 @@ def update_reimbursement_payment(
             "Processed amount must be greater than zero.",
             status_code=400,
         )
-    if paid_amount > Decimal(str(row["amount"])):
+    approved_total = Decimal(
+        str(
+            row.get("approved_total")
+            if row.get("approved_total") is not None
+            else row["amount"]
+        )
+    )
+    if paid_amount != approved_total:
         raise AttendanceRuleError(
             "REIMBURSEMENT_PROCESSED_AMOUNT_INVALID",
-            "Processed amount cannot exceed the approved reimbursement amount.",
+            "Processed amount must exactly match the final approved reimbursement amount.",
             status_code=400,
         )
     if not normalized_mode or not normalized_reference:
