@@ -202,7 +202,9 @@ def list_leave_types(connection: Connection) -> list[dict[str, Any]]:
             text(
                 """
                 SELECT leave_type_id,leave_code,leave_name,is_paid,
-                       default_entitlement_days,allow_half_day,status
+                       default_entitlement_days,allow_half_day,min_notice_days,
+                       max_consecutive_days,requires_reason,allow_negative_balance,
+                       status
                 FROM verigence_attendance.leave_types
                 ORDER BY leave_code
                 """
@@ -219,6 +221,10 @@ def create_leave_type(
     is_paid: bool,
     entitlement_days: Decimal,
     allow_half_day: bool,
+    min_notice_days: int,
+    max_consecutive_days: Decimal | None,
+    requires_reason: bool,
+    allow_negative_balance: bool,
 ) -> dict[str, Any]:
     if entitlement_days < 0:
         raise AttendanceRuleError(
@@ -232,9 +238,12 @@ def create_leave_type(
             """
             INSERT INTO verigence_attendance.leave_types (
                 leave_type_id,leave_code,leave_name,is_paid,
-                default_entitlement_days,allow_half_day
+                default_entitlement_days,allow_half_day,min_notice_days,
+                max_consecutive_days,requires_reason,allow_negative_balance
             ) VALUES (
-                :leave_type_id,:code,:name,:is_paid,:entitlement,:allow_half_day
+                :leave_type_id,:code,:name,:is_paid,:entitlement,:allow_half_day,
+                :min_notice_days,:max_consecutive_days,:requires_reason,
+                :allow_negative_balance
             )
             """
         ),
@@ -245,6 +254,10 @@ def create_leave_type(
             "is_paid": is_paid,
             "entitlement": entitlement_days,
             "allow_half_day": allow_half_day,
+            "min_notice_days": min_notice_days,
+            "max_consecutive_days": max_consecutive_days,
+            "requires_reason": requires_reason,
+            "allow_negative_balance": allow_negative_balance,
         },
     )
     return next(
