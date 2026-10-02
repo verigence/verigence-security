@@ -48,7 +48,7 @@ jobs:
           git fetch --no-tags --depth=2 origin dev
           changed="$(git diff --name-only HEAD^ HEAD || true)"
           printf '%s\n' "$changed"
-          if grep -Eq '^((attendance_migrations/)|(.github/workflows/attendance-dev-deploy.yml$)|(Dockerfile.attendance$)|(scripts/apply_attendance_migrations.py$)|(src/verigence_security/attendance/)|(src/verigence_security/api/attendance_role_schemas.py$)|(src/verigence_security/api/routes/attendance_roles.py$)|(src/verigence_security/services/attendance_module_roles.py$)|(src/verigence_security/services/platform_admin.py$)|(src/verigence_security/services/v2_authorization.py$)|(src/verigence_security/repositories/v2_authorization_repository.py$)|(migrations/0027_attendance_module_rbac.sql$)|(migrations/0028_attendance_global_hradmin.sql$))' <<<"$changed"; then
+          if grep -Eq '^((attendance_migrations/)|(pyproject.toml$)|(.github/workflows/attendance-dev-deploy.yml$)|(Dockerfile.attendance$)|(scripts/apply_attendance_migrations.py$)|(src/verigence_security/attendance/)|(src/verigence_security/api/attendance_role_schemas.py$)|(src/verigence_security/api/routes/attendance_roles.py$)|(src/verigence_security/services/attendance_module_roles.py$)|(src/verigence_security/services/platform_admin.py$)|(src/verigence_security/services/v2_authorization.py$)|(src/verigence_security/repositories/v2_authorization_repository.py$)|(migrations/0027_attendance_module_rbac.sql$)|(migrations/0028_attendance_global_hradmin.sql$))' <<<"$changed"; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
@@ -77,7 +77,7 @@ jobs:
         run: |
           ruff check src/verigence_security/attendance tests/unit/test_attendance_*.py scripts/apply_attendance_migrations.py
           mypy src/verigence_security/attendance
-          pytest -q tests/unit/test_attendance_module_role.py tests/unit/test_attendance_runtime_isolation.py tests/unit/test_attendance_service.py tests/unit/test_attendance_migration_runner.py
+          pytest -q tests/unit/test_attendance_module_role.py tests/unit/test_attendance_runtime_isolation.py tests/unit/test_attendance_service.py tests/unit/test_attendance_migration_runner.py tests/unit/test_attendance_employee_module.py
 
       - name: Install PostgreSQL client and Railway CLI
         if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
@@ -130,6 +130,18 @@ jobs:
                 AND EXISTS (
                   SELECT 1 FROM security.permissions
                   WHERE permission_key='attendance.self.checkin' AND status='ACTIVE'
+                )
+                AND EXISTS (
+                  SELECT 1 FROM security.permissions
+                  WHERE permission_key='attendance.employee.manage' AND status='ACTIVE'
+                )
+                AND EXISTS (
+                  SELECT 1 FROM security.permissions
+                  WHERE permission_key='attendance.reimbursement.finance.approve' AND status='ACTIVE'
+                )
+                AND EXISTS (
+                  SELECT 1 FROM security.module_roles
+                  WHERE module_key='attendance' AND role_key='FINANCEADMIN' AND status='ACTIVE'
                 ) THEN 'READY' ELSE 'WAIT' END;
             ")"
             if [ "$ready" = 'READY' ]; then
@@ -154,25 +166,26 @@ jobs:
               AND to_regclass('attendance.attendance_event') IS NOT NULL
               AND to_regclass('attendance.policy') IS NOT NULL
               AND to_regclass('attendance.correction') IS NOT NULL
+              AND to_regclass('verigence_attendance.employees') IS NOT NULL
+              AND to_regclass('verigence_attendance.payroll_runs') IS NOT NULL
+              AND to_regclass('verigence_attendance.binary_objects') IS NOT NULL
               THEN 'READY' ELSE 'MISSING' END;
           ")"
           [ "$tables" = 'READY' ] || { echo '::error::Attendance schema verification failed.'; exit 1; }
 
-      - name: Ensure separate Railway Attendance service exists
+      - name: Require existing Railway Attendance service
         if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
         shell: bash
         run: |
           set -euo pipefail
           env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
           service_id="$(jq -r --arg name "$ATTENDANCE_SERVICE" '[.[] | select(.name == $name)] | first | .id // empty' /tmp/services.json)"
-          if [ -z "$service_id" ]; then
-            env -u RAILWAY_TOKEN railway add --service "$ATTENDANCE_SERVICE" --json >/tmp/attendance-service-create.json
-            env -u RAILWAY_TOKEN railway service list --json >/tmp/services.json
-            service_id="$(jq -r --arg name "$ATTENDANCE_SERVICE" '[.[] | select(.name == $name)] | first | .id // empty' /tmp/services.json)"
-          fi
-          [ -n "$service_id" ] || { echo '::error::Attendance Railway service could not be resolved.'; exit 1; }
+          [ -n "$service_id" ] || {
+            echo '::error::Existing Railway attendance service is missing. This workflow is not allowed to create another service.'
+            exit 1
+          }
           echo "ATTENDANCE_RAILWAY_SERVICE_ID=$service_id" >> "$GITHUB_ENV"
-          echo "ATTENDANCE_SERVICE_ISOLATION=PASS service_id=$service_id"
+          echo "ATTENDANCE_EXISTING_SERVICE=PASS service_id=$service_id"
 
       - name: Resolve isolated Attendance runtime configuration
         if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
@@ -346,7 +359,7 @@ jobs:
             --ci
           echo 'ATTENDANCE_RAILWAY_DEPLOY_SUBMITTED=PASS'
 
-      - name: Resolve/create Attendance public domain and smoke test
+      - name: Resolve existing Attendance public domain and smoke test
         if: github.event_name == 'workflow_dispatch' || steps.scope.outputs.deploy == 'true'
         shell: bash
         run: |
@@ -357,14 +370,10 @@ jobs:
           body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
           response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
           domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
-          if [ -z "$domain" ]; then
-            mutation='mutation serviceDomainCreate($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }'
-            vars="$(jq -cn --arg environment "$PLATFORM_ENVIRONMENT_ID" --arg service "$ATTENDANCE_RAILWAY_SERVICE_ID" '{input:{environmentId:$environment,serviceId:$service}}')"
-            body="$(jq -cn --arg query "$mutation" --argjson variables "$vars" '{query:$query,variables:$variables}')"
-            response="$(curl --fail-with-body --silent --show-error --request POST --url 'https://backboard.railway.com/graphql/v2' --header "Project-Access-Token: $RAILWAY_TOKEN" --header 'Content-Type: application/json' --data "$body")"
-            domain="$(printf '%s' "$response" | jq -r '.data.serviceDomainCreate.domain // empty')"
-          fi
-          [ -n "$domain" ] || { echo '::error::Attendance DEV domain could not be resolved.'; exit 1; }
+          [ -n "$domain" ] || {
+            echo '::error::Existing Attendance DEV domain is missing. This workflow is not allowed to create a new service/domain.'
+            exit 1
+          }
           base="https://$domain"
           echo "Attendance DEV URL: $base"
           last_ready='000'
@@ -375,7 +384,22 @@ jobs:
               curl --fail --silent --show-error "$base/health" >/tmp/attendance-health.json
               jq -e '.service == "attendance" and .status == "ok"' /tmp/attendance-health.json >/dev/null
               jq -e '.service == "attendance" and .status == "ready"' /tmp/attendance-ready.json >/dev/null
+
+              old_code="$(curl --silent --show-error --output /tmp/old-attendance-probe.json --write-out '%{http_code}'                 "$base/attendance/v1/tenants/00000000-0000-0000-0000-000000000000/me/today" || true)"
+              [ "$old_code" = '401' ] || {
+                echo "::error::Existing /attendance/v1 contract is not reachable after unified deployment; HTTP=$old_code"
+                exit 1
+              }
+
+              employee_code="$(curl --silent --show-error --output /tmp/employee-attendance-probe.json --write-out '%{http_code}'                 "$base/employee-attendance/v1/me" || true)"
+              [ "$employee_code" = '401' ] || {
+                echo "::error::New /employee-attendance/v1 contract is not reachable; HTTP=$employee_code"
+                exit 1
+              }
+
               echo "ATTENDANCE_DEV_URL=$base" >> "$GITHUB_ENV"
+              echo 'ATTENDANCE_LEGACY_API=PASS'
+              echo 'ATTENDANCE_EMPLOYEE_API=PASS'
               echo 'ATTENDANCE_DEPLOYMENT=PASS'
               exit 0
             fi
