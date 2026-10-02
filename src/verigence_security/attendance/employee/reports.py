@@ -7,13 +7,13 @@ from uuid import UUID
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy import Connection, text
 
 from verigence_security.attendance.employee.errors import AttendanceNotFoundError
 
 
-def _format_sheet(sheet: object) -> None:
-    worksheet = sheet
+def _format_sheet(worksheet: Worksheet) -> None:
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
     for cell in worksheet[1]:
