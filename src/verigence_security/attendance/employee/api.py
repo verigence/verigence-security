@@ -37,6 +37,7 @@ from verigence_security.attendance.employee.payroll import (
 from verigence_security.attendance.employee.reports import attendance_report, payroll_report
 from verigence_security.attendance.employee.repository import (
     attendance_history,
+    attendance_supervisory_role,
     create_employee,
     create_leave_request,
     decide_hr_leave,
@@ -45,6 +46,7 @@ from verigence_security.attendance.employee.repository import (
     employee_for_user,
     leave_balances_for_employee,
     list_employees,
+    list_hr_attendance_reviews,
     list_leave_by_status,
     list_leave_for_employee,
     list_payslips,
@@ -57,6 +59,7 @@ from verigence_security.attendance.employee.repository import (
     list_reimbursements_for_employee,
     list_team_attendance,
     list_team_leave,
+    resolve_attendance_review,
     review_reimbursement_claim,
     update_reimbursement_payment,
 )
@@ -64,6 +67,8 @@ from verigence_security.attendance.employee.schemas import (
     AdminCapabilities,
     AttendanceDayResponse,
     AttendanceEventResponse,
+    AttendanceHrDecisionRequest,
+    AttendanceHrReviewResponse,
     BulkImportResponse,
     ConfigUpdateRequest,
     EmployeeCreateRequest,
@@ -140,6 +145,66 @@ def _employee_profile(row: dict[str, Any]) -> EmployeeProfile:
         projectTenantId=row.get("project_tenant_id"),
         workLocationId=row.get("work_location_id"),
         workLocationName=row.get("location_name"),
+    )
+
+
+def _attendance_actor_role(
+    connection: Connection,
+    principal: HumanPrincipal,
+    event_type: str,
+) -> str:
+    client = security_client()
+    if client.allowed(
+        user_id=principal.subject,
+        permission_key="attendance.exception.resolve",
+    ):
+        return "HRADMIN"
+
+    employee = employee_for_user(connection, principal.subject)
+    tenant_id = employee.get("project_tenant_id")
+    if tenant_id is not None:
+        permission = (
+            "attendance.self.checkin"
+            if event_type == "CHECK_IN"
+            else "attendance.self.checkout"
+        )
+        auth = client.require(
+            user_id=principal.subject,
+            permission_key=permission,
+            tenant_id=tenant_id,
+        )
+        role_key = str(auth.get("roleKey") or "").upper()
+        if role_key in {"TL", "PM"}:
+            return role_key
+        return "PC"
+
+    fallback = attendance_supervisory_role(connection, principal.subject)
+    return fallback if fallback in {"TL", "PM"} else "PC"
+
+
+def _attendance_review(row: dict[str, Any]) -> AttendanceHrReviewResponse:
+    return AttendanceHrReviewResponse(
+        attendanceDayId=row["attendance_day_id"],
+        employeeId=row["employee_id"],
+        employeeCode=row["employee_code"],
+        employeeName=row["display_name"],
+        attendanceDate=row["attendance_date"],
+        presentFraction=row["present_fraction"],
+        checkInAtUtc=row.get("check_in_at_utc"),
+        checkOutAtUtc=row.get("check_out_at_utc"),
+        hrReviewStatus=row["hr_review_status"],
+        hrReviewComment=row.get("hr_review_comment"),
+        flags=[
+            {
+                "attendanceFlagId": flag["attendance_flag_id"],
+                "flagType": flag["flag_type"],
+                "flagDetail": flag.get("flag_detail"),
+                "employeeReason": flag.get("employee_reason"),
+                "resolutionStatus": flag["resolution_status"],
+                "createdAtUtc": flag["created_at_utc"],
+            }
+            for flag in row.get("flags", [])
+        ],
     )
 
 
@@ -271,11 +336,14 @@ def my_attendance(
     )
     return [
         AttendanceDayResponse(
+            attendanceDayId=row["attendance_day_id"],
             attendanceDate=row["attendance_date"],
             status=row["status"],
             presentFraction=row["present_fraction"],
             checkInAtUtc=row.get("check_in_at_utc"),
             checkOutAtUtc=row.get("check_out_at_utc"),
+            hrReviewStatus=row.get("hr_review_status") or "NOT_REQUIRED",
+            hrReviewComment=row.get("hr_review_comment"),
         )
         for row in rows
     ]
@@ -291,8 +359,10 @@ async def _attendance_action(
     accuracy_meters: float,
     captured_at: datetime,
     photo: UploadFile,
+    exception_reason: str | None,
 ) -> AttendanceEventResponse:
     data = await photo.read()
+    actor_role = _attendance_actor_role(connection, principal, event_type)
     result = record_attendance(
         connection,
         user_id=principal.subject,
@@ -303,6 +373,8 @@ async def _attendance_action(
         captured_at=captured_at,
         photo_data=data,
         photo_content_type=(photo.content_type or "").lower(),
+        actor_role=actor_role,
+        exception_reason=exception_reason,
         storage=storage(),
     )
     return AttendanceEventResponse.model_validate(result)
@@ -317,6 +389,7 @@ async def check_in(
     accuracyMeters: Annotated[float, Form(ge=0)],
     capturedAt: Annotated[datetime, Form()],
     photo: Annotated[UploadFile, File(...)],
+    exceptionReason: Annotated[str | None, Form(max_length=2000)] = None,
 ) -> AttendanceEventResponse:
     return await _attendance_action(
         event_type="CHECK_IN",
@@ -327,6 +400,7 @@ async def check_in(
         accuracy_meters=accuracyMeters,
         captured_at=capturedAt,
         photo=photo,
+        exception_reason=exceptionReason,
     )
 
 
@@ -339,6 +413,7 @@ async def check_out(
     accuracyMeters: Annotated[float, Form(ge=0)],
     capturedAt: Annotated[datetime, Form()],
     photo: Annotated[UploadFile, File(...)],
+    exceptionReason: Annotated[str | None, Form(max_length=2000)] = None,
 ) -> AttendanceEventResponse:
     return await _attendance_action(
         event_type="CHECK_OUT",
@@ -349,6 +424,7 @@ async def check_out(
         accuracy_meters=accuracyMeters,
         captured_at=capturedAt,
         photo=photo,
+        exception_reason=exceptionReason,
     )
 
 
@@ -443,6 +519,7 @@ def team_attendance(
             presentFraction=row["present_fraction"] or Decimal(0),
             checkInAtUtc=row.get("check_in_at_utc"),
             checkOutAtUtc=row.get("check_out_at_utc"),
+            hrReviewStatus=row.get("hr_review_status") or "NOT_REQUIRED",
         )
         for row in list_team_attendance(
             connection,
@@ -477,6 +554,47 @@ def team_leave_decision(
         )
     )
 
+
+
+@router.get(
+    "/admin/attendance/reviews",
+    response_model=list[AttendanceHrReviewResponse],
+)
+def hr_attendance_review_queue(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[AttendanceHrReviewResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.exception.resolve",
+    )
+    return [_attendance_review(row) for row in list_hr_attendance_reviews(connection)]
+
+
+@router.post(
+    "/admin/attendance/{attendance_day_id}/review",
+    response_model=AttendanceHrReviewResponse,
+)
+def hr_attendance_review_decision(
+    attendance_day_id: UUID,
+    body: AttendanceHrDecisionRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> AttendanceHrReviewResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.exception.resolve",
+    )
+    return _attendance_review(
+        resolve_attendance_review(
+            connection,
+            attendance_day_id=attendance_day_id,
+            actor_user_id=principal.subject,
+            decision=body.decision,
+            present_fraction=body.presentFraction,
+            comment=body.comment,
+        )
+    )
 
 
 @router.get("/admin/leave", response_model=list[LeaveRequestResponse])
@@ -1161,6 +1279,10 @@ def admin_capabilities(
     user_id = principal.subject
     return AdminCapabilities(
         employeeManage=client.allowed(user_id=user_id, permission_key="attendance.employee.manage"),
+        attendanceReview=client.allowed(
+            user_id=user_id,
+            permission_key="attendance.exception.resolve",
+        ),
         leaveHrApprove=client.allowed(user_id=user_id, permission_key="attendance.leave.hr.approve"),
         reimbursementHrApprove=client.allowed(
             user_id=user_id,
