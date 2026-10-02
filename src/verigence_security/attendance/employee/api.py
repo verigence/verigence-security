@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -113,7 +113,7 @@ def signed_file(
     )
 
 
-def _employee_profile(row: dict) -> EmployeeProfile:
+def _employee_profile(row: dict[str, Any]) -> EmployeeProfile:
     return EmployeeProfile(
         employeeId=row["employee_id"],
         securityUserId=row["security_user_id"],
@@ -131,7 +131,7 @@ def _employee_profile(row: dict) -> EmployeeProfile:
     )
 
 
-def _leave(row: dict) -> LeaveRequestResponse:
+def _leave(row: dict[str, Any]) -> LeaveRequestResponse:
     return LeaveRequestResponse(
         leaveRequestId=row["leave_request_id"],
         employeeId=row["employee_id"],
@@ -147,7 +147,7 @@ def _leave(row: dict) -> LeaveRequestResponse:
     )
 
 
-def _claim(row: dict) -> ReimbursementResponse:
+def _claim(row: dict[str, Any]) -> ReimbursementResponse:
     return ReimbursementResponse(
         claimId=row["claim_id"],
         employeeId=row["employee_id"],
