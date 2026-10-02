@@ -127,6 +127,15 @@ class LeaveHrDecisionRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=2000)
 
 
+class LeaveReviewResponse(BaseModel):
+    stage: Literal["TL_OR_PMO", "HR", "EMPLOYEE"]
+    decision: Literal["APPROVE", "ADJUST", "REJECT", "CANCEL"]
+    approvedDays: Decimal | None = None
+    actorRole: str
+    comment: str | None = None
+    decidedAtUtc: datetime
+
+
 class LeaveRequestResponse(BaseModel):
     leaveRequestId: UUID
     employeeId: UUID
@@ -144,6 +153,7 @@ class LeaveRequestResponse(BaseModel):
     reason: str | None = None
     status: str
     createdAtUtc: datetime
+    reviews: list[LeaveReviewResponse] = Field(default_factory=list)
 
 
 class ReimbursementLineCreate(BaseModel):
