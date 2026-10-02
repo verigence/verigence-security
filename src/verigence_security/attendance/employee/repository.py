@@ -905,13 +905,13 @@ def update_reimbursement_payment(
 
     if paid_amount <= 0:
         raise AttendanceRuleError(
-            "REIMBURSEMENT_PAID_AMOUNT_REQUIRED",
+            "REIMBURSEMENT_PROCESSED_AMOUNT_REQUIRED",
             "Processed amount must be greater than zero.",
             status_code=400,
         )
     if paid_amount > Decimal(str(row["amount"])):
         raise AttendanceRuleError(
-            "REIMBURSEMENT_PAID_AMOUNT_INVALID",
+            "REIMBURSEMENT_PROCESSED_AMOUNT_INVALID",
             "Processed amount cannot exceed the approved reimbursement amount.",
             status_code=400,
         )
