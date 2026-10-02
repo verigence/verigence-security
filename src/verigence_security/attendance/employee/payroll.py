@@ -435,6 +435,51 @@ def _leave_days(
     return paid, unpaid
 
 
+def _assert_payroll_ready(
+    connection: Connection,
+    *,
+    month: date,
+) -> None:
+    start = _month_start(month)
+    end = _month_end(month)
+    pending_attendance = connection.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM verigence_attendance.attendance_days
+            WHERE attendance_date BETWEEN :start AND :end
+              AND hr_review_status='PENDING_HR'
+            """
+        ),
+        {"start": start, "end": end},
+    ).scalar_one()
+    if int(pending_attendance or 0) > 0:
+        raise AttendanceRuleError(
+            "PAYROLL_ATTENDANCE_REVIEW_PENDING",
+            f"{pending_attendance} attendance day(s) still require HR review for this payroll month.",
+            status_code=409,
+        )
+
+    pending_leave = connection.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM verigence_attendance.leave_requests
+            WHERE status IN ('PENDING_OPERATIONAL','PENDING_HR')
+              AND end_date>=:start
+              AND start_date<=:end
+            """
+        ),
+        {"start": start, "end": end},
+    ).scalar_one()
+    if int(pending_leave or 0) > 0:
+        raise AttendanceRuleError(
+            "PAYROLL_LEAVE_REVIEW_PENDING",
+            f"{pending_leave} leave request(s) still require approval for this payroll month.",
+            status_code=409,
+        )
+
+
 def generate_payroll(
     connection: Connection,
     *,
@@ -442,6 +487,7 @@ def generate_payroll(
     actor_user_id: str,
 ) -> dict[str, object]:
     month = _month_start(payroll_month)
+    _assert_payroll_ready(connection, month=month)
     existing = connection.execute(
         text(
             """
