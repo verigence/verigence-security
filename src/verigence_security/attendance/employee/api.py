@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import Connection
+from pydantic import ValidationError
 
 from verigence_security.attendance.employee.admin_config import (
     create_holiday,
@@ -47,12 +48,16 @@ from verigence_security.attendance.employee.repository import (
     list_leave_by_status,
     list_leave_for_employee,
     list_payslips,
+    list_pm_team_reimbursement_claims,
     list_pm_team_reimbursements,
+    list_reimbursement_claims_by_status,
+    list_reimbursement_claims_for_employee,
     list_reimbursements_by_payment_status,
     list_reimbursements_by_status,
     list_reimbursements_for_employee,
     list_team_attendance,
     list_team_leave,
+    review_reimbursement_claim,
     update_reimbursement_payment,
 )
 from verigence_security.attendance.employee.schemas import (
@@ -74,6 +79,9 @@ from verigence_security.attendance.employee.schemas import (
     PayrollItemResponse,
     PayrollSummaryResponse,
     PayslipResponse,
+    ReimbursementClaimCreate,
+    ReimbursementClaimResponse,
+    ReimbursementClaimReviewRequest,
     ReimbursementDecisionRequest,
     ReimbursementPaymentRequest,
     ReimbursementResponse,
@@ -85,6 +93,7 @@ from verigence_security.attendance.employee.security import HumanPrincipal, huma
 from verigence_security.attendance.employee.service import (
     record_attendance,
     submit_reimbursement,
+    submit_reimbursement_claim,
 )
 from verigence_security.attendance.employee.storage import AttendanceStorageError, storage
 
@@ -173,6 +182,70 @@ def _claim(row: dict[str, Any]) -> ReimbursementResponse:
         paymentReference=row.get("payment_reference"),
         paymentComment=row.get("payment_comment"),
         createdAtUtc=row["created_at_utc"],
+    )
+
+
+def _reimbursement_claim(row: dict[str, Any]) -> ReimbursementClaimResponse:
+    lines = []
+    for item in row.get("lines", []):
+        reviews = [
+            {
+                "stage": review["stage"],
+                "decision": review["decision"],
+                "previousAmount": review.get("previous_amount"),
+                "approvedAmount": review["approved_amount"],
+                "actorRole": review["actor_role"],
+                "comment": review.get("comment"),
+                "decidedAtUtc": review["decided_at_utc"],
+            }
+            for review in item.get("reviews", [])
+        ]
+        lines.append(
+            {
+                "reimbursementItemId": item["reimbursement_item_id"],
+                "lineNumber": item["line_number"],
+                "expenseDate": item["expense_date"],
+                "category": item["category"],
+                "claimedAmount": item["claimed_amount"],
+                "approvedAmount": item.get("approved_amount"),
+                "vendorName": item.get("vendor_name"),
+                "description": item.get("description"),
+                "receiptUrl": (
+                    storage().presign(object_key=item["receipt_object_key"])
+                    if item.get("receipt_object_key")
+                    else None
+                ),
+                "travelFrom": item.get("travel_from"),
+                "travelTo": item.get("travel_to"),
+                "transportMode": item.get("transport_mode"),
+                "distanceKm": item.get("distance_km"),
+                "ticketReference": item.get("ticket_reference"),
+                "mealType": item.get("meal_type"),
+                "lineStatus": item["line_status"],
+                "reviews": reviews,
+            }
+        )
+    return ReimbursementClaimResponse(
+        claimId=row["claim_id"],
+        claimNumber=row["claim_number"],
+        employeeId=row["employee_id"],
+        employeeName=row["display_name"],
+        purpose=row["purpose"],
+        claimMonth=row["claim_month"],
+        status=row["status"],
+        approvalOutcome=row.get("approval_outcome"),
+        financeApprovalRequired=bool(row["finance_approval_required"]),
+        claimedTotal=row["claimed_total"],
+        approvedTotal=row.get("approved_total"),
+        adjustedTotal=row.get("adjusted_total") or Decimal(0),
+        paymentStatus=row.get("payment_status"),
+        paidAtUtc=row.get("paid_at_utc"),
+        paidAmount=row.get("paid_amount"),
+        paymentMode=row.get("payment_mode"),
+        paymentReference=row.get("payment_reference"),
+        paymentComment=row.get("payment_comment"),
+        submittedAtUtc=row["submitted_at_utc"],
+        lines=lines,
     )
 
 
@@ -434,6 +507,158 @@ def hr_leave_decision(
             leave_id=leave_id,
             actor_user_id=principal.subject,
             decision=body.decision,
+            comment=body.comment,
+        )
+    )
+
+
+@router.get(
+    "/me/reimbursement-claims",
+    response_model=list[ReimbursementClaimResponse],
+)
+def my_reimbursement_claims(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[ReimbursementClaimResponse]:
+    employee = employee_for_user(connection, principal.subject)
+    return [
+        _reimbursement_claim(row)
+        for row in list_reimbursement_claims_for_employee(
+            connection,
+            UUID(str(employee["employee_id"])),
+        )
+    ]
+
+
+@router.post(
+    "/me/reimbursement-claims",
+    response_model=ReimbursementClaimResponse,
+)
+async def create_my_reimbursement_claim(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+    payload: Annotated[str, Form(min_length=2)],
+    receipts: Annotated[list[UploadFile] | None, File()] = None,
+) -> ReimbursementClaimResponse:
+    try:
+        request = ReimbursementClaimCreate.model_validate_json(payload)
+    except ValidationError as exc:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_CLAIM_INVALID",
+            "The reimbursement claim contains invalid or incomplete fields.",
+            status_code=400,
+        ) from exc
+
+    uploaded = receipts or []
+    receipt_payloads = [
+        (await item.read(), item.content_type)
+        for item in uploaded
+    ]
+    lines = [
+        {
+            "expense_date": line.expenseDate,
+            "category": line.category,
+            "claimed_amount": line.claimedAmount,
+            "vendor_name": line.vendorName,
+            "description": line.description,
+            "receipt_index": line.receiptIndex,
+            "travel_from": line.travelFrom,
+            "travel_to": line.travelTo,
+            "transport_mode": line.transportMode,
+            "distance_km": line.distanceKm,
+            "ticket_reference": line.ticketReference,
+            "meal_type": line.mealType,
+        }
+        for line in request.lines
+    ]
+    row = submit_reimbursement_claim(
+        connection,
+        user_id=principal.subject,
+        purpose=request.purpose,
+        lines=lines,
+        receipts=receipt_payloads,
+        storage=storage(),
+    )
+    return _reimbursement_claim(row)
+
+
+@router.get(
+    "/team/reimbursement-claims",
+    response_model=list[ReimbursementClaimResponse],
+)
+def pm_team_reimbursement_claims(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[ReimbursementClaimResponse]:
+    return [
+        _reimbursement_claim(row)
+        for row in list_pm_team_reimbursement_claims(
+            connection,
+            principal.subject,
+        )
+    ]
+
+
+@router.get(
+    "/admin/reimbursement-claims",
+    response_model=list[ReimbursementClaimResponse],
+)
+def reimbursement_claim_queue(
+    stage: Literal["HR", "FINANCE"],
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> list[ReimbursementClaimResponse]:
+    permission = (
+        "attendance.reimbursement.hr.approve"
+        if stage == "HR"
+        else "attendance.reimbursement.finance.approve"
+    )
+    security_client().require(user_id=principal.subject, permission_key=permission)
+    status = "PENDING_HR" if stage == "HR" else "PENDING_FINANCE"
+    return [
+        _reimbursement_claim(row)
+        for row in list_reimbursement_claims_by_status(connection, status)
+    ]
+
+
+@router.post(
+    "/admin/reimbursement-claims/{claim_id}/review",
+    response_model=ReimbursementClaimResponse,
+)
+def reimbursement_claim_review(
+    claim_id: UUID,
+    stage: Literal["HR", "FINANCE"],
+    body: ReimbursementClaimReviewRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> ReimbursementClaimResponse:
+    permission = (
+        "attendance.reimbursement.hr.approve"
+        if stage == "HR"
+        else "attendance.reimbursement.finance.approve"
+    )
+    auth = security_client().require(
+        user_id=principal.subject,
+        permission_key=permission,
+    )
+    role = str(auth.get("roleKey") or auth.get("classification") or stage)
+    decisions = [
+        {
+            "reimbursement_item_id": item.reimbursementItemId,
+            "decision": item.decision,
+            "approved_amount": item.approvedAmount,
+            "comment": item.comment,
+        }
+        for item in body.lineDecisions
+    ]
+    return _reimbursement_claim(
+        review_reimbursement_claim(
+            connection,
+            claim_id=claim_id,
+            actor_user_id=principal.subject,
+            actor_role=role,
+            stage=stage,
+            line_decisions=decisions,
             comment=body.comment,
         )
     )
