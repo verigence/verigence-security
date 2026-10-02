@@ -265,6 +265,7 @@ class PayslipResponse(BaseModel):
 
 class AdminCapabilities(BaseModel):
     employeeManage: bool
+    attendanceReview: bool
     leaveHrApprove: bool
     reimbursementHrApprove: bool
     reimbursementFinanceApprove: bool
