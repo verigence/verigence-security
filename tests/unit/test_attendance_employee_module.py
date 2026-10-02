@@ -78,3 +78,33 @@ def test_pm_team_reimbursement_is_read_only_and_scoped() -> None:
     assert "e.pmo_user_id=CAST(:actor AS uuid)" in repository
     assert '@router.get("/team/reimbursements"' in api
     assert '@router.post("/team/reimbursements"' not in api
+
+
+
+def test_reimbursement_payment_lifecycle_is_auditable() -> None:
+    migration = (
+        ROOT / "attendance_migrations/0004_reimbursement_payment_lifecycle.sql"
+    ).read_text(encoding="utf-8")
+    repository = (
+        ROOT / "src/verigence_security/attendance/employee/repository.py"
+    ).read_text(encoding="utf-8")
+    api = (
+        ROOT / "src/verigence_security/attendance/employee/api.py"
+    ).read_text(encoding="utf-8")
+    assert "payment_status" in migration
+    assert "paid_at_utc" in migration
+    assert "payment_reference" in migration
+    assert "reimbursement_payment_events" in migration
+    assert "def update_reimbursement_payment(" in repository
+    assert '"/admin/reimbursements/payments"' in api
+    assert '"/admin/reimbursements/{claim_id}/payment"' in api
+
+
+def test_finance_payment_permission_is_attendance_only() -> None:
+    migration = (
+        ROOT / "migrations/0034_attendance_reimbursement_payment.sql"
+    ).read_text(encoding="utf-8")
+    assert "attendance.reimbursement.payment.manage" in migration
+    assert "'attendance','FINANCEADMIN'" in migration.replace("\n", "")
+    assert "audit." not in migration
+    assert "di." not in migration
