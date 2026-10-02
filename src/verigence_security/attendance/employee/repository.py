@@ -690,7 +690,8 @@ def list_team_attendance(
             text(
                 """
                 SELECT e.employee_id,e.display_name,a.attendance_date,a.status,
-                       a.present_fraction,a.check_in_at_utc,a.check_out_at_utc
+                       a.present_fraction,a.check_in_at_utc,a.check_out_at_utc,
+                       a.hr_review_status
                 FROM verigence_attendance.employees e
                 LEFT JOIN verigence_attendance.attendance_days a
                   ON a.employee_id=e.employee_id
