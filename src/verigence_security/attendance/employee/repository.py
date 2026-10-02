@@ -1665,25 +1665,25 @@ def list_reimbursements_by_status(
 
 
 
-def list_reimbursements_by_payment_status(
+def list_reimbursement_claims_by_payment_status(
     connection: Connection,
     payment_status: str,
 ) -> list[dict[str, Any]]:
+    claim_ids = connection.execute(
+        text(
+            """
+            SELECT claim_id
+            FROM verigence_attendance.reimbursement_claims
+            WHERE payment_status=:payment_status
+              AND status='APPROVED'
+            ORDER BY updated_at_utc,created_at_utc
+            """
+        ),
+        {"payment_status": payment_status},
+    ).scalars()
     return [
-        dict(row)
-        for row in connection.execute(
-            text(
-                """
-                SELECT c.*,e.display_name
-                FROM verigence_attendance.reimbursement_claims c
-                JOIN verigence_attendance.employees e ON e.employee_id=c.employee_id
-                WHERE c.payment_status=:payment_status
-                  AND c.status='APPROVED'
-                ORDER BY c.updated_at_utc,c.created_at_utc
-                """
-            ),
-            {"payment_status": payment_status},
-        ).mappings()
+        reimbursement_claim_detail(connection, UUID(str(claim_id)))
+        for claim_id in claim_ids
     ]
 
 
@@ -1851,7 +1851,7 @@ def update_reimbursement_payment(
             "comment": normalized_comment,
         },
     )
-    return reimbursement(connection, claim_id)
+    return reimbursement_claim_detail(connection, claim_id)
 
 def list_payslips(connection: Connection, employee_id: UUID) -> list[dict[str, Any]]:
     return [
