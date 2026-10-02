@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -15,10 +15,12 @@ from verigence_security.attendance.employee.domain import (
 )
 from verigence_security.attendance.employee.errors import AttendanceRuleError
 from verigence_security.attendance.employee.repository import (
+    attendance_rule_config,
     create_reimbursement,
     create_reimbursement_claim,
     employee_for_user,
     insert_attendance_event,
+    insert_attendance_flag,
     lock_attendance_day,
     month_claim_total,
     reimbursement_threshold,
@@ -71,6 +73,19 @@ def _photo_bytes(data: bytes, content_type: str) -> bytes:
     return data
 
 
+def _local_rule_time(value: object, default: str) -> time:
+    raw = str(value or default)
+    try:
+        hour, minute = raw.split(":", 1)
+        return time(hour=int(hour), minute=int(minute))
+    except (ValueError, TypeError) as exc:
+        raise AttendanceRuleError(
+            "ATTENDANCE_RULE_TIME_INVALID",
+            f"Attendance rule time {raw!r} is invalid.",
+            status_code=500,
+        ) from exc
+
+
 def record_attendance(
     connection: Connection,
     *,
@@ -82,6 +97,8 @@ def record_attendance(
     captured_at: datetime,
     photo_data: bytes,
     photo_content_type: str,
+    actor_role: str,
+    exception_reason: str | None,
     storage: AttendanceStorage,
 ) -> dict[str, object]:
     if event_type not in {"CHECK_IN", "CHECK_OUT"}:
@@ -94,30 +111,46 @@ def record_attendance(
         )
 
     employee = employee_for_user(connection, user_id)
-    if (
-        employee.get("work_location_id") is None
-        or employee.get("work_latitude") is None
-        or employee.get("work_longitude") is None
-        or employee.get("work_location_status") != "ACTIVE"
-    ):
+    rules = attendance_rule_config(connection)
+    normalized_role = actor_role.strip().upper()
+    pc_geofence_required = bool(rules.get("attendance.pc_geofence_required", True))
+    work_location_available = (
+        employee.get("work_location_id") is not None
+        and employee.get("work_latitude") is not None
+        and employee.get("work_longitude") is not None
+        and employee.get("work_location_status") == "ACTIVE"
+    )
+
+    radius: int | None = None
+    distance: float | None = None
+    geofence_result = "UNVERIFIABLE"
+    if work_location_available:
+        radius = int(employee.get("geofence_radius_meters") or 500)
+        distance = distance_meters(
+            GeoPoint(latitude=latitude, longitude=longitude),
+            GeoPoint(
+                latitude=float(employee["work_latitude"]),
+                longitude=float(employee["work_longitude"]),
+            ),
+        )
+        geofence_result = "WITHIN" if distance <= radius else "OUTSIDE"
+    elif normalized_role == "PC" and pc_geofence_required:
         raise AttendanceRuleError(
             "WORK_LOCATION_REQUIRED",
-            "An active work location is required before attendance can be recorded.",
+            "An active work location is required for PC attendance.",
             status_code=409,
         )
 
-    radius = int(employee.get("geofence_radius_meters") or 500)
-    distance = distance_meters(
-        GeoPoint(latitude=latitude, longitude=longitude),
-        GeoPoint(
-            latitude=float(employee["work_latitude"]),
-            longitude=float(employee["work_longitude"]),
-        ),
-    )
-    if distance > radius:
+    normalized_exception = (exception_reason or "").strip() or None
+    if (
+        normalized_role == "PC"
+        and pc_geofence_required
+        and geofence_result == "OUTSIDE"
+        and not normalized_exception
+    ):
         raise AttendanceRuleError(
-            "OUTSIDE_GEOFENCE",
-            f"You are outside the allowed {radius} metre work-location geofence.",
+            "GEOFENCE_EXCEPTION_REASON_REQUIRED",
+            "You are outside the work-location geofence. Add a reason to continue.",
             status_code=409,
         )
 
@@ -177,12 +210,71 @@ def record_attendance(
         latitude=latitude,
         longitude=longitude,
         accuracy_meters=accuracy_meters,
-        work_location_id=UUID(str(employee["work_location_id"])),
+        work_location_id=(
+            UUID(str(employee["work_location_id"]))
+            if employee.get("work_location_id") is not None
+            else None
+        ),
         distance_meters=distance,
         radius_meters=radius,
+        geofence_result=geofence_result,
+        exception_reason=normalized_exception,
+        actor_role=normalized_role,
         photo_object_key=object_key,
         photo_sha256=digest,
     )
+
+    local_time = evidence_time.astimezone(
+        ZoneInfo(get_settings().timezone_iana)
+    ).time().replace(tzinfo=None)
+    late_after = _local_rule_time(
+        rules.get("attendance.late_checkin_after_local"),
+        "11:00",
+    )
+    early_before = _local_rule_time(
+        rules.get("attendance.early_checkout_before_local"),
+        "17:00",
+    )
+    flag_reasons: list[tuple[str, str, str | None]] = []
+    if (
+        normalized_role == "PC"
+        and pc_geofence_required
+        and geofence_result == "OUTSIDE"
+    ):
+        flag_reasons.append(
+            (
+                "OUTSIDE_GEOFENCE",
+                f"Captured {round(float(distance or 0), 2)}m from a {radius}m geofence.",
+                normalized_exception,
+            )
+        )
+    if event_type == "CHECK_IN" and local_time > late_after:
+        flag_reasons.append(
+            (
+                "LATE_CHECK_IN",
+                f"Check-in at {local_time.strftime('%H:%M')} after {late_after.strftime('%H:%M')}.",
+                None,
+            )
+        )
+    if event_type == "CHECK_OUT" and local_time < early_before:
+        flag_reasons.append(
+            (
+                "EARLY_CHECK_OUT",
+                f"Check-out at {local_time.strftime('%H:%M')} before {early_before.strftime('%H:%M')}.",
+                None,
+            )
+        )
+    for flag_type, detail, employee_reason in flag_reasons:
+        insert_attendance_flag(
+            connection,
+            attendance_day_id=UUID(str(day["attendance_day_id"])),
+            attendance_event_id=event_id,
+            employee_id=UUID(str(employee["employee_id"])),
+            flag_type=flag_type,
+            flag_detail=detail,
+            employee_reason=employee_reason,
+        )
+
     update_attendance_day(
         connection,
         attendance_day_id=UUID(str(day["attendance_day_id"])),
@@ -194,8 +286,10 @@ def record_attendance(
         "attendanceDate": business_date,
         "eventType": event_type,
         "capturedAtUtc": evidence_time,
-        "distanceMeters": round(distance, 2),
+        "distanceMeters": round(distance, 2) if distance is not None else None,
         "geofenceRadiusMeters": radius,
+        "geofenceResult": geofence_result,
+        "hrReviewRequired": bool(flag_reasons),
     }
 
 
