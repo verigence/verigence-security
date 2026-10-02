@@ -560,7 +560,6 @@ def team_leave_decision(
             leave_id=leave_id,
             actor_user_id=principal.subject,
             decision=body.decision,
-            approved_days=body.approvedDays,
             comment=body.comment,
         )
     )
@@ -636,6 +635,7 @@ def hr_leave_decision(
             leave_id=leave_id,
             actor_user_id=principal.subject,
             decision=body.decision,
+            approved_days=body.approvedDays,
             comment=body.comment,
         )
     )
