@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -299,7 +300,7 @@ def submit_reimbursement_claim(
     *,
     user_id: str,
     purpose: str,
-    lines: list[dict[str, object]],
+    lines: list[dict[str, Any]],
     receipts: list[tuple[bytes, str | None]],
     storage: AttendanceStorage,
 ) -> dict[str, object]:
@@ -331,7 +332,7 @@ def submit_reimbursement_claim(
         )
 
     receipt_indexes: set[int] = set()
-    prepared: list[dict[str, object]] = []
+    prepared: list[dict[str, Any]] = []
     claimed_total = Decimal(0)
 
     for line_number, line in enumerate(lines, start=1):
