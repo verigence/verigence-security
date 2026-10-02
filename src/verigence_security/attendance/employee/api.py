@@ -85,6 +85,7 @@ from verigence_security.attendance.employee.schemas import (
     LeaveDecisionRequest,
     LeaveHrDecisionRequest,
     LeaveRequestResponse,
+    LeaveReviewResponse,
     LeaveTypeCreateRequest,
     LeaveTypeResponse,
     PayrollItemResponse,
@@ -238,6 +239,17 @@ def _leave(row: dict[str, Any]) -> LeaveRequestResponse:
         reason=row.get("reason"),
         status=row["status"],
         createdAtUtc=row["created_at_utc"],
+        reviews=[
+            LeaveReviewResponse(
+                stage=review["stage"],
+                decision=review["decision"],
+                approvedDays=review.get("approved_days"),
+                actorRole=review["actor_role"],
+                comment=review.get("comment"),
+                decidedAtUtc=review["decided_at_utc"],
+            )
+            for review in row.get("reviews", [])
+        ],
     )
 
 
