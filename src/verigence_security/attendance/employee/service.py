@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -202,7 +202,7 @@ def submit_reimbursement(
     connection: Connection,
     *,
     user_id: str,
-    expense_date,
+    expense_date: date,
     category: str,
     amount: Decimal,
     description: str | None,
