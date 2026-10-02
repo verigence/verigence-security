@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from calendar import monthrange
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, text
@@ -37,7 +39,7 @@ def _month_end(value: date) -> date:
     return start.replace(day=monthrange(start.year, start.month)[1])
 
 
-def _config(connection: Connection, key: str, default):
+def _config(connection: Connection, key: str, default: Any) -> Any:
     value = connection.execute(
         text(
             """
@@ -81,7 +83,7 @@ def _holiday_dates(
     return set(rows)
 
 
-def _date_range(start: date, end: date):
+def _date_range(start: date, end: date) -> Iterator[date]:
     current = start
     while current <= end:
         yield current
@@ -415,7 +417,7 @@ def payroll_summary(connection: Connection, run_id: UUID) -> dict[str, object]:
     }
 
 
-def payroll_items(connection: Connection, run_id: UUID) -> list[dict[str, object]]:
+def payroll_items(connection: Connection, run_id: UUID) -> list[dict[str, Any]]:
     return [
         dict(row)
         for row in connection.execute(
