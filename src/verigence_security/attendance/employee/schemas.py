@@ -99,6 +99,93 @@ class LeaveRequestResponse(BaseModel):
     createdAtUtc: datetime
 
 
+class ReimbursementLineCreate(BaseModel):
+    expenseDate: date
+    category: Literal["TRAVEL", "FOOD", "LODGING", "LOCAL_CONVEYANCE", "OTHER"]
+    claimedAmount: Decimal = Field(gt=0)
+    vendorName: str | None = Field(default=None, max_length=240)
+    description: str | None = Field(default=None, max_length=2000)
+    receiptIndex: int | None = Field(default=None, ge=0)
+    travelFrom: str | None = Field(default=None, max_length=240)
+    travelTo: str | None = Field(default=None, max_length=240)
+    transportMode: Literal[
+        "AIR", "RAIL", "CAB", "AUTO", "BUS", "METRO",
+        "PERSONAL_CAR", "PERSONAL_BIKE", "OTHER"
+    ] | None = None
+    distanceKm: Decimal | None = Field(default=None, ge=0)
+    ticketReference: str | None = Field(default=None, max_length=160)
+    mealType: Literal["BREAKFAST", "LUNCH", "DINNER", "SNACKS", "OTHER"] | None = None
+
+
+class ReimbursementClaimCreate(BaseModel):
+    purpose: str = Field(min_length=1, max_length=240)
+    lines: list[ReimbursementLineCreate] = Field(min_length=1, max_length=50)
+
+
+class ReimbursementLineDecision(BaseModel):
+    reimbursementItemId: UUID
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    approvedAmount: Decimal = Field(ge=0)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ReimbursementClaimReviewRequest(BaseModel):
+    lineDecisions: list[ReimbursementLineDecision] = Field(min_length=1, max_length=50)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ReimbursementLineReviewResponse(BaseModel):
+    stage: Literal["HR", "FINANCE"]
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    previousAmount: Decimal | None = None
+    approvedAmount: Decimal
+    actorRole: str
+    comment: str | None = None
+    decidedAtUtc: datetime
+
+
+class ReimbursementLineResponse(BaseModel):
+    reimbursementItemId: UUID
+    lineNumber: int
+    expenseDate: date
+    category: str
+    claimedAmount: Decimal
+    approvedAmount: Decimal | None = None
+    vendorName: str | None = None
+    description: str | None = None
+    receiptUrl: str | None = None
+    travelFrom: str | None = None
+    travelTo: str | None = None
+    transportMode: str | None = None
+    distanceKm: Decimal | None = None
+    ticketReference: str | None = None
+    mealType: str | None = None
+    lineStatus: str
+    reviews: list[ReimbursementLineReviewResponse] = Field(default_factory=list)
+
+
+class ReimbursementClaimResponse(BaseModel):
+    claimId: UUID
+    claimNumber: str
+    employeeId: UUID
+    employeeName: str
+    purpose: str
+    claimMonth: date
+    status: str
+    financeApprovalRequired: bool
+    claimedTotal: Decimal
+    approvedTotal: Decimal | None = None
+    adjustedTotal: Decimal
+    paymentStatus: Literal["PENDING_PAYMENT", "PROCESSED"] | None = None
+    paidAtUtc: datetime | None = None
+    paidAmount: Decimal | None = None
+    paymentMode: str | None = None
+    paymentReference: str | None = None
+    paymentComment: str | None = None
+    submittedAtUtc: datetime
+    lines: list[ReimbursementLineResponse]
+
+
 class ReimbursementDecisionRequest(BaseModel):
     decision: Literal["APPROVE", "REJECT"]
     comment: str | None = Field(default=None, max_length=2000)
