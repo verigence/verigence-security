@@ -186,6 +186,248 @@ def create_employee(
     return employee_by_id(connection, employee_id)
 
 
+
+def attendance_supervisory_role(connection: Connection, user_id: str) -> str:
+    row = connection.execute(
+        text(
+            """
+            SELECT
+              EXISTS(
+                SELECT 1 FROM verigence_attendance.employees
+                WHERE employment_status='ACTIVE'
+                  AND pmo_user_id=CAST(:actor AS uuid)
+              ) AS is_pm,
+              EXISTS(
+                SELECT 1 FROM verigence_attendance.employees
+                WHERE employment_status='ACTIVE'
+                  AND tl_user_id=CAST(:actor AS uuid)
+              ) AS is_tl
+            """
+        ),
+        {"actor": user_id},
+    ).mappings().one()
+    if bool(row["is_pm"]):
+        return "PM"
+    if bool(row["is_tl"]):
+        return "TL"
+    return "PC"
+
+
+def attendance_rule_config(connection: Connection) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "attendance.pc_geofence_required": True,
+        "attendance.late_checkin_after_local": "11:00",
+        "attendance.early_checkout_before_local": "17:00",
+    }
+    rows = connection.execute(
+        text(
+            """
+            SELECT config_key,config_value_json
+            FROM verigence_attendance.module_configuration
+            WHERE config_key IN (
+              'attendance.pc_geofence_required',
+              'attendance.late_checkin_after_local',
+              'attendance.early_checkout_before_local'
+            )
+            """
+        )
+    ).mappings()
+    for row in rows:
+        defaults[str(row["config_key"])] = row["config_value_json"]
+    return defaults
+
+
+def insert_attendance_flag(
+    connection: Connection,
+    *,
+    attendance_day_id: UUID,
+    attendance_event_id: UUID,
+    employee_id: UUID,
+    flag_type: str,
+    flag_detail: str,
+    employee_reason: str | None,
+) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.attendance_flags (
+                attendance_day_id,attendance_event_id,employee_id,
+                flag_type,flag_detail,employee_reason
+            ) VALUES (
+                :day_id,:event_id,:employee_id,:flag_type,:flag_detail,:employee_reason
+            )
+            """
+        ),
+        {
+            "day_id": attendance_day_id,
+            "event_id": attendance_event_id,
+            "employee_id": employee_id,
+            "flag_type": flag_type,
+            "flag_detail": flag_detail,
+            "employee_reason": employee_reason,
+        },
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.attendance_days
+            SET hr_review_status='PENDING_HR',updated_at_utc=now()
+            WHERE attendance_day_id=:day_id
+            """
+        ),
+        {"day_id": attendance_day_id},
+    )
+
+
+def list_hr_attendance_reviews(connection: Connection) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    days = connection.execute(
+        text(
+            """
+            SELECT a.*,e.display_name,e.employee_code
+            FROM verigence_attendance.attendance_days a
+            JOIN verigence_attendance.employees e ON e.employee_id=a.employee_id
+            WHERE a.hr_review_status='PENDING_HR'
+            ORDER BY a.attendance_date,a.created_at_utc
+            """
+        )
+    ).mappings()
+    for row in days:
+        item = dict(row)
+        item["flags"] = [
+            dict(flag)
+            for flag in connection.execute(
+                text(
+                    """
+                    SELECT attendance_flag_id,flag_type,flag_detail,
+                           employee_reason,resolution_status,created_at_utc
+                    FROM verigence_attendance.attendance_flags
+                    WHERE attendance_day_id=:day_id
+                    ORDER BY created_at_utc
+                    """
+                ),
+                {"day_id": item["attendance_day_id"]},
+            ).mappings()
+        ]
+        result.append(item)
+    return result
+
+
+def resolve_attendance_review(
+    connection: Connection,
+    *,
+    attendance_day_id: UUID,
+    actor_user_id: str,
+    decision: str,
+    present_fraction: Decimal | None,
+    comment: str | None,
+) -> dict[str, Any]:
+    row = connection.execute(
+        text(
+            """
+            SELECT a.*,e.display_name,e.employee_code
+            FROM verigence_attendance.attendance_days a
+            JOIN verigence_attendance.employees e ON e.employee_id=a.employee_id
+            WHERE a.attendance_day_id=:day_id
+            FOR UPDATE
+            """
+        ),
+        {"day_id": attendance_day_id},
+    ).mappings().first()
+    if row is None:
+        raise AttendanceNotFoundError("Attendance day not found.")
+    if row["hr_review_status"] != "PENDING_HR":
+        raise AttendanceRuleError(
+            "ATTENDANCE_REVIEW_STATE_INVALID",
+            "Attendance is not awaiting HR review.",
+            status_code=409,
+        )
+
+    normalized_comment = (comment or "").strip() or None
+    if decision in {"ADJUST", "REJECT"} and not normalized_comment:
+        raise AttendanceRuleError(
+            "ATTENDANCE_REVIEW_COMMENT_REQUIRED",
+            "A reason is required when attendance is adjusted or rejected.",
+            status_code=400,
+        )
+    if decision == "APPROVE":
+        review_status = "APPROVED"
+        credited = Decimal(str(row["present_fraction"]))
+    elif decision == "REJECT":
+        review_status = "REJECTED"
+        credited = Decimal(0)
+    else:
+        if present_fraction is None or present_fraction < 0 or present_fraction > 1:
+            raise AttendanceRuleError(
+                "ATTENDANCE_CREDIT_INVALID",
+                "Adjusted attendance credit must be between 0 and 1.",
+                status_code=400,
+            )
+        review_status = "ADJUSTED"
+        credited = present_fraction
+
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.attendance_days
+            SET hr_review_status=:review_status,
+                present_fraction=:present_fraction,
+                hr_review_comment=:comment,
+                hr_reviewed_by_user_id=CAST(:actor AS uuid),
+                hr_reviewed_at_utc=now(),
+                updated_at_utc=now()
+            WHERE attendance_day_id=:day_id
+            """
+        ),
+        {
+            "review_status": review_status,
+            "present_fraction": credited,
+            "comment": normalized_comment,
+            "actor": actor_user_id,
+            "day_id": attendance_day_id,
+        },
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.attendance_flags
+            SET resolution_status=:review_status,
+                reviewed_by_user_id=CAST(:actor AS uuid),
+                reviewer_comment=:comment,
+                reviewed_at_utc=now()
+            WHERE attendance_day_id=:day_id
+              AND resolution_status='PENDING_HR'
+            """
+        ),
+        {
+            "review_status": review_status,
+            "actor": actor_user_id,
+            "comment": normalized_comment,
+            "day_id": attendance_day_id,
+        },
+    )
+    updated = dict(row)
+    updated["hr_review_status"] = review_status
+    updated["present_fraction"] = credited
+    updated["hr_review_comment"] = normalized_comment
+    updated["flags"] = [
+        dict(flag)
+        for flag in connection.execute(
+            text(
+                """
+                SELECT attendance_flag_id,flag_type,flag_detail,
+                       employee_reason,resolution_status,created_at_utc
+                FROM verigence_attendance.attendance_flags
+                WHERE attendance_day_id=:day_id
+                ORDER BY created_at_utc
+                """
+            ),
+            {"day_id": attendance_day_id},
+        ).mappings()
+    ]
+    return updated
+
+
 def attendance_history(
     connection: Connection,
     *,
@@ -197,8 +439,9 @@ def attendance_history(
         for row in connection.execute(
             text(
                 """
-                SELECT attendance_date,status,present_fraction,
-                       check_in_at_utc,check_out_at_utc
+                SELECT attendance_day_id,attendance_date,status,present_fraction,
+                       check_in_at_utc,check_out_at_utc,hr_review_status,
+                       hr_review_comment
                 FROM verigence_attendance.attendance_days
                 WHERE employee_id=:employee_id
                 ORDER BY attendance_date DESC
@@ -251,9 +494,12 @@ def insert_attendance_event(
     latitude: float,
     longitude: float,
     accuracy_meters: float,
-    work_location_id: UUID,
-    distance_meters: float,
-    radius_meters: int,
+    work_location_id: UUID | None,
+    distance_meters: float | None,
+    radius_meters: int | None,
+    geofence_result: str,
+    exception_reason: str | None,
+    actor_role: str,
     photo_object_key: str,
     photo_sha256: str,
 ) -> None:
@@ -264,11 +510,13 @@ def insert_attendance_event(
                 attendance_event_id,attendance_day_id,employee_id,event_type,
                 captured_at_utc,latitude,longitude,accuracy_meters,work_location_id,
                 distance_meters,geofence_radius_meters,geofence_result,
+                exception_reason,actor_role,
                 photo_object_key,photo_sha256,capture_source
             ) VALUES (
                 :event_id,:day_id,:employee_id,:event_type,:captured_at,
                 :latitude,:longitude,:accuracy,:work_location_id,:distance,
-                :radius,'WITHIN',:photo_key,:photo_sha256,'LIVE_CAMERA'
+                :radius,:geofence_result,:exception_reason,:actor_role,
+                :photo_key,:photo_sha256,'LIVE_CAMERA'
             )
             """
         ),
@@ -284,6 +532,9 @@ def insert_attendance_event(
             "work_location_id": work_location_id,
             "distance": distance_meters,
             "radius": radius_meters,
+            "geofence_result": geofence_result,
+            "exception_reason": exception_reason,
+            "actor_role": actor_role,
             "photo_key": photo_object_key,
             "photo_sha256": photo_sha256,
         },
