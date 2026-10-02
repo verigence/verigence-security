@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from verigence_security.attendance.config import get_attendance_settings
 from verigence_security.attendance.security import (
+    AttendanceAuthenticationError,
     AttendanceAuthorizationError,
     AttendanceDependencyError,
     SecurityAuthorizationClient,
@@ -28,7 +29,7 @@ def bearer_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> str:
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise AttendanceDependencyError("Missing Security human token")
+        raise AttendanceAuthenticationError("Missing Security human token")
     token = credentials.credentials.strip()
     if not token:
         raise AttendanceDependencyError("Missing Security human token")
