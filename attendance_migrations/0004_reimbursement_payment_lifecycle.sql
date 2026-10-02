@@ -39,4 +39,21 @@ CREATE INDEX IF NOT EXISTS ix_va_reimbursement_payment_queue
   ON verigence_attendance.reimbursement_claims(payment_status,updated_at_utc DESC)
   WHERE status IN ('APPROVED','PAID');
 
+CREATE TABLE IF NOT EXISTS verigence_attendance.reimbursement_payment_events (
+  payment_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  claim_id uuid NOT NULL
+    REFERENCES verigence_attendance.reimbursement_claims(claim_id),
+  from_status varchar(24) NOT NULL,
+  to_status varchar(24) NOT NULL,
+  paid_amount numeric(14,2),
+  payment_mode varchar(40),
+  payment_reference varchar(160),
+  actor_user_id uuid NOT NULL,
+  comment text,
+  occurred_at_utc timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_va_reimbursement_payment_events_claim
+  ON verigence_attendance.reimbursement_payment_events(claim_id,occurred_at_utc DESC);
+
 COMMIT;
