@@ -802,7 +802,7 @@ def list_reimbursements_by_payment_status(
                 FROM verigence_attendance.reimbursement_claims c
                 JOIN verigence_attendance.employees e ON e.employee_id=c.employee_id
                 WHERE c.payment_status=:payment_status
-                  AND c.status IN ('APPROVED','PAID')
+                  AND c.status='APPROVED'
                 ORDER BY c.updated_at_utc,c.created_at_utc
                 """
             ),
@@ -840,8 +840,8 @@ def decide_reimbursement(
             UPDATE verigence_attendance.reimbursement_claims
             SET status=:status,
                 payment_status=CASE
-                  WHEN :status='APPROVED' THEN 'PENDING'
-                  WHEN :status='REJECTED' THEN 'NOT_READY'
+                  WHEN :status='APPROVED' THEN 'PENDING_PAYMENT'
+                  WHEN :status='REJECTED' THEN NULL
                   ELSE payment_status
                 END,
                 updated_at_utc=now()
@@ -879,69 +879,46 @@ def update_reimbursement_payment(
     *,
     claim_id: UUID,
     actor_user_id: str,
-    payment_status: str,
-    paid_amount: Decimal | None,
-    paid_at_utc: datetime | None,
-    payment_mode: str | None,
-    payment_reference: str | None,
+    paid_amount: Decimal,
+    paid_at_utc: datetime,
+    payment_mode: str,
+    payment_reference: str,
     comment: str | None,
 ) -> dict[str, Any]:
     row = reimbursement(connection, claim_id)
-    if row["status"] not in {"APPROVED", "PAID"}:
+    if row["status"] != "APPROVED":
         raise AttendanceRuleError(
             "REIMBURSEMENT_NOT_APPROVED",
-            "Only an approved reimbursement can enter the payment workflow.",
+            "Only a finally approved reimbursement can be processed for payment.",
             status_code=409,
         )
-
-    current_payment = str(row.get("payment_status") or "PENDING")
-    allowed_transitions = {
-        "PENDING": {"PROCESSING", "PAID", "FAILED"},
-        "PROCESSING": {"PAID", "FAILED"},
-        "FAILED": {"PROCESSING", "PAID"},
-        "PAID": set(),
-        "NOT_READY": {"PROCESSING", "PAID"},
-    }
-    if payment_status not in allowed_transitions.get(current_payment, set()):
+    if row.get("payment_status") != "PENDING_PAYMENT":
         raise AttendanceRuleError(
             "REIMBURSEMENT_PAYMENT_STATE_INVALID",
-            f"Payment cannot move from {current_payment} to {payment_status}.",
+            "Only a reimbursement in Pending Payment status can be processed.",
             status_code=409,
         )
 
-    normalized_mode = (payment_mode or "").strip() or None
-    normalized_reference = (payment_reference or "").strip() or None
+    normalized_mode = payment_mode.strip()
+    normalized_reference = payment_reference.strip()
     normalized_comment = (comment or "").strip() or None
 
-    if payment_status == "PAID":
-        if paid_amount is None or paid_amount <= 0:
-            raise AttendanceRuleError(
-                "REIMBURSEMENT_PAID_AMOUNT_REQUIRED",
-                "Paid amount is required when a reimbursement is marked Paid.",
-                status_code=400,
-            )
-        if paid_at_utc is None:
-            raise AttendanceRuleError(
-                "REIMBURSEMENT_PAID_DATE_REQUIRED",
-                "Paid date/time is required when a reimbursement is marked Paid.",
-                status_code=400,
-            )
-        if not normalized_mode or not normalized_reference:
-            raise AttendanceRuleError(
-                "REIMBURSEMENT_PAYMENT_REFERENCE_REQUIRED",
-                "Payment mode and payment reference are required when marking a reimbursement Paid.",
-                status_code=400,
-            )
-        if paid_amount > Decimal(str(row["amount"])):
-            raise AttendanceRuleError(
-                "REIMBURSEMENT_PAID_AMOUNT_INVALID",
-                "Paid amount cannot exceed the currently claimed amount.",
-                status_code=400,
-            )
-    elif payment_status == "FAILED" and not normalized_comment:
+    if paid_amount <= 0:
         raise AttendanceRuleError(
-            "REIMBURSEMENT_PAYMENT_FAILURE_REASON_REQUIRED",
-            "A reason is required when payment processing fails.",
+            "REIMBURSEMENT_PAID_AMOUNT_REQUIRED",
+            "Processed amount must be greater than zero.",
+            status_code=400,
+        )
+    if paid_amount > Decimal(str(row["amount"])):
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_PAID_AMOUNT_INVALID",
+            "Processed amount cannot exceed the approved reimbursement amount.",
+            status_code=400,
+        )
+    if not normalized_mode or not normalized_reference:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_PAYMENT_REFERENCE_REQUIRED",
+            "Payment mode and payment reference are required.",
             status_code=400,
         )
 
@@ -949,32 +926,19 @@ def update_reimbursement_payment(
         text(
             """
             UPDATE verigence_attendance.reimbursement_claims
-            SET payment_status=:payment_status,
-                payment_initiated_at_utc=CASE
-                  WHEN :payment_status='PROCESSING'
-                    THEN COALESCE(payment_initiated_at_utc,now())
-                  ELSE payment_initiated_at_utc
-                END,
-                paid_at_utc=CASE
-                  WHEN :payment_status='PAID' THEN :paid_at_utc
-                  ELSE paid_at_utc
-                END,
-                paid_amount=CASE
-                  WHEN :payment_status='PAID' THEN :paid_amount
-                  ELSE paid_amount
-                END,
-                payment_mode=COALESCE(:payment_mode,payment_mode),
-                payment_reference=COALESCE(:payment_reference,payment_reference),
+            SET payment_status='PROCESSED',
+                paid_at_utc=:paid_at_utc,
+                paid_amount=:paid_amount,
+                payment_mode=:payment_mode,
+                payment_reference=:payment_reference,
                 payment_processed_by_user_id=CAST(:actor AS uuid),
                 payment_comment=:comment,
-                status=CASE WHEN :payment_status='PAID' THEN 'PAID' ELSE status END,
                 updated_at_utc=now()
             WHERE claim_id=:claim_id
             """
         ),
         {
             "claim_id": claim_id,
-            "payment_status": payment_status,
             "paid_at_utc": paid_at_utc,
             "paid_amount": paid_amount,
             "payment_mode": normalized_mode,
@@ -986,20 +950,18 @@ def update_reimbursement_payment(
     connection.execute(
         text(
             """
-            INSERT INTO verigence_attendance.reimbursement_payment_events (
-                claim_id,from_status,to_status,paid_amount,payment_mode,
+            INSERT INTO verigence_attendance.reimbursement_payment_transactions (
+                claim_id,transaction_status,amount,payment_mode,
                 payment_reference,actor_user_id,comment
             ) VALUES (
-                :claim_id,:from_status,:to_status,:paid_amount,:payment_mode,
+                :claim_id,'SUCCESS',:amount,:payment_mode,
                 :payment_reference,CAST(:actor AS uuid),:comment
             )
             """
         ),
         {
             "claim_id": claim_id,
-            "from_status": current_payment,
-            "to_status": payment_status,
-            "paid_amount": paid_amount,
+            "amount": paid_amount,
             "payment_mode": normalized_mode,
             "payment_reference": normalized_reference,
             "actor": actor_user_id,
@@ -1007,7 +969,6 @@ def update_reimbursement_payment(
         },
     )
     return reimbursement(connection, claim_id)
-
 
 def list_payslips(connection: Connection, employee_id: UUID) -> list[dict[str, Any]]:
     return [
