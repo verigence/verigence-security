@@ -13,6 +13,7 @@ from verigence_security.attendance.employee.domain import (
     leave_can_move_to_hr,
     within_geofence,
 )
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
