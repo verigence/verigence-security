@@ -68,6 +68,7 @@ from verigence_security.attendance.employee.schemas import (
     AttendanceDayResponse,
     AttendanceEventResponse,
     AttendanceHrDecisionRequest,
+    AttendanceFlagResponse,
     AttendanceHrReviewResponse,
     BulkImportResponse,
     ConfigUpdateRequest,
@@ -87,6 +88,8 @@ from verigence_security.attendance.employee.schemas import (
     ReimbursementClaimCreate,
     ReimbursementClaimResponse,
     ReimbursementClaimReviewRequest,
+    ReimbursementLineResponse,
+    ReimbursementLineReviewResponse,
     ReimbursementDecisionRequest,
     ReimbursementPaymentRequest,
     ReimbursementResponse,
@@ -195,14 +198,14 @@ def _attendance_review(row: dict[str, Any]) -> AttendanceHrReviewResponse:
         hrReviewStatus=row["hr_review_status"],
         hrReviewComment=row.get("hr_review_comment"),
         flags=[
-            {
-                "attendanceFlagId": flag["attendance_flag_id"],
-                "flagType": flag["flag_type"],
-                "flagDetail": flag.get("flag_detail"),
-                "employeeReason": flag.get("employee_reason"),
-                "resolutionStatus": flag["resolution_status"],
-                "createdAtUtc": flag["created_at_utc"],
-            }
+            AttendanceFlagResponse(
+                attendanceFlagId=flag["attendance_flag_id"],
+                flagType=flag["flag_type"],
+                flagDetail=flag.get("flag_detail"),
+                employeeReason=flag.get("employee_reason"),
+                resolutionStatus=flag["resolution_status"],
+                createdAtUtc=flag["created_at_utc"],
+            )
             for flag in row.get("flags", [])
         ],
     )
@@ -251,44 +254,44 @@ def _claim(row: dict[str, Any]) -> ReimbursementResponse:
 
 
 def _reimbursement_claim(row: dict[str, Any]) -> ReimbursementClaimResponse:
-    lines = []
+    lines: list[ReimbursementLineResponse] = []
     for item in row.get("lines", []):
         reviews = [
-            {
-                "stage": review["stage"],
-                "decision": review["decision"],
-                "previousAmount": review.get("previous_amount"),
-                "approvedAmount": review["approved_amount"],
-                "actorRole": review["actor_role"],
-                "comment": review.get("comment"),
-                "decidedAtUtc": review["decided_at_utc"],
-            }
+            ReimbursementLineReviewResponse(
+                stage=review["stage"],
+                decision=review["decision"],
+                previousAmount=review.get("previous_amount"),
+                approvedAmount=review["approved_amount"],
+                actorRole=review["actor_role"],
+                comment=review.get("comment"),
+                decidedAtUtc=review["decided_at_utc"],
+            )
             for review in item.get("reviews", [])
         ]
         lines.append(
-            {
-                "reimbursementItemId": item["reimbursement_item_id"],
-                "lineNumber": item["line_number"],
-                "expenseDate": item["expense_date"],
-                "category": item["category"],
-                "claimedAmount": item["claimed_amount"],
-                "approvedAmount": item.get("approved_amount"),
-                "vendorName": item.get("vendor_name"),
-                "description": item.get("description"),
-                "receiptUrl": (
+            ReimbursementLineResponse(
+                reimbursementItemId=item["reimbursement_item_id"],
+                lineNumber=item["line_number"],
+                expenseDate=item["expense_date"],
+                category=item["category"],
+                claimedAmount=item["claimed_amount"],
+                approvedAmount=item.get("approved_amount"),
+                vendorName=item.get("vendor_name"),
+                description=item.get("description"),
+                receiptUrl=(
                     storage().presign(object_key=item["receipt_object_key"])
                     if item.get("receipt_object_key")
                     else None
                 ),
-                "travelFrom": item.get("travel_from"),
-                "travelTo": item.get("travel_to"),
-                "transportMode": item.get("transport_mode"),
-                "distanceKm": item.get("distance_km"),
-                "ticketReference": item.get("ticket_reference"),
-                "mealType": item.get("meal_type"),
-                "lineStatus": item["line_status"],
-                "reviews": reviews,
-            }
+                travelFrom=item.get("travel_from"),
+                travelTo=item.get("travel_to"),
+                transportMode=item.get("transport_mode"),
+                distanceKm=item.get("distance_km"),
+                ticketReference=item.get("ticket_reference"),
+                mealType=item.get("meal_type"),
+                lineStatus=item["line_status"],
+                reviews=reviews,
+            )
         )
     return ReimbursementClaimResponse(
         claimId=row["claim_id"],
