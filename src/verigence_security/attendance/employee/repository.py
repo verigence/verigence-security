@@ -702,6 +702,402 @@ def create_reimbursement(
     return reimbursement(connection, claim_id)
 
 
+
+def create_reimbursement_claim(
+    connection: Connection,
+    *,
+    employee_id: UUID,
+    purpose: str,
+    claim_month: date,
+    items: list[dict[str, Any]],
+    finance_required: bool,
+) -> dict[str, Any]:
+    if not items:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_LINES_REQUIRED",
+            "At least one expense line is required.",
+            status_code=400,
+        )
+    claim_id = uuid4()
+    claim_number = f"EXP-{claim_month:%Y%m}-{claim_id.hex[:8].upper()}"
+    claimed_total = sum(
+        (Decimal(str(item["claimed_amount"])) for item in items),
+        Decimal(0),
+    )
+    first_date = min(item["expense_date"] for item in items)
+    categories = {str(item["category"]) for item in items}
+    legacy_category = (
+        next(iter(categories))
+        if len(categories) == 1 and next(iter(categories)) in {"TRAVEL", "FOOD", "OTHER"}
+        else "OTHER"
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.reimbursement_claims (
+                claim_id,employee_id,expense_date,category,amount,description,
+                finance_approval_required,claim_number,purpose,claim_month,
+                claimed_total,adjusted_total,submitted_at_utc
+            ) VALUES (
+                :claim_id,:employee_id,:expense_date,:category,:amount,:purpose,
+                :finance_required,:claim_number,:purpose,:claim_month,
+                :claimed_total,0,now()
+            )
+            """
+        ),
+        {
+            "claim_id": claim_id,
+            "employee_id": employee_id,
+            "expense_date": first_date,
+            "category": legacy_category,
+            "amount": claimed_total,
+            "purpose": purpose.strip(),
+            "finance_required": finance_required,
+            "claim_number": claim_number,
+            "claim_month": claim_month,
+            "claimed_total": claimed_total,
+        },
+    )
+    for line_number, item in enumerate(items, start=1):
+        connection.execute(
+            text(
+                """
+                INSERT INTO verigence_attendance.reimbursement_items (
+                    claim_id,line_number,expense_date,category,claimed_amount,
+                    vendor_name,description,receipt_object_key,receipt_sha256,
+                    travel_from,travel_to,transport_mode,distance_km,
+                    ticket_reference,meal_type
+                ) VALUES (
+                    :claim_id,:line_number,:expense_date,:category,:claimed_amount,
+                    :vendor_name,:description,:receipt_object_key,:receipt_sha256,
+                    :travel_from,:travel_to,:transport_mode,:distance_km,
+                    :ticket_reference,:meal_type
+                )
+                """
+            ),
+            {
+                "claim_id": claim_id,
+                "line_number": line_number,
+                **item,
+            },
+        )
+    return reimbursement_claim_detail(connection, claim_id)
+
+
+def reimbursement_claim_detail(
+    connection: Connection,
+    claim_id: UUID,
+) -> dict[str, Any]:
+    header = connection.execute(
+        text(
+            """
+            SELECT c.*,e.display_name
+            FROM verigence_attendance.reimbursement_claims c
+            JOIN verigence_attendance.employees e ON e.employee_id=c.employee_id
+            WHERE c.claim_id=:claim_id
+            """
+        ),
+        {"claim_id": claim_id},
+    ).mappings().first()
+    if header is None:
+        raise AttendanceNotFoundError("Reimbursement claim not found.")
+    result = dict(header)
+    lines: list[dict[str, Any]] = []
+    for row in connection.execute(
+        text(
+            """
+            SELECT *
+            FROM verigence_attendance.reimbursement_items
+            WHERE claim_id=:claim_id
+            ORDER BY line_number
+            """
+        ),
+        {"claim_id": claim_id},
+    ).mappings():
+        item = dict(row)
+        item["reviews"] = [
+            dict(review)
+            for review in connection.execute(
+                text(
+                    """
+                    SELECT stage,decision,previous_amount,approved_amount,
+                           actor_role,comment,decided_at_utc
+                    FROM verigence_attendance.reimbursement_item_reviews
+                    WHERE reimbursement_item_id=:item_id
+                    ORDER BY decided_at_utc
+                    """
+                ),
+                {"item_id": item["reimbursement_item_id"]},
+            ).mappings()
+        ]
+        lines.append(item)
+    result["lines"] = lines
+    return result
+
+
+def list_reimbursement_claims_for_employee(
+    connection: Connection,
+    employee_id: UUID,
+) -> list[dict[str, Any]]:
+    claim_ids = connection.execute(
+        text(
+            """
+            SELECT claim_id
+            FROM verigence_attendance.reimbursement_claims
+            WHERE employee_id=:employee_id
+            ORDER BY created_at_utc DESC
+            """
+        ),
+        {"employee_id": employee_id},
+    ).scalars()
+    return [reimbursement_claim_detail(connection, UUID(str(claim_id))) for claim_id in claim_ids]
+
+
+def list_reimbursement_claims_by_status(
+    connection: Connection,
+    status: str,
+) -> list[dict[str, Any]]:
+    claim_ids = connection.execute(
+        text(
+            """
+            SELECT claim_id
+            FROM verigence_attendance.reimbursement_claims
+            WHERE status=:status
+            ORDER BY created_at_utc
+            """
+        ),
+        {"status": status},
+    ).scalars()
+    return [reimbursement_claim_detail(connection, UUID(str(claim_id))) for claim_id in claim_ids]
+
+
+def list_pm_team_reimbursement_claims(
+    connection: Connection,
+    actor_user_id: str,
+) -> list[dict[str, Any]]:
+    claim_ids = connection.execute(
+        text(
+            """
+            SELECT c.claim_id
+            FROM verigence_attendance.reimbursement_claims c
+            JOIN verigence_attendance.employees e ON e.employee_id=c.employee_id
+            WHERE e.employment_status='ACTIVE'
+              AND e.pmo_user_id=CAST(:actor AS uuid)
+            ORDER BY c.created_at_utc DESC
+            """
+        ),
+        {"actor": actor_user_id},
+    ).scalars()
+    return [reimbursement_claim_detail(connection, UUID(str(claim_id))) for claim_id in claim_ids]
+
+
+def review_reimbursement_claim(
+    connection: Connection,
+    *,
+    claim_id: UUID,
+    actor_user_id: str,
+    actor_role: str,
+    stage: str,
+    line_decisions: list[dict[str, Any]],
+    comment: str | None,
+) -> dict[str, Any]:
+    claim = reimbursement_claim_detail(connection, claim_id)
+    expected = "PENDING_HR" if stage == "HR" else "PENDING_FINANCE"
+    if claim["status"] != expected:
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_STATE_INVALID",
+            f"Claim is not awaiting {stage} review.",
+            status_code=409,
+        )
+
+    lines = {
+        UUID(str(item["reimbursement_item_id"])): item
+        for item in claim["lines"]
+    }
+    decisions = {
+        UUID(str(item["reimbursement_item_id"])): item
+        for item in line_decisions
+    }
+    if set(lines) != set(decisions):
+        raise AttendanceRuleError(
+            "REIMBURSEMENT_LINE_REVIEW_INCOMPLETE",
+            "Every expense line must be reviewed before the claim can move forward.",
+            status_code=400,
+        )
+
+    for item_id, line in lines.items():
+        decision = decisions[item_id]
+        action = str(decision["decision"])
+        approved = Decimal(str(decision["approved_amount"]))
+        claimed = Decimal(str(line["claimed_amount"]))
+        previous = (
+            claimed
+            if stage == "HR"
+            else Decimal(str(line["approved_amount"] or 0))
+        )
+        line_comment = (decision.get("comment") or "").strip() or None
+
+        if approved < 0 or approved > previous:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_APPROVED_AMOUNT_INVALID",
+                "Approved amount must be between zero and the amount entering this review stage.",
+                status_code=400,
+            )
+        if action == "APPROVE" and approved != previous:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_APPROVE_AMOUNT_MISMATCH",
+                "Use Adjust when the approved amount differs from the reviewed amount.",
+                status_code=400,
+            )
+        if action == "ADJUST" and (approved <= 0 or approved >= previous):
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_ADJUST_AMOUNT_INVALID",
+                "Adjusted amount must be greater than zero and lower than the reviewed amount.",
+                status_code=400,
+            )
+        if action == "REJECT" and approved != 0:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_REJECT_AMOUNT_INVALID",
+                "Rejected expense lines must have zero approved amount.",
+                status_code=400,
+            )
+        if action in {"ADJUST", "REJECT"} and not line_comment:
+            raise AttendanceRuleError(
+                "REIMBURSEMENT_REVIEW_REASON_REQUIRED",
+                "A reason is required when an expense line is adjusted or rejected.",
+                status_code=400,
+            )
+
+        if approved == 0:
+            line_status = "REJECTED"
+        elif stage == "HR" and bool(claim["finance_approval_required"]):
+            line_status = "PENDING_FINANCE"
+        elif approved < claimed:
+            line_status = "ADJUSTED"
+        else:
+            line_status = "APPROVED"
+
+        connection.execute(
+            text(
+                """
+                UPDATE verigence_attendance.reimbursement_items
+                SET approved_amount=:approved_amount,
+                    line_status=:line_status,
+                    updated_at_utc=now()
+                WHERE reimbursement_item_id=:item_id
+                """
+            ),
+            {
+                "approved_amount": approved,
+                "line_status": line_status,
+                "item_id": item_id,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO verigence_attendance.reimbursement_item_reviews (
+                    reimbursement_item_id,stage,decision,previous_amount,
+                    approved_amount,actor_user_id,actor_role,comment
+                ) VALUES (
+                    :item_id,:stage,:decision,:previous_amount,
+                    :approved_amount,CAST(:actor AS uuid),:actor_role,:comment
+                )
+                """
+            ),
+            {
+                "item_id": item_id,
+                "stage": stage,
+                "decision": action,
+                "previous_amount": previous,
+                "approved_amount": approved,
+                "actor": actor_user_id,
+                "actor_role": actor_role,
+                "comment": line_comment,
+            },
+        )
+
+    totals = connection.execute(
+        text(
+            """
+            SELECT COALESCE(sum(claimed_amount),0) AS claimed,
+                   COALESCE(sum(approved_amount),0) AS approved
+            FROM verigence_attendance.reimbursement_items
+            WHERE claim_id=:claim_id
+            """
+        ),
+        {"claim_id": claim_id},
+    ).mappings().one()
+    claimed_total = Decimal(str(totals["claimed"]))
+    approved_total = Decimal(str(totals["approved"]))
+    adjusted_total = claimed_total - approved_total
+
+    needs_finance = bool(claim["finance_approval_required"])
+    if stage == "HR" and needs_finance and approved_total > 0:
+        next_status = "PENDING_FINANCE"
+        outcome = None
+        payment_status = None
+    elif approved_total <= 0:
+        next_status = "REJECTED"
+        outcome = "REJECTED"
+        payment_status = None
+    else:
+        next_status = "APPROVED"
+        outcome = (
+            "PARTIALLY_APPROVED"
+            if approved_total < claimed_total
+            else "APPROVED"
+        )
+        payment_status = "PENDING_PAYMENT"
+
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.reimbursement_claims
+            SET status=:status,
+                approval_outcome=:outcome,
+                claimed_total=:claimed_total,
+                approved_total=:approved_total,
+                adjusted_total=:adjusted_total,
+                payment_status=:payment_status,
+                updated_at_utc=now()
+            WHERE claim_id=:claim_id
+            """
+        ),
+        {
+            "status": next_status,
+            "outcome": outcome,
+            "claimed_total": claimed_total,
+            "approved_total": approved_total,
+            "adjusted_total": adjusted_total,
+            "payment_status": payment_status,
+            "claim_id": claim_id,
+        },
+    )
+    aggregate_decision = "REJECT" if approved_total <= 0 else "APPROVE"
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.approval_actions (
+                entity_type,entity_id,stage,decision,actor_user_id,actor_role,comment
+            ) VALUES (
+                'REIMBURSEMENT',:claim_id,:stage,:decision,
+                CAST(:actor AS uuid),:actor_role,:comment
+            )
+            """
+        ),
+        {
+            "claim_id": claim_id,
+            "stage": stage,
+            "decision": aggregate_decision,
+            "actor": actor_user_id,
+            "actor_role": actor_role,
+            "comment": comment,
+        },
+    )
+    return reimbursement_claim_detail(connection, claim_id)
+
+
 def reimbursement(connection: Connection, claim_id: UUID) -> dict[str, Any]:
     row = connection.execute(
         text(
