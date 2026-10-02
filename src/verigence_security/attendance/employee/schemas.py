@@ -50,16 +50,21 @@ class AttendanceEventResponse(BaseModel):
     attendanceDate: date
     eventType: Literal["CHECK_IN", "CHECK_OUT"]
     capturedAtUtc: datetime
-    distanceMeters: float
-    geofenceRadiusMeters: int
+    distanceMeters: float | None = None
+    geofenceRadiusMeters: int | None = None
+    geofenceResult: Literal["WITHIN", "OUTSIDE", "UNVERIFIABLE"]
+    hrReviewRequired: bool = False
 
 
 class AttendanceDayResponse(BaseModel):
+    attendanceDayId: UUID
     attendanceDate: date
     status: str
     presentFraction: Decimal
     checkInAtUtc: datetime | None = None
     checkOutAtUtc: datetime | None = None
+    hrReviewStatus: str = "NOT_REQUIRED"
+    hrReviewComment: str | None = None
 
 
 class TeamAttendanceResponse(BaseModel):
@@ -70,6 +75,36 @@ class TeamAttendanceResponse(BaseModel):
     presentFraction: Decimal
     checkInAtUtc: datetime | None = None
     checkOutAtUtc: datetime | None = None
+    hrReviewStatus: str = "NOT_REQUIRED"
+
+
+class AttendanceFlagResponse(BaseModel):
+    attendanceFlagId: UUID
+    flagType: Literal["OUTSIDE_GEOFENCE", "LATE_CHECK_IN", "EARLY_CHECK_OUT"]
+    flagDetail: str | None = None
+    employeeReason: str | None = None
+    resolutionStatus: str
+    createdAtUtc: datetime
+
+
+class AttendanceHrReviewResponse(BaseModel):
+    attendanceDayId: UUID
+    employeeId: UUID
+    employeeCode: str
+    employeeName: str
+    attendanceDate: date
+    presentFraction: Decimal
+    checkInAtUtc: datetime | None = None
+    checkOutAtUtc: datetime | None = None
+    hrReviewStatus: str
+    hrReviewComment: str | None = None
+    flags: list[AttendanceFlagResponse] = Field(default_factory=list)
+
+
+class AttendanceHrDecisionRequest(BaseModel):
+    decision: Literal["APPROVE", "ADJUST", "REJECT"]
+    presentFraction: Decimal | None = Field(default=None, ge=0, le=1)
+    comment: str | None = Field(default=None, max_length=2000)
 
 
 class LeaveCreateRequest(BaseModel):
