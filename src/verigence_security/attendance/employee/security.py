@@ -47,16 +47,33 @@ class EmployeeSecurityClient:
     def __init__(self) -> None:
         self._client = SecurityAuthorizationClient(get_attendance_settings())
 
-    def require(self, *, user_id: str, permission_key: str) -> dict[str, Any]:
+    def require(
+        self,
+        *,
+        user_id: str,
+        permission_key: str,
+        tenant_id: str | UUID | None = None,
+    ) -> dict[str, Any]:
+        resolved_tenant = UUID(str(tenant_id)) if tenant_id is not None else None
         return self._client.check(
             user_id=UUID(user_id),
-            tenant_id=None,
+            tenant_id=resolved_tenant,
             permission_key=permission_key,
         )
 
-    def allowed(self, *, user_id: str, permission_key: str) -> bool:
+    def allowed(
+        self,
+        *,
+        user_id: str,
+        permission_key: str,
+        tenant_id: str | UUID | None = None,
+    ) -> bool:
         try:
-            self.require(user_id=user_id, permission_key=permission_key)
+            self.require(
+                user_id=user_id,
+                permission_key=permission_key,
+                tenant_id=tenant_id,
+            )
             return True
         except AttendanceAuthorizationError:
             return False
