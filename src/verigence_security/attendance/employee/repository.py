@@ -799,25 +799,42 @@ def leave_request(connection: Connection, leave_id: UUID) -> dict[str, Any]:
     ).mappings().first()
     if row is None:
         raise AttendanceNotFoundError("Leave request not found.")
-    return dict(row)
-
-
-def list_leave_for_employee(connection: Connection, employee_id: UUID) -> list[dict[str, Any]]:
-    return [
-        dict(row)
-        for row in connection.execute(
+    result = dict(row)
+    result["reviews"] = [
+        dict(review)
+        for review in connection.execute(
             text(
                 """
-                SELECT l.*,e.display_name,lt.leave_name
-                FROM verigence_attendance.leave_requests l
-                JOIN verigence_attendance.employees e ON e.employee_id=l.employee_id
-                JOIN verigence_attendance.leave_types lt ON lt.leave_type_id=l.leave_type_id
-                WHERE l.employee_id=:employee_id
-                ORDER BY l.created_at_utc DESC
+                SELECT stage,decision,approved_days,actor_role,comment,decided_at_utc
+                FROM verigence_attendance.leave_review_actions
+                WHERE leave_request_id=:leave_id
+                ORDER BY decided_at_utc
                 """
             ),
-            {"employee_id": employee_id},
+            {"leave_id": leave_id},
         ).mappings()
+    ]
+    return result
+
+
+def list_leave_for_employee(
+    connection: Connection,
+    employee_id: UUID,
+) -> list[dict[str, Any]]:
+    leave_ids = connection.execute(
+        text(
+            """
+            SELECT leave_request_id
+            FROM verigence_attendance.leave_requests
+            WHERE employee_id=:employee_id
+            ORDER BY created_at_utc DESC
+            """
+        ),
+        {"employee_id": employee_id},
+    ).scalars()
+    return [
+        leave_request(connection, UUID(str(leave_id)))
+        for leave_id in leave_ids
     ]
 
 
@@ -854,25 +871,25 @@ def list_team_attendance(
 
 
 def list_team_leave(connection: Connection, actor_user_id: str) -> list[dict[str, Any]]:
+    leave_ids = connection.execute(
+        text(
+            """
+            SELECT l.leave_request_id
+            FROM verigence_attendance.leave_requests l
+            JOIN verigence_attendance.employees e ON e.employee_id=l.employee_id
+            WHERE l.status='PENDING_OPERATIONAL'
+              AND (
+                e.tl_user_id=CAST(:actor AS uuid)
+                OR e.pmo_user_id=CAST(:actor AS uuid)
+              )
+            ORDER BY l.created_at_utc
+            """
+        ),
+        {"actor": actor_user_id},
+    ).scalars()
     return [
-        dict(row)
-        for row in connection.execute(
-            text(
-                """
-                SELECT l.*,e.display_name,lt.leave_name
-                FROM verigence_attendance.leave_requests l
-                JOIN verigence_attendance.employees e ON e.employee_id=l.employee_id
-                JOIN verigence_attendance.leave_types lt ON lt.leave_type_id=l.leave_type_id
-                WHERE l.status='PENDING_OPERATIONAL'
-                  AND (
-                    e.tl_user_id=CAST(:actor AS uuid)
-                    OR e.pmo_user_id=CAST(:actor AS uuid)
-                  )
-                ORDER BY l.created_at_utc
-                """
-            ),
-            {"actor": actor_user_id},
-        ).mappings()
+        leave_request(connection, UUID(str(leave_id)))
+        for leave_id in leave_ids
     ]
 
 
@@ -893,6 +910,13 @@ def decide_team_leave(
         raise AttendanceRuleError("TEAM_SCOPE_DENIED", "Leave request is outside your assigned team.", status_code=403)
     if row["status"] != "PENDING_OPERATIONAL":
         raise AttendanceRuleError("LEAVE_STATE_INVALID", "Leave request is not awaiting TL/PMO action.")
+    normalized_comment = (comment or "").strip() or None
+    if decision == "REJECT" and not normalized_comment:
+        raise AttendanceRuleError(
+            "LEAVE_REJECTION_REASON_REQUIRED",
+            "A reason is required when rejecting a leave request.",
+            status_code=400,
+        )
     next_status = "PENDING_HR" if decision == "APPROVE" else "REJECTED"
     connection.execute(
         text(
@@ -918,7 +942,7 @@ def decide_team_leave(
             "decision": decision,
             "actor": actor_user_id,
             "role": role,
-            "comment": comment,
+            "comment": normalized_comment,
         },
     )
     connection.execute(
@@ -938,7 +962,7 @@ def decide_team_leave(
             "decision": decision,
             "actor": actor_user_id,
             "role": role,
-            "comment": comment,
+            "comment": normalized_comment,
         },
     )
     return leave_request(connection, leave_id)
@@ -1914,20 +1938,22 @@ def leave_balances_for_employee(
     ]
 
 
-def list_leave_by_status(connection: Connection, status: str) -> list[dict[str, Any]]:
+def list_leave_by_status(
+    connection: Connection,
+    status: str,
+) -> list[dict[str, Any]]:
+    leave_ids = connection.execute(
+        text(
+            """
+            SELECT leave_request_id
+            FROM verigence_attendance.leave_requests
+            WHERE status=:status
+            ORDER BY created_at_utc
+            """
+        ),
+        {"status": status},
+    ).scalars()
     return [
-        dict(row)
-        for row in connection.execute(
-            text(
-                """
-                SELECT l.*,e.display_name,lt.leave_name
-                FROM verigence_attendance.leave_requests l
-                JOIN verigence_attendance.employees e ON e.employee_id=l.employee_id
-                JOIN verigence_attendance.leave_types lt ON lt.leave_type_id=l.leave_type_id
-                WHERE l.status=:status
-                ORDER BY l.created_at_utc
-                """
-            ),
-            {"status": status},
-        ).mappings()
+        leave_request(connection, UUID(str(leave_id)))
+        for leave_id in leave_ids
     ]
