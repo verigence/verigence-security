@@ -172,6 +172,7 @@ class ReimbursementClaimResponse(BaseModel):
     purpose: str
     claimMonth: date
     status: str
+    approvalOutcome: Literal["APPROVED", "PARTIALLY_APPROVED", "REJECTED"] | None = None
     financeApprovalRequired: bool
     claimedTotal: Decimal
     approvedTotal: Decimal | None = None
