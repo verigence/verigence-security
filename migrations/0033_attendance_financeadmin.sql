@@ -53,8 +53,7 @@ WITH hr_permissions(permission_key) AS (
     ('attendance.reimbursement.hr.approve'),
     ('attendance.payroll.manage'),
     ('attendance.report.read'),
-    ('attendance.report.export'),
-    ('attendance.config.manage')
+    ('attendance.report.export')
 )
 INSERT INTO security.module_role_permissions
 (module_key,role_key,permission_key,status,created_at_utc)
