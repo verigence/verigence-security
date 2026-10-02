@@ -166,8 +166,7 @@ def _claim(row: dict[str, Any]) -> ReimbursementResponse:
             if row.get("receipt_object_key")
             else None
         ),
-        paymentStatus=str(row.get("payment_status") or "NOT_READY"),
-        paymentInitiatedAtUtc=row.get("payment_initiated_at_utc"),
+        paymentStatus=row.get("payment_status"),
         paidAtUtc=row.get("paid_at_utc"),
         paidAmount=row.get("paid_amount"),
         paymentMode=row.get("payment_mode"),
@@ -546,7 +545,7 @@ def reimbursement_decision(
 def reimbursement_payment_queue(
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
     connection: Annotated[Connection, Depends(get_connection)],
-    paymentStatus: Literal["PENDING", "PROCESSING", "FAILED", "PAID"] = "PENDING",
+    paymentStatus: Literal["PENDING_PAYMENT", "PROCESSED"] = "PENDING_PAYMENT",
 ) -> list[ReimbursementResponse]:
     security_client().require(
         user_id=principal.subject,
@@ -577,7 +576,6 @@ def reimbursement_payment(
             connection,
             claim_id=claim_id,
             actor_user_id=principal.subject,
-            payment_status=body.paymentStatus,
             paid_amount=body.paidAmount,
             paid_at_utc=body.paidAtUtc,
             payment_mode=body.paymentMode,
