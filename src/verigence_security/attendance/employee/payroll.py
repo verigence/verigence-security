@@ -180,6 +180,167 @@ def statutory_config_for_month(
     return dict(row)
 
 
+def list_payroll_statutory_configs(
+    connection: Connection,
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT statutory_config_id,effective_from,effective_to,
+                       pf_employee_rate,pf_employer_rate,pf_wage_ceiling,
+                       eps_employer_rate,eps_wage_ceiling,
+                       esi_employee_rate,esi_employer_rate,esi_wage_ceiling,
+                       gratuity_provision_rate,salary_tds_section,created_at_utc
+                FROM verigence_attendance.payroll_statutory_config
+                ORDER BY effective_from DESC
+                """
+            )
+        ).mappings()
+    ]
+
+
+def upsert_payroll_statutory_config(
+    connection: Connection,
+    *,
+    effective_from: date,
+    pf_employee_rate: Decimal,
+    pf_employer_rate: Decimal,
+    pf_wage_ceiling: Decimal,
+    eps_employer_rate: Decimal,
+    eps_wage_ceiling: Decimal,
+    esi_employee_rate: Decimal,
+    esi_employer_rate: Decimal,
+    esi_wage_ceiling: Decimal,
+    gratuity_provision_rate: Decimal,
+    salary_tds_section: str,
+) -> dict[str, Any]:
+    rates = {
+        "PF employee rate": pf_employee_rate,
+        "PF employer rate": pf_employer_rate,
+        "EPS employer rate": eps_employer_rate,
+        "ESI employee rate": esi_employee_rate,
+        "ESI employer rate": esi_employer_rate,
+        "Gratuity provision rate": gratuity_provision_rate,
+    }
+    for label, value in rates.items():
+        if value < 0 or value > 1:
+            raise AttendanceRuleError(
+                "PAYROLL_STATUTORY_RATE_INVALID",
+                f"{label} must be between 0 and 1.",
+                status_code=400,
+            )
+    for label, value in {
+        "PF wage ceiling": pf_wage_ceiling,
+        "EPS wage ceiling": eps_wage_ceiling,
+        "ESI wage ceiling": esi_wage_ceiling,
+    }.items():
+        if value <= 0:
+            raise AttendanceRuleError(
+                "PAYROLL_STATUTORY_CEILING_INVALID",
+                f"{label} must be greater than zero.",
+                status_code=400,
+            )
+
+    normalized_tds_section = salary_tds_section.strip()
+    if not normalized_tds_section:
+        raise AttendanceRuleError(
+            "PAYROLL_TDS_SECTION_REQUIRED",
+            "Salary TDS section/reference is required.",
+            status_code=400,
+        )
+
+    next_effective = connection.execute(
+        text(
+            """
+            SELECT min(effective_from)
+            FROM verigence_attendance.payroll_statutory_config
+            WHERE effective_from>:effective_from
+            """
+        ),
+        {"effective_from": effective_from},
+    ).scalar_one_or_none()
+    new_effective_to = (
+        next_effective - timedelta(days=1)
+        if next_effective is not None
+        else None
+    )
+
+    connection.execute(
+        text(
+            """
+            UPDATE verigence_attendance.payroll_statutory_config
+            SET effective_to=:previous_to
+            WHERE effective_from<:effective_from
+              AND (effective_to IS NULL OR effective_to>=:effective_from)
+            """
+        ),
+        {
+            "effective_from": effective_from,
+            "previous_to": effective_from - timedelta(days=1),
+        },
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO verigence_attendance.payroll_statutory_config (
+                effective_from,effective_to,pf_employee_rate,pf_employer_rate,
+                pf_wage_ceiling,eps_employer_rate,eps_wage_ceiling,
+                esi_employee_rate,esi_employer_rate,esi_wage_ceiling,
+                gratuity_provision_rate,salary_tds_section
+            ) VALUES (
+                :effective_from,:effective_to,:pf_employee_rate,:pf_employer_rate,
+                :pf_wage_ceiling,:eps_employer_rate,:eps_wage_ceiling,
+                :esi_employee_rate,:esi_employer_rate,:esi_wage_ceiling,
+                :gratuity_provision_rate,:salary_tds_section
+            )
+            ON CONFLICT (effective_from) DO UPDATE SET
+                effective_to=EXCLUDED.effective_to,
+                pf_employee_rate=EXCLUDED.pf_employee_rate,
+                pf_employer_rate=EXCLUDED.pf_employer_rate,
+                pf_wage_ceiling=EXCLUDED.pf_wage_ceiling,
+                eps_employer_rate=EXCLUDED.eps_employer_rate,
+                eps_wage_ceiling=EXCLUDED.eps_wage_ceiling,
+                esi_employee_rate=EXCLUDED.esi_employee_rate,
+                esi_employer_rate=EXCLUDED.esi_employer_rate,
+                esi_wage_ceiling=EXCLUDED.esi_wage_ceiling,
+                gratuity_provision_rate=EXCLUDED.gratuity_provision_rate,
+                salary_tds_section=EXCLUDED.salary_tds_section
+            """
+        ),
+        {
+            "effective_from": effective_from,
+            "effective_to": new_effective_to,
+            "pf_employee_rate": pf_employee_rate,
+            "pf_employer_rate": pf_employer_rate,
+            "pf_wage_ceiling": pf_wage_ceiling,
+            "eps_employer_rate": eps_employer_rate,
+            "eps_wage_ceiling": eps_wage_ceiling,
+            "esi_employee_rate": esi_employee_rate,
+            "esi_employer_rate": esi_employer_rate,
+            "esi_wage_ceiling": esi_wage_ceiling,
+            "gratuity_provision_rate": gratuity_provision_rate,
+            "salary_tds_section": normalized_tds_section,
+        },
+    )
+    row = connection.execute(
+        text(
+            """
+            SELECT statutory_config_id,effective_from,effective_to,
+                   pf_employee_rate,pf_employer_rate,pf_wage_ceiling,
+                   eps_employer_rate,eps_wage_ceiling,
+                   esi_employee_rate,esi_employer_rate,esi_wage_ceiling,
+                   gratuity_provision_rate,salary_tds_section,created_at_utc
+            FROM verigence_attendance.payroll_statutory_config
+            WHERE effective_from=:effective_from
+            """
+        ),
+        {"effective_from": effective_from},
+    ).mappings().one()
+    return dict(row)
+
+
 def payroll_profile_for_month(
     connection: Connection,
     *,
