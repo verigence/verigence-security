@@ -54,9 +54,9 @@ from verigence_security.attendance.employee.repository import (
     list_payslips,
     list_pm_team_reimbursement_claims,
     list_pm_team_reimbursements,
+    list_reimbursement_claims_by_payment_status,
     list_reimbursement_claims_by_status,
     list_reimbursement_claims_for_employee,
-    list_reimbursements_by_payment_status,
     list_reimbursements_by_status,
     list_reimbursements_for_employee,
     list_team_attendance,
@@ -898,38 +898,41 @@ def reimbursement_decision(
 
 @router.get(
     "/admin/reimbursements/payments",
-    response_model=list[ReimbursementResponse],
+    response_model=list[ReimbursementClaimResponse],
 )
 def reimbursement_payment_queue(
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
     connection: Annotated[Connection, Depends(get_connection)],
     paymentStatus: Literal["PENDING_PAYMENT", "PROCESSED"] = "PENDING_PAYMENT",
-) -> list[ReimbursementResponse]:
+) -> list[ReimbursementClaimResponse]:
     security_client().require(
         user_id=principal.subject,
         permission_key="attendance.reimbursement.payment.manage",
     )
     return [
-        _claim(row)
-        for row in list_reimbursements_by_payment_status(connection, paymentStatus)
+        _reimbursement_claim(row)
+        for row in list_reimbursement_claims_by_payment_status(
+            connection,
+            paymentStatus,
+        )
     ]
 
 
 @router.post(
     "/admin/reimbursements/{claim_id}/payment",
-    response_model=ReimbursementResponse,
+    response_model=ReimbursementClaimResponse,
 )
 def reimbursement_payment(
     claim_id: UUID,
     body: ReimbursementPaymentRequest,
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
     connection: Annotated[Connection, Depends(get_connection)],
-) -> ReimbursementResponse:
+) -> ReimbursementClaimResponse:
     security_client().require(
         user_id=principal.subject,
         permission_key="attendance.reimbursement.payment.manage",
     )
-    return _claim(
+    return _reimbursement_claim(
         update_reimbursement_payment(
             connection,
             claim_id=claim_id,
