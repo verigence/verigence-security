@@ -79,6 +79,7 @@ from verigence_security.attendance.employee.schemas import (
     LeaveBalanceResponse,
     LeaveCreateRequest,
     LeaveDecisionRequest,
+    LeaveHrDecisionRequest,
     LeaveRequestResponse,
     LeaveTypeCreateRequest,
     LeaveTypeResponse,
@@ -221,6 +222,11 @@ def _leave(row: dict[str, Any]) -> LeaveRequestResponse:
         startDate=row["start_date"],
         endDate=row["end_date"],
         requestedDays=row["requested_days"],
+        calculatedDays=row.get("calculated_days") or row["requested_days"],
+        dayMode=row.get("day_mode") or "FULL_DAY",
+        halfDaySession=row.get("half_day_session"),
+        approvedDays=row.get("hr_approved_days"),
+        approvalOutcome=row.get("approval_outcome"),
         reason=row.get("reason"),
         status=row["status"],
         createdAtUtc=row["created_at_utc"],
@@ -500,7 +506,8 @@ def apply_leave(
             leave_type_id=body.leaveTypeId,
             start_date=body.startDate,
             end_date=body.endDate,
-            requested_days=body.requestedDays,
+            day_mode=body.dayMode,
+            half_day_session=body.halfDaySession,
             reason=body.reason,
         )
     )
@@ -553,6 +560,7 @@ def team_leave_decision(
             leave_id=leave_id,
             actor_user_id=principal.subject,
             decision=body.decision,
+            approved_days=body.approvedDays,
             comment=body.comment,
         )
     )
@@ -614,7 +622,7 @@ def hr_leave_queue(
 @router.post("/admin/leave/{leave_id}/decision", response_model=LeaveRequestResponse)
 def hr_leave_decision(
     leave_id: UUID,
-    body: LeaveDecisionRequest,
+    body: LeaveHrDecisionRequest,
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
     connection: Annotated[Connection, Depends(get_connection)],
 ) -> LeaveRequestResponse:
@@ -1056,6 +1064,10 @@ def admin_leave_types(
             isPaid=row["is_paid"],
             defaultEntitlementDays=row["default_entitlement_days"],
             allowHalfDay=row["allow_half_day"],
+            minNoticeDays=row.get("min_notice_days") or 0,
+            maxConsecutiveDays=row.get("max_consecutive_days"),
+            requiresReason=bool(row.get("requires_reason", True)),
+            allowNegativeBalance=bool(row.get("allow_negative_balance", False)),
             status=row["status"],
         )
         for row in list_leave_types(connection)
@@ -1079,6 +1091,10 @@ def admin_create_leave_type(
         is_paid=body.isPaid,
         entitlement_days=body.defaultEntitlementDays,
         allow_half_day=body.allowHalfDay,
+        min_notice_days=body.minNoticeDays,
+        max_consecutive_days=body.maxConsecutiveDays,
+        requires_reason=body.requiresReason,
+        allow_negative_balance=body.allowNegativeBalance,
     )
     return LeaveTypeResponse(
         leaveTypeId=row["leave_type_id"],
@@ -1087,6 +1103,10 @@ def admin_create_leave_type(
         isPaid=row["is_paid"],
         defaultEntitlementDays=row["default_entitlement_days"],
         allowHalfDay=row["allow_half_day"],
+        minNoticeDays=row.get("min_notice_days") or 0,
+        maxConsecutiveDays=row.get("max_consecutive_days"),
+        requiresReason=bool(row.get("requires_reason", True)),
+        allowNegativeBalance=bool(row.get("allow_negative_balance", False)),
         status=row["status"],
     )
 
