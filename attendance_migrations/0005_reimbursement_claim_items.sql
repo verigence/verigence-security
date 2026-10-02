@@ -10,6 +10,7 @@ ALTER TABLE verigence_attendance.reimbursement_claims
   ADD COLUMN IF NOT EXISTS claimed_total numeric(14,2),
   ADD COLUMN IF NOT EXISTS approved_total numeric(14,2),
   ADD COLUMN IF NOT EXISTS adjusted_total numeric(14,2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS approval_outcome varchar(28),
   ADD COLUMN IF NOT EXISTS submitted_at_utc timestamptz;
 
 UPDATE verigence_attendance.reimbursement_claims
@@ -37,6 +38,31 @@ SET claim_number = COALESCE(
       END
     ),
     submitted_at_utc = COALESCE(submitted_at_utc,created_at_utc);
+
+DO $
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname='ck_va_reimbursement_approval_outcome'
+  ) THEN
+    ALTER TABLE verigence_attendance.reimbursement_claims
+      ADD CONSTRAINT ck_va_reimbursement_approval_outcome
+      CHECK (
+        approval_outcome IS NULL OR
+        approval_outcome IN ('APPROVED','PARTIALLY_APPROVED','REJECTED')
+      );
+  END IF;
+END $;
+
+UPDATE verigence_attendance.reimbursement_claims
+SET approval_outcome = CASE
+  WHEN status IN ('APPROVED','PAID') AND COALESCE(adjusted_total,0) > 0
+    THEN 'PARTIALLY_APPROVED'
+  WHEN status IN ('APPROVED','PAID') THEN 'APPROVED'
+  WHEN status='REJECTED' THEN 'REJECTED'
+  ELSE NULL
+END
+WHERE approval_outcome IS NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_va_reimbursement_claim_number
   ON verigence_attendance.reimbursement_claims(claim_number)
