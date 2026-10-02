@@ -323,9 +323,56 @@ class PayrollItemResponse(BaseModel):
     paidLeaveDays: Decimal
     unpaidLeaveDays: Decimal
     payableDays: Decimal
+    basicAmount: Decimal
+    hraAmount: Decimal
+    allowancesAmount: Decimal
+    otherEarningsAmount: Decimal
+    lopAmount: Decimal
     grossAmount: Decimal
+    employeePf: Decimal
+    employeeEsi: Decimal
+    professionalTax: Decimal
+    tdsAmount: Decimal
+    otherDeductions: Decimal
     deductionAmount: Decimal
     netAmount: Decimal
+    employerPf: Decimal
+    employerEps: Decimal
+    employerEsi: Decimal
+    gratuityProvision: Decimal
+    employerCost: Decimal
+
+
+class PayrollProfileUpsertRequest(BaseModel):
+    effectiveFrom: date
+    pfApplicable: bool = False
+    pfOnActualWages: bool = False
+    esiApplicable: bool = False
+    professionalTaxState: str | None = Field(default=None, max_length=20)
+    professionalTaxMonthly: Decimal = Field(default=Decimal(0), ge=0)
+    tdsMonthly: Decimal = Field(default=Decimal(0), ge=0)
+    taxRegime: Literal["NEW", "OLD"] = "NEW"
+    gratuityApplicable: bool = True
+    uanMasked: str | None = Field(default=None, max_length=40)
+    esicNumberMasked: str | None = Field(default=None, max_length=40)
+
+
+class PayrollProfileResponse(BaseModel):
+    employeeId: UUID
+    employeeCode: str | None = None
+    employeeName: str | None = None
+    effectiveFrom: date
+    effectiveTo: date | None = None
+    pfApplicable: bool
+    pfOnActualWages: bool
+    esiApplicable: bool
+    professionalTaxState: str | None = None
+    professionalTaxMonthly: Decimal
+    tdsMonthly: Decimal
+    taxRegime: Literal["NEW", "OLD"]
+    gratuityApplicable: bool
+    uanMasked: str | None = None
+    esicNumberMasked: str | None = None
 
 
 class ConfigUpdateRequest(BaseModel):
