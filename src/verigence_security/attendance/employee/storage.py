@@ -76,12 +76,12 @@ class AttendanceStorage:
         secret = get_attendance_settings().security_client_secret
         if not secret:
             raise AttendanceStorageError("Attendance signing secret is unavailable")
-        return secret.encode("utf-8")
+        return secret.encode()
 
     def presign(self, *, object_key: str, expires_seconds: int = 900) -> str:
         expires = int(time.time()) + max(60, min(expires_seconds, 3600))
-        token = base64.urlsafe_b64encode(object_key.encode("utf-8")).decode("ascii").rstrip("=")
-        payload = f"{object_key}\n{expires}".encode("utf-8")
+        token = base64.urlsafe_b64encode(object_key.encode()).decode("ascii").rstrip("=")
+        payload = f"{object_key}\n{expires}".encode()
         signature = hmac.new(self._secret(), payload, hashlib.sha256).hexdigest()
         query = urlencode({"expires": expires, "signature": signature})
         return f"/employee-attendance/v1/files/{token}?{query}"
@@ -100,7 +100,7 @@ class AttendanceStorage:
             object_key = base64.urlsafe_b64decode(token + padding).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             raise AttendanceStorageError("Attendance file link is invalid") from exc
-        payload = f"{object_key}\n{expires}".encode("utf-8")
+        payload = f"{object_key}\n{expires}".encode()
         expected = hmac.new(self._secret(), payload, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature):
             raise AttendanceStorageError("Attendance file link is invalid")
