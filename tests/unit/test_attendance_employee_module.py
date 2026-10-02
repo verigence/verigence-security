@@ -9,18 +9,28 @@ from verigence_security.attendance.employee.domain import (
     leave_can_move_to_hr,
     within_geofence,
 )
-from verigence_security.attendance.main import create_app
+from verigence_security.attendance.api import router as attendance_router
+from verigence_security.attendance.employee.api import router as employee_router
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _router_paths(router: object) -> set[str]:
+    routes = getattr(router, "routes")
+    return {
+        path
+        for route in routes
+        if (path := getattr(route, "path", None)) is not None
+    }
+
+
 def test_existing_and_employee_attendance_routes_coexist() -> None:
-    app = create_app()
-    paths = {path for route in app.routes if (path := getattr(route, "path", None)) is not None}
-    assert "/attendance/v1/tenants/{tenant_id}/me/today" in paths
-    assert "/employee-attendance/v1/me" in paths
-    assert "/employee-attendance/v1/me/attendance/check-in" in paths
-    assert "/employee-attendance/v1/admin/payroll/calculate" in paths
+    legacy_paths = _router_paths(attendance_router)
+    employee_paths = _router_paths(employee_router)
+    assert "/attendance/v1/tenants/{tenant_id}/me/today" in legacy_paths
+    assert "/employee-attendance/v1/me" in employee_paths
+    assert "/employee-attendance/v1/me/attendance/check-in" in employee_paths
+    assert "/employee-attendance/v1/admin/payroll/calculate" in employee_paths
 
 
 def test_deploy_workflow_cannot_create_another_attendance_service() -> None:
