@@ -230,7 +230,9 @@ def list_payroll_profiles(connection: Connection) -> list[dict[str, Any]]:
                 """
                 SELECT DISTINCT ON (e.employee_id)
                        e.employee_id,e.employee_code,e.display_name,
-                       p.payroll_profile_id,p.effective_from,p.effective_to,
+                       p.payroll_profile_id,
+                       COALESCE(p.effective_from,e.joining_date) AS effective_from,
+                       p.effective_to,
                        COALESCE(p.pf_applicable,false) AS pf_applicable,
                        COALESCE(p.pf_on_actual_wages,false) AS pf_on_actual_wages,
                        COALESCE(p.esi_applicable,false) AS esi_applicable,
