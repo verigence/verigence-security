@@ -52,6 +52,7 @@ from verigence_security.attendance.employee.repository import (
     list_reimbursements_for_employee,
     list_team_attendance,
     list_team_leave,
+    update_reimbursement_payment,
 )
 from verigence_security.attendance.employee.schemas import (
     AdminCapabilities,
@@ -73,6 +74,7 @@ from verigence_security.attendance.employee.schemas import (
     PayrollSummaryResponse,
     PayslipResponse,
     ReimbursementDecisionRequest,
+    ReimbursementPaymentRequest,
     ReimbursementResponse,
     TeamAttendanceResponse,
     WorkLocationCreateRequest,
@@ -163,6 +165,13 @@ def _claim(row: dict[str, Any]) -> ReimbursementResponse:
             if row.get("receipt_object_key")
             else None
         ),
+        paymentStatus=str(row.get("payment_status") or "NOT_READY"),
+        paymentInitiatedAtUtc=row.get("payment_initiated_at_utc"),
+        paidAtUtc=row.get("paid_at_utc"),
+        paidAmount=row.get("paid_amount"),
+        paymentMode=row.get("payment_mode"),
+        paymentReference=row.get("payment_reference"),
+        paymentComment=row.get("payment_comment"),
         createdAtUtc=row["created_at_utc"],
     )
 
@@ -529,6 +538,35 @@ def reimbursement_decision(
     )
 
 
+@router.post(
+    "/admin/reimbursements/{claim_id}/payment",
+    response_model=ReimbursementResponse,
+)
+def reimbursement_payment(
+    claim_id: UUID,
+    body: ReimbursementPaymentRequest,
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+) -> ReimbursementResponse:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.reimbursement.payment.manage",
+    )
+    return _claim(
+        update_reimbursement_payment(
+            connection,
+            claim_id=claim_id,
+            actor_user_id=principal.subject,
+            payment_status=body.paymentStatus,
+            paid_amount=body.paidAmount,
+            paid_at_utc=body.paidAtUtc,
+            payment_mode=body.paymentMode,
+            payment_reference=body.paymentReference,
+            comment=body.comment,
+        )
+    )
+
+
 @router.get("/me/payslips", response_model=list[PayslipResponse])
 def my_payslips(
     principal: Annotated[HumanPrincipal, Depends(human_principal)],
@@ -888,6 +926,10 @@ def admin_capabilities(
         reimbursementFinanceApprove=client.allowed(
             user_id=user_id,
             permission_key="attendance.reimbursement.finance.approve",
+        ),
+        reimbursementPaymentManage=client.allowed(
+            user_id=user_id,
+            permission_key="attendance.reimbursement.payment.manage",
         ),
         payrollManage=client.allowed(user_id=user_id, permission_key="attendance.payroll.manage"),
         reportRead=client.allowed(user_id=user_id, permission_key="attendance.report.read"),
