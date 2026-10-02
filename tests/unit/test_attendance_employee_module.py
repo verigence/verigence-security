@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_existing_and_employee_attendance_routes_coexist() -> None:
     app = create_app()
-    paths = {route.path for route in app.routes}
+    paths = {path for route in app.routes if (path := getattr(route, "path", None)) is not None}
     assert "/attendance/v1/tenants/{tenant_id}/me/today" in paths
     assert "/employee-attendance/v1/me" in paths
     assert "/employee-attendance/v1/me/attendance/check-in" in paths
