@@ -6,8 +6,8 @@ from fastapi.exceptions import RequestValidationError
 from verigence_security.api.dependencies import correlation_header_parameter
 from verigence_security.api.routes import (
     access,
-    attendance_roles,
     attendance_finance_roles,
+    attendance_roles,
     attendance_roster,
     authorization,
     dev_mock,
