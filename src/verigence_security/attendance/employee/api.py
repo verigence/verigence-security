@@ -8,8 +8,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import Connection
 from pydantic import ValidationError
+from sqlalchemy import Connection
 
 from verigence_security.attendance.employee.admin_config import (
     create_holiday,
