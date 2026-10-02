@@ -104,6 +104,15 @@ class ReimbursementDecisionRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=2000)
 
 
+class ReimbursementPaymentRequest(BaseModel):
+    paymentStatus: Literal["PROCESSING", "PAID", "FAILED"]
+    paidAmount: Decimal | None = Field(default=None, gt=0)
+    paidAtUtc: datetime | None = None
+    paymentMode: str | None = Field(default=None, max_length=40)
+    paymentReference: str | None = Field(default=None, max_length=160)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
 class ReimbursementResponse(BaseModel):
     claimId: UUID
     employeeId: UUID
@@ -115,6 +124,13 @@ class ReimbursementResponse(BaseModel):
     status: str
     financeApprovalRequired: bool
     receiptUrl: str | None = None
+    paymentStatus: str = "NOT_READY"
+    paymentInitiatedAtUtc: datetime | None = None
+    paidAtUtc: datetime | None = None
+    paidAmount: Decimal | None = None
+    paymentMode: str | None = None
+    paymentReference: str | None = None
+    paymentComment: str | None = None
     createdAtUtc: datetime
 
 
@@ -131,6 +147,7 @@ class AdminCapabilities(BaseModel):
     leaveHrApprove: bool
     reimbursementHrApprove: bool
     reimbursementFinanceApprove: bool
+    reimbursementPaymentManage: bool
     payrollManage: bool
     reportRead: bool
     configManage: bool
