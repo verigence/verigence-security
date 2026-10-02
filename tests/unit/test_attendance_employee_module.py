@@ -105,6 +105,7 @@ def test_finance_payment_permission_is_attendance_only() -> None:
         ROOT / "migrations/0034_attendance_reimbursement_payment.sql"
     ).read_text(encoding="utf-8")
     assert "attendance.reimbursement.payment.manage" in migration
-    assert "'attendance','FINANCEADMIN'" in migration.replace("\n", "")
+    compact = "".join(migration.split())
+    assert "'attendance','FINANCEADMIN'" in compact
     assert "audit." not in migration
     assert "di." not in migration
