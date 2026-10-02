@@ -48,6 +48,7 @@ from verigence_security.attendance.employee.repository import (
     list_leave_for_employee,
     list_payslips,
     list_pm_team_reimbursements,
+    list_reimbursements_by_payment_status,
     list_reimbursements_by_status,
     list_reimbursements_for_employee,
     list_team_attendance,
@@ -536,6 +537,25 @@ def reimbursement_decision(
             comment=body.comment,
         )
     )
+
+
+@router.get(
+    "/admin/reimbursements/payments",
+    response_model=list[ReimbursementResponse],
+)
+def reimbursement_payment_queue(
+    principal: Annotated[HumanPrincipal, Depends(human_principal)],
+    connection: Annotated[Connection, Depends(get_connection)],
+    paymentStatus: Literal["PENDING", "PROCESSING", "FAILED", "PAID"] = "PENDING",
+) -> list[ReimbursementResponse]:
+    security_client().require(
+        user_id=principal.subject,
+        permission_key="attendance.reimbursement.payment.manage",
+    )
+    return [
+        _claim(row)
+        for row in list_reimbursements_by_payment_status(connection, paymentStatus)
+    ]
 
 
 @router.post(
