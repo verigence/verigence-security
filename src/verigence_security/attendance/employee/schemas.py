@@ -112,15 +112,6 @@ class ReimbursementPaymentRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=2000)
 
 
-class ReimbursementPaymentTransactionRequest(BaseModel):
-    transactionStatus: Literal["INITIATED", "SUCCESS", "FAILED"]
-    amount: Decimal | None = Field(default=None, gt=0)
-    paymentMode: str | None = Field(default=None, max_length=40)
-    paymentReference: str | None = Field(default=None, max_length=160)
-    failureReason: str | None = Field(default=None, max_length=2000)
-    comment: str | None = Field(default=None, max_length=2000)
-
-
 class ReimbursementResponse(BaseModel):
     claimId: UUID
     employeeId: UUID
