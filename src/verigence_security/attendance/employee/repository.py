@@ -288,6 +288,7 @@ def list_hr_attendance_reviews(connection: Connection) -> list[dict[str, Any]]:
             FROM verigence_attendance.attendance_days a
             JOIN verigence_attendance.employees e ON e.employee_id=a.employee_id
             WHERE a.hr_review_status='PENDING_HR'
+              AND a.status='COMPLETED'
             ORDER BY a.attendance_date,a.created_at_utc
             """
         )
