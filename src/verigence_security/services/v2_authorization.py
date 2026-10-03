@@ -45,6 +45,11 @@ MODULE_ADMIN_PERMISSIONS: dict[str, frozenset[str]] = {
 }
 
 
+# Modules whose permissions can be held through a global (no Tenant/Project) module role.
+# `hr` is company-wide: HRADMIN, FINANCEADMIN and CEO are not tied to any project.
+GLOBAL_MODULE_ROLE_MODULES = frozenset({"attendance", "hr"})
+
+
 class AuthorizationRepository(Protocol):
     def active_service_integration(self, integration_key: str) -> bool: ...
 
@@ -215,13 +220,13 @@ class HumanAuthorizationResolver:
         # Secondary module roles are global and evaluated only inside their own
         # permission module. HRADMIN therefore needs no Tenant/Project assignment,
         # while normal PC/TL/PM/etc. authorization remains tenant-scoped below.
-        if module_key == "attendance":
+        if module_key in GLOBAL_MODULE_ROLE_MODULES:
             for module_role in self.repository.active_module_roles(
                 user_id=resolved_user_id,
-                module_key="attendance",
+                module_key=module_key,
             ):
                 if self.repository.module_role_has_permission(
-                    module_key="attendance",
+                    module_key=module_key,
                     role_key=module_role,
                     permission_key=required_permission,
                 ):
