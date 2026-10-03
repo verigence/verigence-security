@@ -39,7 +39,7 @@ SET claim_number = COALESCE(
     ),
     submitted_at_utc = COALESCE(submitted_at_utc,created_at_utc);
 
-DO $
+DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -52,7 +52,7 @@ BEGIN
         approval_outcome IN ('APPROVED','PARTIALLY_APPROVED','REJECTED')
       );
   END IF;
-END $;
+END $$;
 
 UPDATE verigence_attendance.reimbursement_claims
 SET approval_outcome = CASE
