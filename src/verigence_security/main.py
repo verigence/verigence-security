@@ -20,6 +20,7 @@ from verigence_security.api.routes import (
     platform_modules,
     security_housekeeping,
     service_tokens,
+    service_users,
     tenant_activation_compensation,
     v2_admin_roles,
     v2_groups,
@@ -63,6 +64,7 @@ app.include_router(human_remember.router)
 app.include_router(human_observation.router)
 app.include_router(password_recovery.router)
 app.include_router(service_tokens.router)
+app.include_router(service_users.router)
 app.include_router(authorization.router)
 app.include_router(attendance_roles.router)
 app.include_router(attendance_roster.router)

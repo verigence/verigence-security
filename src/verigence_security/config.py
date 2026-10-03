@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     clerk_jwt_key: str = ""
     clerk_authorized_parties: str = ""
 
+    # ServiceIntegrations (by integration_key, comma separated) allowed to create ACTIVE users
+    # through POST /security/v1/service/users. Only the HR service is expected here.
+    service_user_create_integrations: str = "hrmgmt"
+
     security_token_issuer: str = "verigence-security"
     security_token_audience: str = "verigence-platform"
     security_key_id: str = ""

@@ -53,6 +53,62 @@ class V2PlatformUserCreateService:
     ) -> CreatedUser:
         if not actor.is_super_admin:
             raise PermissionError("SuperAdmin authority is required")
+        return self._create_user(
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            mobile=mobile,
+            password=password,
+            actor_user_id=actor.user_id,
+            service_principal_id=None,
+            service_integration_key=None,
+            correlation_id=correlation_id,
+            clerk=clerk,
+        )
+
+    def create_for_service(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        email: str,
+        mobile: str,
+        password: str,
+        service_principal_id: str,
+        service_integration_key: str,
+        correlation_id: str,
+        clerk: ClerkBackendClient,
+    ) -> CreatedUser:
+        """Creation by an authenticated, explicitly allowed ServiceIntegration (the HR service
+        creating an employee's login). Same rules and same transient password as the SuperAdmin
+        path; the audit record names the integration instead of a human."""
+        return self._create_user(
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            mobile=mobile,
+            password=password,
+            actor_user_id=None,
+            service_principal_id=service_principal_id,
+            service_integration_key=service_integration_key,
+            correlation_id=correlation_id,
+            clerk=clerk,
+        )
+
+    def _create_user(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        email: str,
+        mobile: str,
+        password: str,
+        actor_user_id: str | None,
+        service_principal_id: str | None,
+        service_integration_key: str | None,
+        correlation_id: str,
+        clerk: ClerkBackendClient,
+    ) -> CreatedUser:
         onboarding = Phase1SelfOnboardingService(self.s)
         try:
             clean_first = onboarding._name(first_name, "First name")
@@ -95,13 +151,27 @@ class V2PlatformUserCreateService:
                 mobile=clean_mobile,
                 now=now,
             )
-            self._audit(
-                actor_user_id=actor.user_id,
-                correlation_id=correlation_id,
-                user_id=user_id,
-                after={"status": "ACTIVE", "displayName": display_name, "source": "SUPER_ADMIN_CREATE"},
-                now=now,
-            )
+            if actor_user_id is not None:
+                self._audit(
+                    actor_user_id=actor_user_id,
+                    correlation_id=correlation_id,
+                    user_id=user_id,
+                    after={
+                        "status": "ACTIVE",
+                        "displayName": display_name,
+                        "source": "SUPER_ADMIN_CREATE",
+                    },
+                    now=now,
+                )
+            else:
+                assert service_principal_id is not None and service_integration_key is not None
+                self._service_audit(
+                    principal_id=service_principal_id,
+                    integration_key=service_integration_key,
+                    correlation_id=correlation_id,
+                    user_id=user_id,
+                    now=now,
+                )
             self.s.commit()
         except IntegrityError as exc:
             self.s.rollback()
@@ -217,6 +287,37 @@ class V2PlatformUserCreateService:
                 "resource_id": user_id,
                 "before": json.dumps({}),
                 "after": json.dumps(after),
+                "now": now,
+            },
+        )
+
+    def _service_audit(
+        self,
+        *,
+        principal_id: str,
+        integration_key: str,
+        correlation_id: str,
+        user_id: str,
+        now: datetime,
+    ) -> None:
+        # admin_change_records needs a human actor, so a service caller is recorded in
+        # security_events (which accepts a SERVICE_INTEGRATION principal). No password is stored.
+        self.s.execute(
+            text(
+                """
+                INSERT INTO security.security_events
+                (security_event_id,tenant_id,principal_id,actor_type,event_type,entity_type,
+                 entity_id,outcome,reason_code,correlation_id,payload_json,occurred_at_utc)
+                VALUES (:id,NULL,:principal_id,'SERVICE_INTEGRATION','SERVICE_USER_CREATE','USER',
+                        :user_id,'SUCCESS','CREATED',:correlation_id,CAST(:payload AS jsonb),:now)
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "principal_id": principal_id,
+                "user_id": user_id,
+                "correlation_id": correlation_id,
+                "payload": json.dumps({"integrationKey": integration_key, "status": "ACTIVE"}),
                 "now": now,
             },
         )

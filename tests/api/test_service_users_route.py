@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime
+
+import pytest
+from fastapi.testclient import TestClient
+
+from verigence_security.adapters.clerk_backend import ClerkBackendError
+from verigence_security.api.platform_dependencies import platform_session
+from verigence_security.api.routes import service_users
+from verigence_security.core.errors import security_error
+from verigence_security.main import app
+from verigence_security.services.v2_platform_user_create import CreatedUser, InvalidUserInput
+
+client = TestClient(app)
+USER = "00000000-0000-4000-8000-000000000020"
+PRINCIPAL = "00000000-0000-4000-8000-0000000000aa"
+BODY = {
+    "firstName": "Sample",
+    "lastName": "Person",
+    "email": "sample@example.test",
+    "mobile": "9000000001",
+    "password": "transient-secret",
+}
+AUTH = {"Authorization": "Bearer service-token"}
+
+
+class _Result:
+    def __init__(self, row: object) -> None:
+        self._row = row
+
+    def first(self) -> object:
+        return self._row
+
+
+class _Session:
+    """Answers the single integration lookup the route makes."""
+
+    def __init__(self, principal: str | None) -> None:
+        self.principal = principal
+
+    def execute(self, *_: object, **__: object) -> _Result:
+        return _Result((self.principal,) if self.principal else None)
+
+
+@pytest.fixture(autouse=True)
+def _reset(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setattr(service_users, "ClerkBackendClient", lambda settings: object())
+    yield
+    app.dependency_overrides.clear()
+
+
+def _caller(monkeypatch: pytest.MonkeyPatch, *, subject: str = "hrmgmt", principal: str | None = PRINCIPAL) -> None:
+    class _Tokens:
+        def __init__(self, settings: object) -> None:
+            _ = settings
+
+        def verify_service_token(self, token: str, *, audience: str) -> dict[str, object]:
+            assert token == "service-token" and audience == "security"
+            return {"sub": subject}
+
+    monkeypatch.setattr(service_users, "TokenService", _Tokens)
+    app.dependency_overrides[platform_session] = lambda: _Session(principal)
+
+
+def _create_service(monkeypatch: pytest.MonkeyPatch, outcome: object = None) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    class _Service:
+        def __init__(self, session: object) -> None:
+            _ = session
+
+        def create_for_service(self, **kwargs: object) -> CreatedUser:
+            calls.append(kwargs)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return CreatedUser(user_id=USER, clerk_subject="user_new")
+
+    class _Directory:
+        def __init__(self, session: object) -> None:
+            _ = session
+
+        def get_user(self, user_id: str) -> dict[str, object]:
+            now = datetime.now(UTC)
+            return {
+                "user_id": user_id, "display_name": "Sample Person", "primary_email": "sample@example.test",
+                "primary_mobile": "+919000000001", "status": "ACTIVE", "clerk_subject": "user_new",
+                "onboarding_status": None, "created_at_utc": now, "updated_at_utc": now,
+            }
+
+    monkeypatch.setattr(service_users, "V2PlatformUserCreateService", _Service)
+    monkeypatch.setattr(service_users, "V2UserDirectoryService", _Directory)
+    return calls
+
+
+def test_allowed_integration_creates_an_active_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch)
+    calls = _create_service(monkeypatch)
+    response = client.post("/security/v1/service/users", json=BODY, headers=AUTH)
+    assert response.status_code == 201
+    assert response.json()["status"] == "ACTIVE" and response.json()["userId"] == USER
+    assert calls[0]["password"] == "transient-secret"
+    assert calls[0]["service_principal_id"] == PRINCIPAL and calls[0]["service_integration_key"] == "hrmgmt"
+    assert "transient-secret" not in response.text
+
+
+def test_other_integrations_are_refused_even_with_a_valid_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch, subject="audit-core")
+    calls = _create_service(monkeypatch)
+    assert client.post("/security/v1/service/users", json=BODY, headers=AUTH).status_code == 403
+    assert calls == []
+
+
+def test_unknown_or_inactive_integration_is_unauthenticated(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch, principal=None)
+    calls = _create_service(monkeypatch)
+    assert client.post("/security/v1/service/users", json=BODY, headers=AUTH).status_code == 401
+    assert calls == []
+
+
+def test_missing_or_invalid_token_is_unauthenticated(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _create_service(monkeypatch)
+    app.dependency_overrides[platform_session] = lambda: _Session(PRINCIPAL)
+    assert client.post("/security/v1/service/users", json=BODY).status_code == 401
+
+    class _Reject:
+        def __init__(self, settings: object) -> None:
+            _ = settings
+
+        def verify_service_token(self, token: str, *, audience: str) -> dict[str, object]:
+            raise security_error("AUTH_TOKEN_INVALID")
+
+    monkeypatch.setattr(service_users, "TokenService", _Reject)
+    assert client.post("/security/v1/service/users", json=BODY, headers=AUTH).status_code == 401
+    assert calls == []
+
+
+def test_allow_list_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from verigence_security.config import Settings, get_settings
+
+    _caller(monkeypatch, subject="someone-else")
+    calls = _create_service(monkeypatch)
+    app.dependency_overrides[get_settings] = lambda: Settings(service_user_create_integrations="hrmgmt, someone-else")
+    assert client.post("/security/v1/service/users", json=BODY, headers=AUTH).status_code == 201
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (InvalidUserInput("A valid 10-digit Indian mobile number is required"), 422),
+        (ValueError("Email address belongs to an active or suspended user"), 409),
+        (ClerkBackendError("create", status_code=422, provider_code="form_identifier_exists"), 409),
+        (ClerkBackendError("create", status_code=503), 503),
+    ],
+)
+def test_failures_map_to_actionable_statuses(monkeypatch: pytest.MonkeyPatch, error: Exception, status: int) -> None:
+    _caller(monkeypatch)
+    _create_service(monkeypatch, error)
+    response = client.post("/security/v1/service/users", json=BODY, headers=AUTH)
+    assert response.status_code == status
+    assert "transient-secret" not in response.text
