@@ -8,6 +8,7 @@ from verigence_security.api.routes import (
     access,
     authorization,
     dev_mock,
+    feature_access,
     health,
     hr_roles,
     human_observation,
@@ -66,6 +67,7 @@ app.include_router(service_tokens.router)
 app.include_router(service_users.router)
 app.include_router(authorization.router)
 app.include_router(hr_roles.router)
+app.include_router(feature_access.router)
 app.include_router(platform_admin.router)
 app.include_router(security_housekeeping.router)
 app.include_router(tenant_activation_compensation.router)
