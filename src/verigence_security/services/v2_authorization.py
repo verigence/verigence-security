@@ -50,6 +50,11 @@ MODULE_ADMIN_PERMISSIONS: dict[str, frozenset[str]] = {
 GLOBAL_MODULE_ROLE_MODULES = frozenset({"attendance", "hr"})
 
 
+# Permissions SuperAdmin does not get through its blanket access. They are held only through the
+# module role named for them: approving a payroll run belongs to the CEO role alone.
+SUPER_ADMIN_EXCLUDED_PERMISSIONS = frozenset({"hr.payroll.approve"})
+
+
 class AuthorizationRepository(Protocol):
     def active_service_integration(self, integration_key: str) -> bool: ...
 
@@ -172,7 +177,10 @@ class HumanAuthorizationResolver:
             )
 
         admin_assignments = self.repository.active_admin_assignments(resolved_user_id)
-        if self._is_super_admin(admin_assignments):
+        if (
+            self._is_super_admin(admin_assignments)
+            and required_permission not in SUPER_ADMIN_EXCLUDED_PERMISSIONS
+        ):
             return self._allow(
                 "ALLOW_SUPER_ADMIN",
                 user_id=resolved_user_id,

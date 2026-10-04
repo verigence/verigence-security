@@ -48,6 +48,17 @@ class FakeAuthorizationRepository:
         self.operating_roles: dict[str, str] = {}
         self.role_permissions: set[tuple[str, str, str]] = set()
         self.test_tenant: str | None = None
+        self.module_roles: dict[str, list[str]] = {}
+        self.module_role_permissions: set[tuple[str, str, str]] = set()
+
+    def active_module_roles(self, *, user_id: str, module_key: str) -> list[str]:
+        assert user_id == USER_ID
+        return list(self.module_roles.get(module_key, []))
+
+    def module_role_has_permission(
+        self, *, module_key: str, role_key: str, permission_key: str
+    ) -> bool:
+        return (module_key, role_key, permission_key) in self.module_role_permissions
 
     def active_service_integration(self, integration_key: str) -> bool:
         return self.service_active and integration_key == "audit-core"
@@ -350,3 +361,46 @@ def test_authorization_check_requires_registered_service_token_with_security_aud
             permission_key="audit.project.read",
         )
     assert unregistered.value.code == "AUTH_TOKEN_INVALID"
+
+
+def _hr_repo() -> FakeAuthorizationRepository:
+    repo = FakeAuthorizationRepository()
+    repo.permissions["hr.payroll.read"] = "hr"
+    repo.permissions["hr.payroll.approve"] = "hr"
+    repo.module_role_permissions.add(("hr", "CEO", "hr.payroll.approve"))
+    return repo
+
+
+def test_super_admin_gets_hr_permissions_but_not_payroll_approval() -> None:
+    repo = _hr_repo()
+    repo.admin_assignments = [
+        {"role_key": "SuperAdmin", "scope_type": "PLATFORM", "scope_id": None}
+    ]
+    resolver = HumanAuthorizationResolver(repo)
+
+    read = resolver.check(user_id=USER_ID, tenant_id=None, permission_key="hr.payroll.read")
+    approve = resolver.check(user_id=USER_ID, tenant_id=None, permission_key="hr.payroll.approve")
+
+    assert read.allowed is True and read.reason_code == "ALLOW_SUPER_ADMIN"
+    assert approve.allowed is False
+
+
+def test_only_the_ceo_role_approves_payroll() -> None:
+    repo = _hr_repo()
+    repo.module_roles["hr"] = ["CEO"]
+    resolver = HumanAuthorizationResolver(repo)
+
+    decision = resolver.check(user_id=USER_ID, tenant_id=None, permission_key="hr.payroll.approve")
+
+    assert decision.allowed is True and decision.reason_code == "ALLOW_MODULE_ROLE"
+    assert decision.role_key == "CEO"
+
+
+def test_other_hr_roles_do_not_approve_payroll() -> None:
+    repo = _hr_repo()
+    repo.module_roles["hr"] = ["HRADMIN", "FINANCEADMIN"]
+    resolver = HumanAuthorizationResolver(repo)
+
+    decision = resolver.check(user_id=USER_ID, tenant_id=None, permission_key="hr.payroll.approve")
+
+    assert decision.allowed is False
