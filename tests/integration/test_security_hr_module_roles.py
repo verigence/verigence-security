@@ -122,3 +122,26 @@ def test_list_roles_shows_only_current_hr_roles_in_fixed_order(session: Session)
     assert service.list_roles(user_id=user) == ["CEO"]
     with pytest.raises(ValueError):
         service.list_roles(user_id=str(uuid4()))
+
+
+def test_phase2_grants_split_prepare_review_and_approve(session: Session) -> None:
+    grants = _rows(
+        session,
+        "SELECT role_key,permission_key FROM security.module_role_permissions"
+        " WHERE module_key='hr' AND status='ACTIVE'",
+    )
+    # Only the CEO approves a payroll run; HR prepares it, Finance cannot.
+    assert ("CEO", "hr.payroll.approve") in grants
+    assert ("HRADMIN", "hr.payroll.approve") not in grants
+    assert ("FINANCEADMIN", "hr.payroll.approve") not in grants
+    assert ("HRADMIN", "hr.payroll.prepare") in grants
+    # Salary structures: HR proposes, Finance approves.
+    assert ("HRADMIN", "hr.salary.propose") in grants and ("HRADMIN", "hr.salary.approve") not in grants
+    assert ("FINANCEADMIN", "hr.salary.approve") in grants and ("FINANCEADMIN", "hr.salary.propose") not in grants
+    # Claims above the threshold and exceptions are Finance's; routine ones are HR's.
+    assert ("FINANCEADMIN", "hr.claim.review_finance") in grants
+    assert ("HRADMIN", "hr.claim.review_finance") not in grants
+    assert ("HRADMIN", "hr.claim.review") in grants
+    # The CEO holds every HR permission.
+    keys = {p for _, p in grants}
+    assert {p for r, p in grants if r == "CEO"} == keys
