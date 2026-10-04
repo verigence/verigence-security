@@ -109,3 +109,16 @@ def test_inactive_user_and_unknown_role_are_refused(session: Session) -> None:
         service.assign(user_id=suspended, role_key="CEO", actor_user_id=actor, correlation_id="c")
     with pytest.raises(ValueError):
         service.assign(user_id=_user(session), role_key="ROOT", actor_user_id=actor, correlation_id="c")
+
+
+def test_list_roles_shows_only_current_hr_roles_in_fixed_order(session: Session) -> None:
+    actor, user = _user(session), _user(session)
+    service = HrModuleRoleService(session)
+    assert service.list_roles(user_id=user) == []
+    service.assign(user_id=user, role_key="CEO", actor_user_id=actor, correlation_id="c1")
+    service.assign(user_id=user, role_key="HRADMIN", actor_user_id=actor, correlation_id="c2")
+    assert service.list_roles(user_id=user) == ["HRADMIN", "CEO"]
+    service.remove(user_id=user, role_key="HRADMIN", actor_user_id=actor, correlation_id="c3")
+    assert service.list_roles(user_id=user) == ["CEO"]
+    with pytest.raises(ValueError):
+        service.list_roles(user_id=str(uuid4()))

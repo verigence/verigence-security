@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from verigence_security.api.hr_role_schemas import HrRoleMutationResponse
+from verigence_security.api.hr_role_schemas import HrRoleMutationResponse, HrRolesResponse
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
@@ -20,6 +20,21 @@ HrRoleKey = Literal["HRADMIN", "FINANCEADMIN", "CEO"]
 def _require_super_admin(actor: HumanActorContext) -> None:
     if not actor.is_super_admin:
         raise security_error("PERMISSION_DENIED")
+
+
+@router.get("/users/{userId}/module-roles/hr", response_model=HrRolesResponse)
+def list_hr_roles(
+    userId: str,
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> HrRolesResponse:
+    """The HR roles a person holds now. SuperAdmin only."""
+    _require_super_admin(actor)
+    try:
+        roles = HrModuleRoleService(session).list_roles(user_id=userId)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return HrRolesResponse(userId=userId, roles=roles)
 
 
 @router.put("/users/{userId}/module-roles/hr/{roleKey}", response_model=HrRoleMutationResponse)

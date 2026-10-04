@@ -72,6 +72,26 @@ class HrModuleRoleService:
             raise
         return True, assignment_id
 
+    def list_roles(self, *, user_id: str) -> list[str]:
+        """The HR roles this person holds right now, in a fixed order."""
+        self._require_subject(user_id=user_id)
+        rows = self.session.execute(
+            text(
+                """
+                SELECT DISTINCT role_key
+                FROM security.user_global_module_role_assignments
+                WHERE user_id=CAST(:user_id AS uuid)
+                  AND module_key='hr'
+                  AND status='ACTIVE'
+                  AND (valid_from_utc IS NULL OR valid_from_utc<=CURRENT_TIMESTAMP)
+                  AND (valid_to_utc IS NULL OR valid_to_utc>CURRENT_TIMESTAMP)
+                """
+            ),
+            {"user_id": user_id},
+        ).all()
+        held = {str(r[0]) for r in rows}
+        return [key for key in HR_ROLE_KEYS if key in held]
+
     def remove(
         self, *, user_id: str, role_key: str, actor_user_id: str, correlation_id: str
     ) -> tuple[bool, str | None]:

@@ -45,6 +45,10 @@ def _service(monkeypatch: pytest.MonkeyPatch, error: Exception | None = None) ->
             calls.append(("remove", user_id, role_key))
             return True, "assignment-1"
 
+        def list_roles(self, *, user_id: str):
+            calls.append(("list", user_id, ""))
+            return ["HRADMIN", "CEO"]
+
     monkeypatch.setattr(hr_roles, "HrModuleRoleService", _Service)
     return calls
 
@@ -78,3 +82,19 @@ def test_conflicts_are_409(monkeypatch: pytest.MonkeyPatch) -> None:
     _as(AdminScope("SuperAdmin", "PLATFORM", None))
     _service(monkeypatch, ValueError("The HR role subject must be an active Verigence USER"))
     assert client.put(f"/security/v1/users/{USER}/module-roles/hr/HRADMIN").status_code == 409
+
+
+def test_super_admin_reads_the_hr_roles_a_person_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    _as(AdminScope("SuperAdmin", "PLATFORM", None))
+    calls = _service(monkeypatch)
+    response = client.get(f"/security/v1/users/{USER}/module-roles/hr")
+    assert response.status_code == 200
+    assert response.json() == {"userId": USER, "moduleKey": "hr", "roles": ["HRADMIN", "CEO"]}
+    assert calls == [("list", USER, "")]
+
+
+def test_reading_hr_roles_is_super_admin_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    _as(AdminScope("TenantAdmin", "TENANT", "t1"))
+    calls = _service(monkeypatch)
+    assert client.get(f"/security/v1/users/{USER}/module-roles/hr").status_code == 403
+    assert calls == []
