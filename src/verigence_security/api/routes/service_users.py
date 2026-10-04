@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -230,3 +230,59 @@ def set_password_for_service(
     except ClerkBackendError as exc:
         raise HTTPException(status_code=502, detail="The password could not be set") from exc
     return ServicePasswordResponse(userId=userId, primaryEmail=str(email) if email else None)
+
+
+class ServiceUserListItem(BaseModel):
+    userId: str
+    displayName: str | None
+    primaryEmail: str | None
+    status: str
+    isEmployee: bool
+
+
+@router.get("/users", response_model=list[ServiceUserListItem])
+def list_users_for_service(
+    q: str | None = Query(default=None, max_length=100),
+    ids: str | None = Query(default=None, max_length=2000),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> list[ServiceUserListItem]:
+    """The Verigence users an allowed ServiceIntegration (the HR service) may write to: id, name,
+    email, status and the Is Employee flag, nothing else. Search by name or email, or fetch given
+    ids (comma separated). Same guard as user creation; read-only."""
+    _authorize_service(service_token, settings, session)
+    pattern = f"%{q.strip().lower()}%" if q and q.strip() else None
+    id_list = [i.strip() for i in ids.split(",") if i.strip()] if ids else None
+    try:
+        rows = session.execute(
+            text(
+                """
+                SELECT user_id::text, display_name, primary_email, status, is_employee
+                FROM security.users
+                WHERE (CAST(:pattern AS text) IS NULL
+                       OR lower(display_name) LIKE :pattern
+                       OR lower(coalesce(primary_email,'')) LIKE :pattern)
+                  AND (CAST(:ids AS text[]) IS NULL
+                       OR user_id::text = ANY(CAST(:ids AS text[])))
+                ORDER BY lower(display_name), user_id
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {"pattern": pattern, "ids": id_list, "limit": limit, "offset": offset},
+        ).all()
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail="The request could not be read") from exc
+    return [
+        ServiceUserListItem(
+            userId=r[0],
+            displayName=r[1],
+            primaryEmail=r[2],
+            status=str(r[3]),
+            isEmployee=bool(r[4]),
+        )
+        for r in rows
+    ]

@@ -299,3 +299,51 @@ def test_password_for_an_unknown_user_is_404_and_other_integrations_are_refused(
     app.dependency_overrides[platform_session] = lambda: _PasswordSession(("ACTIVE", "e@x.test", "c"))
     assert client.post(f"/security/v1/service/users/{USER}/password", json=body, headers=AUTH).status_code == 403
     assert calls == []
+
+
+class _ListSession:
+    def __init__(self, rows: list[tuple[str, str, str, str, bool]]) -> None:
+        self.rows, self.calls, self.params = rows, 0, {}
+
+    def execute(self, _sql: object, params: dict[str, object] | None = None) -> object:
+        self.calls += 1
+        if self.calls == 1:
+            return _Result((PRINCIPAL,))
+        self.params = params or {}
+
+        class _All:
+            def __init__(self, rows: list[tuple[str, str, str, str, bool]]) -> None:
+                self._rows = rows
+
+            def all(self) -> list[tuple[str, str, str, str, bool]]:
+                return self._rows
+
+        return _All(self.rows)
+
+    def rollback(self) -> None:
+        pass
+
+
+def test_allowed_integration_lists_users_with_only_the_agreed_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch)
+    session = _ListSession([(USER, "Sample Person", "sample@example.test", "ACTIVE", True)])
+    app.dependency_overrides[platform_session] = lambda: session
+    response = client.get("/security/v1/service/users", params={"q": " Sample ", "ids": f"{USER},x"}, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "userId": USER,
+            "displayName": "Sample Person",
+            "primaryEmail": "sample@example.test",
+            "status": "ACTIVE",
+            "isEmployee": True,
+        }
+    ]
+    assert session.params["pattern"] == "%sample%" and session.params["ids"] == [USER, "x"]
+
+
+def test_listing_users_is_refused_for_other_integrations_and_without_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch, subject="audit-core")
+    app.dependency_overrides[platform_session] = lambda: _ListSession([])
+    assert client.get("/security/v1/service/users", headers=AUTH).status_code == 403
+    assert client.get("/security/v1/service/users").status_code == 401
