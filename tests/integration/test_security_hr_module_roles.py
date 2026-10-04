@@ -165,7 +165,8 @@ def test_housekeeping_permission_exists_but_no_hr_role_holds_it(session: Session
     # Clearing old HR records is SuperAdmin's alone: it passes any active permission.
     active = _rows(
         session,
-        "SELECT permission_key FROM security.permissions WHERE permission_key='hr.housekeeping.manage' AND status='ACTIVE'",
+        "SELECT permission_key FROM security.permissions"
+        " WHERE permission_key='hr.housekeeping.manage' AND status='ACTIVE'",
     )
     assert active == {("hr.housekeeping.manage",)}
     held = _rows(
