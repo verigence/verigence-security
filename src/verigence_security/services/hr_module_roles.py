@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -9,7 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 HR_MODULE_KEY = "hr"
-HR_ROLE_KEYS = ("HRADMIN", "FINANCEADMIN", "CEO")
+HrRoleKey = Literal["HRADMIN", "FINANCEADMIN", "CEO"]
+HR_ROLE_KEYS: tuple[HrRoleKey, ...] = ("HRADMIN", "FINANCEADMIN", "CEO")
 
 
 class HrModuleRoleService:
@@ -72,7 +74,7 @@ class HrModuleRoleService:
             raise
         return True, assignment_id
 
-    def list_roles(self, *, user_id: str) -> list[str]:
+    def list_roles(self, *, user_id: str) -> list[HrRoleKey]:
         """The HR roles this person holds right now, in a fixed order."""
         self._require_subject(user_id=user_id)
         rows = self.session.execute(
