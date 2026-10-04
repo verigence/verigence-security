@@ -1,14 +1,14 @@
 # UC-001 Identity Reuse + Email-First Login Deploy Proof
 
-- run_id: 33111602408
-- workflow_source_sha: 4b0b5829375b83c5da0d7a05de17f8e849a0d888
-- deployed_source_sha: 4b0b5829375b83c5da0d7a05de17f8e849a0d888
+- run_id: 37213636608
+- workflow_source_sha: 0640f256c73fb10c5da61ad1f64f3085035090ec
+- deployed_source_sha: 0640f256c73fb10c5da61ad1f64f3085035090ec
 - source_contract: PASS
 - targeted_tests: PASS
 - email_first_login_source: PASS
 - email_first_login_tests: PASS
 - database_rule: PASS
-- previous_railway_deployment_id: 0b71e4e1-a5c9-42e8-a994-f3be6a8379c1
-- new_railway_deployment_id: 824cf670-3201-42fa-b760-e8d5328c4c2f
+- previous_railway_deployment_id: 7e97bbd2-80fd-4b53-8714-092fc7631734
+- new_railway_deployment_id: c1e2f741-c3a2-48e7-92af-0754648352ed
 - security_ready: PASS
 - job_status: success
