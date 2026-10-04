@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from verigence_security.adapters.clerk_backend import ClerkBackendClient, ClerkBackendError
+from verigence_security.adapters.clerk_password_recovery import update_password
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.routes.authorization import service_integration_token
 from verigence_security.api.routes.v2_user_admin import _clerk_create_failure, _user_response
@@ -167,3 +168,65 @@ def mark_user_as_employee_for_service(
         raise HTTPException(status_code=404, detail="User not found")
     session.commit()
     return ServiceUserEmployeeResponse(userId=userId, isEmployee=True)
+
+
+class ServicePasswordRequest(BaseModel):
+    password: SecretStr = Field(min_length=8, max_length=256)
+
+
+class ServicePasswordResponse(BaseModel):
+    userId: str
+    primaryEmail: str | None
+
+
+@router.post("/users/{userId}/password", response_model=ServicePasswordResponse)
+def set_password_for_service(
+    userId: str,
+    body: ServicePasswordRequest,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> ServicePasswordResponse:
+    """The HR service sets a temporary password for an ACTIVE user it is about to email. Same guard
+    as user creation. A user who is still PENDING (SuperAdmin has not allowed them yet), suspended
+    or disabled is refused, so a password is never handed out for an account that cannot sign in.
+    The password is never stored, logged or returned by Security."""
+    _authorize_service(service_token, settings, session)
+    try:
+        row = session.execute(
+            text(
+                """
+                SELECT u.status, u.primary_email, e.provider_subject
+                FROM security.users u
+                LEFT JOIN security.external_identities e
+                  ON e.user_id=u.user_id AND e.provider='CLERK' AND e.status='ACTIVE'
+                WHERE u.user_id=CAST(:user_id AS uuid)
+                """
+            ),
+            {"user_id": userId},
+        ).first()
+    except Exception as exc:  # a malformed id must read as not found, not as a server error
+        session.rollback()
+        raise HTTPException(status_code=404, detail="User not found") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    status, email, clerk_subject = str(row[0]), row[1], row[2]
+    if status != "ACTIVE":
+        raise HTTPException(
+            status_code=409, detail=f"The user is {status.lower()}, not active; allow them first"
+        )
+    if not clerk_subject:
+        raise HTTPException(status_code=409, detail="The user has no sign-in identity")
+    try:
+        clerk = ClerkBackendClient(settings)
+    except ClerkBackendError as exc:
+        raise HTTPException(
+            status_code=503, detail="Identity provider integration is not configured"
+        ) from exc
+    try:
+        update_password(
+            clerk, clerk_user_id=str(clerk_subject), password=body.password.get_secret_value()
+        )
+    except ClerkBackendError as exc:
+        raise HTTPException(status_code=502, detail="The password could not be set") from exc
+    return ServicePasswordResponse(userId=userId, primaryEmail=str(email) if email else None)

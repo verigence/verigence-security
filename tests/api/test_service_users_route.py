@@ -238,3 +238,64 @@ def test_ticking_is_employee_for_an_unknown_user_is_404_and_other_integrations_a
     _caller(monkeypatch, subject="audit-core")
     app.dependency_overrides[platform_session] = lambda: _FlagSession(True)
     assert client.post(f"/security/v1/service/users/{USER}/employee", headers=AUTH).status_code == 403
+
+
+class _PasswordSession:
+    """First query: the integration check. Second: the user row."""
+
+    def __init__(self, row: tuple[str, str | None, str | None] | None) -> None:
+        self.row, self.calls = row, 0
+
+    def execute(self, *_: object, **__: object) -> _Result:
+        self.calls += 1
+        if self.calls == 1:
+            return _Result((PRINCIPAL,))
+        return _Result(self.row)
+
+    def rollback(self) -> None:
+        pass
+
+
+def _password_caller(
+    monkeypatch: pytest.MonkeyPatch, row: tuple[str, str | None, str | None] | None
+) -> list[tuple[str, str]]:
+    _caller(monkeypatch)
+    app.dependency_overrides[platform_session] = lambda: _PasswordSession(row)
+    set_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        service_users,
+        "update_password",
+        lambda clerk, *, clerk_user_id, password: set_calls.append((clerk_user_id, password)),
+    )
+    return set_calls
+
+
+def test_allowed_integration_sets_a_password_for_an_active_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _password_caller(monkeypatch, ("ACTIVE", "emp@example.test", "user_clerk_1"))
+    response = client.post(
+        f"/security/v1/service/users/{USER}/password", json={"password": "Temp-Pass-123"}, headers=AUTH
+    )
+    assert response.status_code == 200
+    assert response.json() == {"userId": USER, "primaryEmail": "emp@example.test"}
+    assert calls == [("user_clerk_1", "Temp-Pass-123")]
+    assert "Temp-Pass-123" not in response.text
+
+
+def test_a_password_is_refused_for_a_user_who_is_not_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _password_caller(monkeypatch, ("PENDING", "emp@example.test", "user_clerk_1"))
+    response = client.post(
+        f"/security/v1/service/users/{USER}/password", json={"password": "Temp-Pass-123"}, headers=AUTH
+    )
+    assert response.status_code == 409 and calls == []
+
+
+def test_password_for_an_unknown_user_is_404_and_other_integrations_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _password_caller(monkeypatch, None)
+    body = {"password": "Temp-Pass-123"}
+    assert client.post(f"/security/v1/service/users/{USER}/password", json=body, headers=AUTH).status_code == 404
+    _caller(monkeypatch, subject="audit-core")
+    app.dependency_overrides[platform_session] = lambda: _PasswordSession(("ACTIVE", "e@x.test", "c"))
+    assert client.post(f"/security/v1/service/users/{USER}/password", json=body, headers=AUTH).status_code == 403
+    assert calls == []
