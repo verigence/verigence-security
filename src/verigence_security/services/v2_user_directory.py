@@ -46,7 +46,7 @@ class V2UserDirectoryService:
         rows = self.s.execute(
             text(
                 f"""
-                SELECT u.user_id,u.display_name,u.primary_email,u.primary_mobile,u.status,
+                SELECT u.user_id,u.display_name,u.primary_email,u.primary_mobile,u.status,u.is_employee,
                        u.created_at_utc,u.updated_at_utc,
                        e.provider_subject AS clerk_subject,
                        r.status AS onboarding_status
@@ -68,7 +68,7 @@ class V2UserDirectoryService:
         row = self.s.execute(
             text(
                 """
-                SELECT u.user_id,u.display_name,u.primary_email,u.primary_mobile,u.status,
+                SELECT u.user_id,u.display_name,u.primary_email,u.primary_mobile,u.status,u.is_employee,
                        u.created_at_utc,u.updated_at_utc,
                        e.provider_subject AS clerk_subject,
                        r.status AS onboarding_status

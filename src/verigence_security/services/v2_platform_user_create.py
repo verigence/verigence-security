@@ -81,7 +81,8 @@ class V2PlatformUserCreateService:
     ) -> CreatedUser:
         """Creation by an authenticated, explicitly allowed ServiceIntegration (the HR service
         creating an employee's login). Same rules and same transient password as the SuperAdmin
-        path; the audit record names the integration instead of a human."""
+        path, but the user starts PENDING (no OTP step): it appears under Pending Approvals and can
+        sign in only after SuperAdmin allows it. The audit record names the integration."""
         return self._create_user(
             first_name=first_name,
             last_name=last_name,
@@ -93,6 +94,7 @@ class V2PlatformUserCreateService:
             service_integration_key=service_integration_key,
             correlation_id=correlation_id,
             clerk=clerk,
+            initial_status="PENDING",
         )
 
     def _create_user(
@@ -108,6 +110,7 @@ class V2PlatformUserCreateService:
         service_integration_key: str | None,
         correlation_id: str,
         clerk: ClerkBackendClient,
+        initial_status: str = "ACTIVE",
     ) -> CreatedUser:
         onboarding = Phase1SelfOnboardingService(self.s)
         try:
@@ -150,6 +153,8 @@ class V2PlatformUserCreateService:
                 email=clean_email,
                 mobile=clean_mobile,
                 now=now,
+                status=initial_status,
+                is_employee=service_principal_id is not None,
             )
             if actor_user_id is not None:
                 self._audit(
@@ -171,6 +176,7 @@ class V2PlatformUserCreateService:
                     correlation_id=correlation_id,
                     user_id=user_id,
                     now=now,
+                    status=initial_status,
                 )
             self.s.commit()
         except IntegrityError as exc:
@@ -212,6 +218,8 @@ class V2PlatformUserCreateService:
         email: str,
         mobile: str,
         now: datetime,
+        status: str = "ACTIVE",
+        is_employee: bool = False,
     ) -> None:
         self.s.execute(
             text(
@@ -228,9 +236,9 @@ class V2PlatformUserCreateService:
                 """
                 INSERT INTO security.users
                 (user_id,display_name,first_name,last_name,primary_email,primary_mobile,status,
-                 created_at_utc,updated_at_utc)
-                VALUES (:user_id,:display_name,:first_name,:last_name,:email,:mobile,'ACTIVE',
-                        :now,:now)
+                 is_employee,created_at_utc,updated_at_utc)
+                VALUES (:user_id,:display_name,:first_name,:last_name,:email,:mobile,:status,
+                        :is_employee,:now,:now)
                 """
             ),
             {
@@ -240,6 +248,8 @@ class V2PlatformUserCreateService:
                 "last_name": last_name,
                 "email": email,
                 "mobile": mobile,
+                "status": status,
+                "is_employee": is_employee,
                 "now": now,
             },
         )
@@ -299,6 +309,7 @@ class V2PlatformUserCreateService:
         correlation_id: str,
         user_id: str,
         now: datetime,
+        status: str = "ACTIVE",
     ) -> None:
         # admin_change_records needs a human actor, so a service caller is recorded in
         # security_events (which accepts a SERVICE_INTEGRATION principal). No password is stored.
@@ -317,7 +328,7 @@ class V2PlatformUserCreateService:
                 "principal_id": principal_id,
                 "user_id": user_id,
                 "correlation_id": correlation_id,
-                "payload": json.dumps({"integrationKey": integration_key, "status": "ACTIVE"}),
+                "payload": json.dumps({"integrationKey": integration_key, "status": status}),
                 "now": now,
             },
         )

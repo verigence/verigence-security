@@ -133,3 +133,37 @@ def lookup_user_for_service(
     if row is None:
         raise HTTPException(status_code=404, detail="No Verigence user has this email")
     return ServiceUserLookupResponse(userId=row[0], displayName=row[1], status=str(row[2]))
+
+
+class ServiceUserEmployeeResponse(BaseModel):
+    userId: str
+    isEmployee: bool
+
+
+@router.post("/users/{userId}/employee", response_model=ServiceUserEmployeeResponse)
+def mark_user_as_employee_for_service(
+    userId: str,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> ServiceUserEmployeeResponse:
+    """The HR service ticks "Is Employee" on an existing user it has just linked to an employee
+    record. Same guard as user creation; it can only set the flag, never clear it or change
+    anything else."""
+    _authorize_service(service_token, settings, session)
+    try:
+        updated = session.execute(
+            text(
+                "UPDATE security.users SET is_employee=true, updated_at_utc=now()"
+                " WHERE user_id=CAST(:user_id AS uuid) RETURNING 1"
+            ),
+            {"user_id": userId},
+        ).first()
+    except Exception as exc:  # a malformed id must read as not found, not as a server error
+        session.rollback()
+        raise HTTPException(status_code=404, detail="User not found") from exc
+    if updated is None:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="User not found")
+    session.commit()
+    return ServiceUserEmployeeResponse(userId=userId, isEmployee=True)

@@ -94,7 +94,7 @@ def _create_service(monkeypatch: pytest.MonkeyPatch, outcome: object = None) -> 
     return calls
 
 
-def test_allowed_integration_creates_an_active_user(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_allowed_integration_creates_a_user_through_the_service(monkeypatch: pytest.MonkeyPatch) -> None:
     _caller(monkeypatch)
     calls = _create_service(monkeypatch)
     response = client.post("/security/v1/service/users", json=BODY, headers=AUTH)
@@ -199,3 +199,42 @@ def test_lookup_is_refused_for_other_integrations_and_without_a_token(monkeypatc
     params = {"email": "sample@example.test"}
     assert client.get("/security/v1/service/users/lookup", params=params, headers=AUTH).status_code == 403
     assert client.get("/security/v1/service/users/lookup", params=params).status_code == 401
+
+
+class _FlagSession:
+    """First query: the integration check. Second: the flag update."""
+
+    def __init__(self, found: bool) -> None:
+        self.found, self.calls, self.committed = found, 0, False
+
+    def execute(self, *_: object, **__: object) -> _Result:
+        self.calls += 1
+        if self.calls == 1:
+            return _Result((PRINCIPAL,))
+        return _Result((1,) if self.found else None)
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def rollback(self) -> None:
+        pass
+
+
+def test_allowed_integration_can_tick_is_employee(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch)
+    session = _FlagSession(True)
+    app.dependency_overrides[platform_session] = lambda: session
+    response = client.post(f"/security/v1/service/users/{USER}/employee", headers=AUTH)
+    assert response.status_code == 200 and response.json() == {"userId": USER, "isEmployee": True}
+    assert session.committed
+
+
+def test_ticking_is_employee_for_an_unknown_user_is_404_and_other_integrations_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _caller(monkeypatch)
+    app.dependency_overrides[platform_session] = lambda: _FlagSession(False)
+    assert client.post(f"/security/v1/service/users/{USER}/employee", headers=AUTH).status_code == 404
+    _caller(monkeypatch, subject="audit-core")
+    app.dependency_overrides[platform_session] = lambda: _FlagSession(True)
+    assert client.post(f"/security/v1/service/users/{USER}/employee", headers=AUTH).status_code == 403

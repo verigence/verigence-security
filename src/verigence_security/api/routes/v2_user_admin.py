@@ -38,6 +38,7 @@ def _user_response(row: dict[str, object]) -> GlobalUserDirectoryResponse:
         onboardingStatus=(
             str(row["onboarding_status"]) if row["onboarding_status"] is not None else None
         ),
+        isEmployee=bool(row.get("is_employee", False)),
         createdAtUtc=row["created_at_utc"],  # type: ignore[arg-type]
         updatedAtUtc=row["updated_at_utc"],  # type: ignore[arg-type]
     )

@@ -13,6 +13,7 @@ class GlobalUserDirectoryResponse(BaseModel):
     status: str
     clerkSubject: str | None
     onboardingStatus: str | None
+    isEmployee: bool = False
     createdAtUtc: datetime
     updatedAtUtc: datetime
 
