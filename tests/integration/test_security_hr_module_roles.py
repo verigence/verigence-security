@@ -145,3 +145,17 @@ def test_phase2_grants_split_prepare_review_and_approve(session: Session) -> Non
     # The CEO holds every HR permission.
     keys = {p for _, p in grants}
     assert {p for r, p in grants if r == "CEO"} == keys
+
+
+def test_support_permission_exists_but_no_hr_role_holds_it(session: Session) -> None:
+    # Feedback & Support tickets reach SuperAdmin only: SuperAdmin passes any active permission.
+    active = _rows(
+        session,
+        "SELECT permission_key FROM security.permissions WHERE permission_key='hr.support.manage' AND status='ACTIVE'",
+    )
+    assert active == {("hr.support.manage",)}
+    held = _rows(
+        session,
+        "SELECT role_key FROM security.module_role_permissions WHERE permission_key='hr.support.manage'",
+    )
+    assert held == set()
