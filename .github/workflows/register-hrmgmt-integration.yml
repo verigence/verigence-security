@@ -1,0 +1,88 @@
+name: Register HRMgmt service identity (DEV)
+
+# Runs only for a push to dev whose head commit message contains REGISTER-HRMGMT-NOW.
+# Registers the "hrmgmt" service integration and its credential in Security DEV, using the
+# GitHub secret HRMGMT_CLIENT_SECRET. Checks that this secret equals the HRMgmt service's
+# SECURITY_CLIENT_SECRET on Railway and that Security issues a token for it. Prints only
+# yes/no answers and counts, never a secret.
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/register-hrmgmt-integration.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-dev-operation
+  cancel-in-progress: false
+
+env:
+  PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+  SECURITY_BASE_URL: https://security-dev.up.railway.app
+
+jobs:
+  register:
+    if: contains(github.event.head_commit.message, 'REGISTER-HRMGMT-NOW')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      HRMGMT_CLIENT_SECRET: ${{ secrets.HRMGMT_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: |
+          python -m pip install -q "psycopg[binary]" argon2-cffi
+          npm install --global @railway/cli
+      - name: Check the secret is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${HRMGMT_CLIENT_SECRET:-}" ]; then
+            echo '::error::GitHub secret HRMGMT_CLIENT_SECRET is not set on this repository. Add it (same value as the HRMgmt service SECURITY_CLIENT_SECRET on Railway), then push again.'
+            exit 1
+          fi
+          echo "HRMGMT_CLIENT_SECRET present: yes (length ${#HRMGMT_CLIENT_SECRET})"
+          [ "${#HRMGMT_CLIENT_SECRET}" -ge 32 ] || { echo '::error::The secret must be at least 32 characters.'; exit 1; }
+      - name: Check it matches the HRMgmt service on Railway (yes/no only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service HRMgmt --json >/dev/null
+          railway variable list --service HRMgmt --json > /tmp/hr-vars.json
+          python3 - <<'PY'
+          import hashlib, json, os, sys
+          v = json.load(open('/tmp/hr-vars.json'))
+          gh = os.environ['HRMGMT_CLIENT_SECRET']
+          rw = v.get('SECURITY_CLIENT_SECRET') or ''
+          print('Railway SECURITY_CLIENT_ID is hrmgmt-dev:', (v.get('SECURITY_CLIENT_ID') or '').strip() == 'hrmgmt-dev')
+          print('Railway SECURITY_BASE_URL is the Security DEV service:', (v.get('SECURITY_BASE_URL') or '').rstrip('/') == os.environ['SECURITY_BASE_URL'])
+          same = hashlib.sha256(gh.encode()).digest() == hashlib.sha256(rw.encode()).digest()
+          print('GitHub secret equals Railway SECURITY_CLIENT_SECRET:', same)
+          if not same:
+              sys.exit('The GitHub secret and the Railway variable differ. Make them identical, then push again.')
+          PY
+      - name: Register the integration and credential
+        run: python scripts/register_hrmgmt_integration.py
+      - name: Check Security issues a token for HRMgmt
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/token.json -w '%{http_code}' -u "hrmgmt-dev:${HRMGMT_CLIENT_SECRET}" \
+            -d 'audience=security' "$SECURITY_BASE_URL/security/v1/service/token")
+          echo "POST /security/v1/service/token: HTTP $code"
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/token.json'))
+          print('token issued:', bool(d.get('accessToken')), '| tokenType:', d.get('tokenType'), '| audience:', d.get('audience'))
+          PY
+          [ "$code" = "200" ]
