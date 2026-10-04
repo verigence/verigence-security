@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -30,17 +31,8 @@ def _allowed_integrations(settings: Settings) -> frozenset[str]:
     )
 
 
-@router.post("/users", response_model=GlobalUserDirectoryResponse, status_code=201)
-def create_user_for_service(
-    body: PlatformUserCreateRequest,
-    request: Request,
-    service_token: str = Depends(service_integration_token),
-    settings: Settings = Depends(get_settings),
-    session: Session = Depends(platform_session),
-) -> GlobalUserDirectoryResponse:
-    """An allowed ServiceIntegration (the HR service) creates an ACTIVE user with a verified email
-    and the given password, with no OTP step. Narrow by design: only integrations named in
-    SERVICE_USER_CREATE_INTEGRATIONS may call it; every other service token is refused."""
+def _authorize_service(service_token: str, settings: Settings, session: Session) -> tuple[str, str]:
+    """Returns (service principal id, integration key) for an allowed ServiceIntegration, else raises."""
     claims = TokenService(settings).verify_service_token(service_token, audience="security")
     subject = str(claims.get("sub") or "").strip()
     if not subject:
@@ -61,7 +53,21 @@ def create_user_for_service(
         raise security_error("AUTH_TOKEN_INVALID")
     if subject not in _allowed_integrations(settings):
         raise security_error("PERMISSION_DENIED")
+    return str(row[0]), subject
 
+
+@router.post("/users", response_model=GlobalUserDirectoryResponse, status_code=201)
+def create_user_for_service(
+    body: PlatformUserCreateRequest,
+    request: Request,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> GlobalUserDirectoryResponse:
+    """An allowed ServiceIntegration (the HR service) creates an ACTIVE user with a verified email
+    and the given password, with no OTP step. Narrow by design: only integrations named in
+    SERVICE_USER_CREATE_INTEGRATIONS may call it; every other service token is refused."""
+    principal_id, subject = _authorize_service(service_token, settings, session)
     try:
         clerk = ClerkBackendClient(settings)
     except ClerkBackendError as exc:
@@ -75,7 +81,7 @@ def create_user_for_service(
             email=body.email,
             mobile=body.mobile,
             password=body.password.get_secret_value(),
-            service_principal_id=str(row[0]),
+            service_principal_id=principal_id,
             service_integration_key=subject,
             correlation_id=request.state.correlation_id,
             clerk=clerk,
@@ -90,3 +96,40 @@ def create_user_for_service(
     if user is None:
         raise HTTPException(status_code=500, detail="Created USER could not be read back")
     return _user_response(user)
+
+
+class ServiceUserLookupResponse(BaseModel):
+    userId: str
+    displayName: str | None
+    status: str
+
+
+@router.get("/users/lookup", response_model=ServiceUserLookupResponse)
+def lookup_user_for_service(
+    email: str,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> ServiceUserLookupResponse:
+    """An allowed ServiceIntegration (the HR service) finds the existing Verigence user with this
+    email so an employee record can be linked to it. Same guard as user creation; read-only; it
+    returns only the user id, display name and status."""
+    _authorize_service(service_token, settings, session)
+    wanted = email.strip().lower()
+    if not wanted or len(wanted) > 254:
+        raise HTTPException(status_code=422, detail="A valid email is required")
+    row = session.execute(
+        text(
+            """
+            SELECT user_id::text, display_name, status
+            FROM security.users
+            WHERE lower(primary_email) = :email
+            ORDER BY (status = 'ACTIVE') DESC, created_at_utc
+            LIMIT 1
+            """
+        ),
+        {"email": wanted},
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No Verigence user has this email")
+    return ServiceUserLookupResponse(userId=row[0], displayName=row[1], status=str(row[2]))

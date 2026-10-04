@@ -161,3 +161,41 @@ def test_failures_map_to_actionable_statuses(monkeypatch: pytest.MonkeyPatch, er
     response = client.post("/security/v1/service/users", json=BODY, headers=AUTH)
     assert response.status_code == status
     assert "transient-secret" not in response.text
+
+
+class _LookupSession:
+    """First query: the integration check. Second: the user lookup."""
+
+    def __init__(self, principal: str | None, user: tuple[str, str, str] | None) -> None:
+        self.principal, self.user, self.calls = principal, user, 0
+
+    def execute(self, *_: object, **__: object) -> _Result:
+        self.calls += 1
+        if self.calls == 1:
+            return _Result((self.principal,) if self.principal else None)
+        return _Result(self.user)
+
+
+def _lookup_caller(monkeypatch: pytest.MonkeyPatch, user: tuple[str, str, str] | None, subject: str = "hrmgmt") -> None:
+    _caller(monkeypatch, subject=subject)
+    app.dependency_overrides[platform_session] = lambda: _LookupSession(PRINCIPAL, user)
+
+
+def test_allowed_integration_finds_an_existing_user_by_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    _lookup_caller(monkeypatch, (USER, "Sample Person", "ACTIVE"))
+    response = client.get("/security/v1/service/users/lookup", params={"email": " Sample@Example.test "}, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"userId": USER, "displayName": "Sample Person", "status": "ACTIVE"}
+
+
+def test_lookup_without_a_match_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    _lookup_caller(monkeypatch, None)
+    response = client.get("/security/v1/service/users/lookup", params={"email": "nobody@example.test"}, headers=AUTH)
+    assert response.status_code == 404
+
+
+def test_lookup_is_refused_for_other_integrations_and_without_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    _lookup_caller(monkeypatch, (USER, "Sample Person", "ACTIVE"), subject="audit-core")
+    params = {"email": "sample@example.test"}
+    assert client.get("/security/v1/service/users/lookup", params=params, headers=AUTH).status_code == 403
+    assert client.get("/security/v1/service/users/lookup", params=params).status_code == 401
