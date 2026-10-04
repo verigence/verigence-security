@@ -347,3 +347,35 @@ def test_listing_users_is_refused_for_other_integrations_and_without_a_token(mon
     app.dependency_overrides[platform_session] = lambda: _ListSession([])
     assert client.get("/security/v1/service/users", headers=AUTH).status_code == 403
     assert client.get("/security/v1/service/users").status_code == 401
+
+
+def test_employee_sync_reports_each_user_and_needs_the_service_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    from verigence_security.services.v2_user_lifecycle import EmployeeSyncOutcome
+
+    seen: list[tuple[str, bool]] = []
+
+    class _Lifecycle:
+        def __init__(self, session: object) -> None:
+            _ = session
+
+        def sync_employee_for_service(self, **kw: object) -> EmployeeSyncOutcome:
+            seen.append((str(kw["user_id"]), bool(kw["suspend"])))
+            assert kw["principal_id"] == PRINCIPAL and kw["integration_key"] == "hrmgmt"
+            if kw["user_id"] == "boom":
+                raise RuntimeError("db")
+            return EmployeeSyncOutcome(str(kw["user_id"]), True, "SUSPENDED", True, True, bool(kw["suspend"]), None)
+
+    _caller(monkeypatch)
+    app.dependency_overrides[platform_session] = lambda: _PasswordSession(None)
+    monkeypatch.setattr(service_users, "V2UserLifecycleService", _Lifecycle)
+    body = {"items": [{"userId": USER, "suspend": True}, {"userId": "boom"}]}
+    response = client.post("/security/v1/service/users/employee-sync", json=body, headers=AUTH)
+    assert response.status_code == 200
+    rows = response.json()
+    assert rows[0] == {"userId": USER, "found": True, "status": "SUSPENDED", "isEmployee": True,
+                       "ticked": True, "suspended": True, "note": None}
+    assert rows[1]["note"] == "NOT_PROCESSED" and rows[1]["found"] is False
+    assert seen == [(USER, True), ("boom", False)]
+    _caller(monkeypatch, subject="audit-core")
+    assert client.post("/security/v1/service/users/employee-sync", json=body, headers=AUTH).status_code == 403
+    assert client.post("/security/v1/service/users/employee-sync", json={"items": []}, headers=AUTH).status_code == 422

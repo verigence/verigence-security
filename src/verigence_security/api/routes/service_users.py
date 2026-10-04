@@ -22,6 +22,7 @@ from verigence_security.services.v2_platform_user_create import (
     V2PlatformUserCreateService,
 )
 from verigence_security.services.v2_user_directory import V2UserDirectoryService
+from verigence_security.services.v2_user_lifecycle import V2UserLifecycleService
 
 router = APIRouter(prefix="/security/v1/service", tags=["ServiceIntegration"])
 
@@ -286,3 +287,83 @@ def list_users_for_service(
         )
         for r in rows
     ]
+
+
+class EmployeeSyncItem(BaseModel):
+    userId: str = Field(min_length=1, max_length=64)
+    suspend: bool = False
+
+
+class EmployeeSyncRequest(BaseModel):
+    items: list[EmployeeSyncItem] = Field(min_length=1, max_length=100)
+
+
+class EmployeeSyncResult(BaseModel):
+    userId: str
+    found: bool
+    status: str | None
+    isEmployee: bool
+    ticked: bool
+    suspended: bool
+    note: str | None
+
+
+@router.post("/users/employee-sync", response_model=list[EmployeeSyncResult])
+def sync_employees_for_service(
+    body: EmployeeSyncRequest,
+    request: Request,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> list[EmployeeSyncResult]:
+    """The HR service reports which users are employees and which of them must be suspended
+    because the employee is no longer active. Same guard as user creation. It only ticks Is
+    Employee and suspends an ACTIVE user; it never reactivates anyone and never touches the
+    active SuperAdmin."""
+    principal_id, integration_key = _authorize_service(service_token, settings, session)
+    clerk: ClerkBackendClient | None = None
+    if any(item.suspend for item in body.items):
+        try:
+            clerk = ClerkBackendClient(settings)
+        except ClerkBackendError as exc:
+            raise HTTPException(
+                status_code=503, detail="Identity provider integration is not configured"
+            ) from exc
+    service = V2UserLifecycleService(session)
+    results: list[EmployeeSyncResult] = []
+    for item in body.items:
+        try:
+            outcome = service.sync_employee_for_service(
+                user_id=item.userId,
+                suspend=item.suspend,
+                principal_id=principal_id,
+                integration_key=integration_key,
+                correlation_id=request.state.correlation_id,
+                clerk=clerk,
+            )
+        except Exception:  # one bad id (for example malformed) must not stop the rest
+            session.rollback()
+            results.append(
+                EmployeeSyncResult(
+                    userId=item.userId,
+                    found=False,
+                    status=None,
+                    isEmployee=False,
+                    ticked=False,
+                    suspended=False,
+                    note="NOT_PROCESSED",
+                )
+            )
+            continue
+        results.append(
+            EmployeeSyncResult(
+                userId=outcome.user_id,
+                found=outcome.found,
+                status=outcome.status,
+                isEmployee=outcome.is_employee,
+                ticked=outcome.ticked,
+                suspended=outcome.suspended,
+                note=outcome.note,
+            )
+        )
+    return results

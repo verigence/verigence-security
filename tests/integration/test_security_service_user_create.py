@@ -29,6 +29,7 @@ class _FakeClerk:
     def __init__(self) -> None:
         self.created: list[str] = []
         self.deleted: list[str] = []
+        self.banned: list[str] = []
 
     def create_user(self, *, first_name: str, last_name: str, email: str, password: str) -> str:
         self.created.append(email)
@@ -36,6 +37,9 @@ class _FakeClerk:
 
     def delete_user(self, clerk_user_id: str) -> None:
         self.deleted.append(clerk_user_id)
+
+    def ban_user(self, clerk_user_id: str) -> None:
+        self.banned.append(clerk_user_id)
 
 
 @pytest.fixture
@@ -148,3 +152,85 @@ def test_invalid_mobile_is_refused_before_anything_is_created(session: Session) 
     with pytest.raises(InvalidUserInput):
         _create(session, clerk, principal_id, email=f"x.{uuid4().hex[:8]}@example.test", mobile="12345")
     assert clerk.created == []
+
+
+def _sync(db: Session, clerk: _FakeClerk, principal_id: str, user_id: str, *, suspend: bool):
+    from verigence_security.services.v2_user_lifecycle import V2UserLifecycleService
+
+    return V2UserLifecycleService(db).sync_employee_for_service(
+        user_id=user_id,
+        suspend=suspend,
+        principal_id=principal_id,
+        integration_key="hrmgmt",
+        correlation_id=str(uuid4()),
+        clerk=clerk,  # type: ignore[arg-type]
+    )
+
+
+def _active_user(db: Session, clerk: _FakeClerk, principal_id: str) -> str:
+    created = _create(db, clerk, principal_id, email=f"sync.{uuid4().hex[:8]}@example.test")
+    db.execute(
+        text("UPDATE security.users SET status='ACTIVE', is_employee=false WHERE user_id=:id"),
+        {"id": created.user_id},
+    )
+    return created.user_id
+
+
+def test_employee_sync_ticks_the_flag_and_suspends_only_when_asked(session: Session) -> None:
+    principal_id = _seed_integration(session)
+    clerk = _FakeClerk()
+    uid = _active_user(session, clerk, principal_id)
+
+    first = _sync(session, clerk, principal_id, uid, suspend=False)
+    assert first.found and first.ticked and not first.suspended and first.status == "ACTIVE"
+    again = _sync(session, clerk, principal_id, uid, suspend=False)
+    assert not again.ticked and not again.suspended  # nothing left to change
+
+    done = _sync(session, clerk, principal_id, uid, suspend=True)
+    assert done.suspended and done.status == "SUSPENDED" and len(clerk.banned) == 1
+    row = session.execute(
+        text("SELECT status,is_employee FROM security.users WHERE user_id=:id"), {"id": uid}
+    ).one()
+    assert row[0] == "SUSPENDED" and row[1] is True
+    event = session.execute(
+        text(
+            "SELECT count(*) FROM security.security_events"
+            " WHERE event_type='SERVICE_EMPLOYEE_SYNC' AND entity_id=:id"
+        ),
+        {"id": uid},
+    ).scalar_one()
+    assert event == 2  # one for the tick, one for the suspension
+
+    # an already suspended user is left alone, and a missing one is reported
+    left = _sync(session, clerk, principal_id, uid, suspend=True)
+    assert left.note == "NOT_ACTIVE" and not left.suspended and len(clerk.banned) == 1
+    assert _sync(session, clerk, principal_id, str(uuid4()), suspend=True).found is False
+
+
+def test_employee_sync_never_suspends_the_active_super_admin(session: Session) -> None:
+    principal_id = _seed_integration(session)
+    clerk = _FakeClerk()
+    existing = session.execute(
+        text(
+            "SELECT user_id::text FROM security.user_admin_role_assignments"
+            " WHERE role_key='SuperAdmin' AND status='ACTIVE' LIMIT 1"
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        existing = _active_user(session, clerk, principal_id)
+        session.execute(
+            text(
+                "INSERT INTO security.user_admin_role_assignments"
+                " (assignment_id,user_id,role_key,scope_type,scope_id,status,assigned_at_utc)"
+                " VALUES (:aid,:id,'SuperAdmin','PLATFORM',NULL,'ACTIVE',now())"
+            ),
+            {"aid": str(uuid4()), "id": existing},
+        )
+    session.execute(
+        text("UPDATE security.users SET status='ACTIVE' WHERE user_id=:id"), {"id": existing}
+    )
+    out = _sync(session, clerk, principal_id, existing, suspend=True)
+    assert out.note == "SUPER_ADMIN_PROTECTED" and not out.suspended and clerk.banned == []
+    assert session.execute(
+        text("SELECT status FROM security.users WHERE user_id=:id"), {"id": existing}
+    ).scalar_one() == "ACTIVE"

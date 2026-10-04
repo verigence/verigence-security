@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -19,6 +20,17 @@ class UserLifecycleResult:
     previous_status: str
     changed: bool
     deletion_request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EmployeeSyncOutcome:
+    user_id: str
+    found: bool
+    status: str | None
+    is_employee: bool
+    ticked: bool
+    suspended: bool
+    note: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +366,108 @@ class V2UserLifecycleService:
             deleted_at_utc=now,
             retain_until_utc=retain_until,
         )
+
+    def sync_employee_for_service(
+        self,
+        *,
+        user_id: str,
+        suspend: bool,
+        principal_id: str,
+        integration_key: str,
+        correlation_id: str,
+        clerk: ClerkBackendClient | None,
+    ) -> EmployeeSyncOutcome:
+        """HR tells Security that this user is an employee, and, when the employee is no longer
+        active, to suspend the user. Ticks Is Employee; suspends only an ACTIVE user; never the
+        active SuperAdmin. One commit per user, so one problem never undoes the others."""
+        now = datetime.now(UTC)
+        ban_subject: str | None = None
+        try:
+            row = self._user_for_update(user_id)
+            if row is None:
+                self.s.rollback()
+                return EmployeeSyncOutcome(user_id, False, None, False, False, False, "NOT_FOUND")
+            status = str(row["status"])
+            flag_before = bool(
+                self.s.execute(
+                    text("SELECT is_employee FROM security.users WHERE user_id=:u"),
+                    {"u": user_id},
+                ).scalar_one()
+            )
+            ticked = not flag_before
+            suspended = False
+            note: str | None = None
+            if ticked:
+                self.s.execute(
+                    text(
+                        "UPDATE security.users SET is_employee=true, updated_at_utc=:now"
+                        " WHERE user_id=:u"
+                    ),
+                    {"now": now, "u": user_id},
+                )
+            if suspend:
+                if status != "ACTIVE":
+                    note = "NOT_ACTIVE"
+                elif self._is_active_super_admin(user_id):
+                    note = "SUPER_ADMIN_PROTECTED"
+                else:
+                    ban_subject = self._clerk_subject(user_id)
+                    self.s.execute(
+                        text(
+                            "UPDATE security.users SET status='SUSPENDED', updated_at_utc=:now"
+                            " WHERE user_id=:u"
+                        ),
+                        {"now": now, "u": user_id},
+                    )
+                    self.s.execute(
+                        text(
+                            """
+                            UPDATE security.access_sessions
+                            SET status='REVOKED',last_activity_at_utc=:now
+                            WHERE principal_id=:u AND actor_type='USER' AND status='ACTIVE'
+                            """
+                        ),
+                        {"now": now, "u": user_id},
+                    )
+                    status = "SUSPENDED"
+                    suspended = True
+            if ticked or suspended:
+                self.s.execute(
+                    text(
+                        """
+                        INSERT INTO security.security_events
+                        (security_event_id,tenant_id,principal_id,actor_type,event_type,entity_type,
+                         entity_id,outcome,reason_code,correlation_id,payload_json,occurred_at_utc)
+                        VALUES (:id,NULL,:principal_id,'SERVICE_INTEGRATION',
+                                'SERVICE_EMPLOYEE_SYNC','USER',:user_id,'SUCCESS',:reason,
+                                :correlation_id,CAST(:payload AS jsonb),:now)
+                        """
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "principal_id": principal_id,
+                        "user_id": user_id,
+                        "reason": "SUSPENDED" if suspended else "EMPLOYEE_TICKED",
+                        "correlation_id": correlation_id,
+                        "payload": json.dumps(
+                            {
+                                "integrationKey": integration_key,
+                                "ticked": ticked,
+                                "suspended": suspended,
+                            }
+                        ),
+                        "now": now,
+                    },
+                )
+            self.s.commit()
+        except Exception:
+            self.s.rollback()
+            raise
+        if ban_subject is not None and clerk is not None:
+            # Security denial state is already committed; a provider failure cannot restore access.
+            with suppress(ClerkBackendError):
+                clerk.ban_user(ban_subject)
+        return EmployeeSyncOutcome(user_id, True, status, True, ticked, suspended, note)
 
     def _user_for_update(self, user_id: str) -> dict[str, object] | None:
         row = self.s.execute(
