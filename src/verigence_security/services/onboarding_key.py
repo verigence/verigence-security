@@ -15,8 +15,5 @@ def normalize_onboarding_key(value: str) -> str:
 def require_onboarding_key_shape(value: str) -> str:
     normalized = normalize_onboarding_key(value)
     if ONBOARDING_KEY_PATTERN.fullmatch(normalized) is None:
-        raise ValueError(
-            f"Onboarding key must be {ONBOARDING_KEY_PREFIX} followed by "
-            f"{ONBOARDING_KEY_DIGITS} digits"
-        )
+        raise ValueError(f"Onboarding key must be {ONBOARDING_KEY_PREFIX} followed by {ONBOARDING_KEY_DIGITS} digits")
     return normalized

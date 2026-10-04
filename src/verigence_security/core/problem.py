@@ -25,11 +25,7 @@ def _validation_issue_summary(exc: RequestValidationError) -> str:
     summaries: list[str] = []
     for issue in exc.errors()[:12]:
         location = issue.get("loc")
-        field = (
-            ".".join(str(part) for part in location)
-            if isinstance(location, (list, tuple))
-            else "unknown"
-        )
+        field = ".".join(str(part) for part in location) if isinstance(location, (list, tuple)) else "unknown"
         issue_type = issue.get("type")
         safe_type = issue_type if isinstance(issue_type, str) and issue_type else "validation_error"
         summaries.append(f"{field}:{safe_type}")

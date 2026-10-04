@@ -56,9 +56,7 @@ def get_module(
     session: Session = Depends(platform_session),
 ) -> dict[str, object]:
     _ = actor
-    catalog = ModuleCatalogService(V2AwareModuleCatalogRepository(session)).get_catalog(
-        moduleKey.lower()
-    )
+    catalog = ModuleCatalogService(V2AwareModuleCatalogRepository(session)).get_catalog(moduleKey.lower())
     if catalog is None:
         raise HTTPException(status_code=404, detail="Module not found")
     return catalog
@@ -71,9 +69,7 @@ def list_module_permissions(
     session: Session = Depends(platform_session),
 ) -> list[dict[str, object]]:
     _require_admin(actor)
-    catalog = ModuleCatalogService(V2AwareModuleCatalogRepository(session)).get_catalog(
-        moduleKey.lower()
-    )
+    catalog = ModuleCatalogService(V2AwareModuleCatalogRepository(session)).get_catalog(moduleKey.lower())
     if catalog is None:
         raise HTTPException(status_code=404, detail="Module not found")
     return cast(list[dict[str, object]], catalog["permissions"])

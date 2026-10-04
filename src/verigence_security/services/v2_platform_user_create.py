@@ -124,9 +124,7 @@ class V2PlatformUserCreateService:
             raise InvalidUserInput("Password is required")
 
         now = datetime.now(UTC)
-        onboarding._expire_stale_identity_attempts(
-            email=clean_email, mobile=clean_mobile, now=now, clerk=clerk
-        )
+        onboarding._expire_stale_identity_attempts(email=clean_email, mobile=clean_mobile, now=now, clerk=clerk)
         onboarding._require_identity_not_registered(clean_email, clean_mobile)
         onboarding._require_no_live_attempt(clean_email, clean_mobile)
         self._require_no_pending_registration(clean_email, clean_mobile)
@@ -203,9 +201,7 @@ class V2PlatformUserCreateService:
             {"email": email, "mobile_digits": mobile.removeprefix("+")},
         ).first()
         if row is not None:
-            raise ValueError(
-                "Email or mobile number has a pending registration; approve it from Pending Approvals"
-            )
+            raise ValueError("Email or mobile number has a pending registration; approve it from Pending Approvals")
 
     def _insert_user(
         self,

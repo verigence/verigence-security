@@ -35,9 +35,7 @@ class InitialSuperAdminProvisioningService:
         subject = clerk_user_id.strip()
         name = display_name.strip() or "superadmin"
         if subject != PHASE1_SUPER_ADMIN_CLERK_USER_ID:
-            raise ValueError(
-                "Initial Super Admin Clerk user ID must match the approved Phase-1 identity"
-            )
+            raise ValueError("Initial Super Admin Clerk user ID must match the approved Phase-1 identity")
 
         try:
             self.s.execute(
@@ -53,15 +51,10 @@ class InitialSuperAdminProvisioningService:
                 user_id = str(existing["user_id"])
                 if existing["identity_status"] != "ACTIVE":
                     raise RuntimeError("Approved SuperAdmin Clerk identity is not ACTIVE")
-                if (
-                    existing["user_status"] != "ACTIVE"
-                    or existing["principal_status"] != "ACTIVE"
-                ):
+                if existing["user_status"] != "ACTIVE" or existing["principal_status"] != "ACTIVE":
                     raise RuntimeError("Approved SuperAdmin USER/principal must be ACTIVE")
                 if self._has_active_operating_role(user_id):
-                    raise RuntimeError(
-                        "Approved SuperAdmin USER cannot have an ACTIVE operating role"
-                    )
+                    raise RuntimeError("Approved SuperAdmin USER cannot have an ACTIVE operating role")
 
                 now = datetime.now(UTC)
                 changed = self._ensure_super_admin_assignments(user_id=user_id, now=now)
@@ -128,9 +121,10 @@ class InitialSuperAdminProvisioningService:
             raise
 
     def _user_for_clerk_subject(self, subject: str) -> dict[str, object] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT e.user_id,
                        e.status AS identity_status,
                        u.status AS user_status,
@@ -140,9 +134,12 @@ class InitialSuperAdminProvisioningService:
                 JOIN security.security_principals sp ON sp.principal_id=u.user_id
                 WHERE e.provider='CLERK' AND e.provider_subject=:subject
                 """
-            ),
-            {"subject": subject},
-        ).mappings().first()
+                ),
+                {"subject": subject},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def _reject_conflicting_super_admin(self, approved_user_id: str | None) -> None:
@@ -185,9 +182,7 @@ class InitialSuperAdminProvisioningService:
             params,
         ).first()
         if v2_conflict is not None:
-            raise RuntimeError(
-                "A different active v2 SuperAdmin already exists; provisioning will not replace it"
-            )
+            raise RuntimeError("A different active v2 SuperAdmin already exists; provisioning will not replace it")
 
     def _has_active_operating_role(self, user_id: str) -> bool:
         return (

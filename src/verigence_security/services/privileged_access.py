@@ -40,15 +40,19 @@ class PrivilegedAccessService(TenantRbacGateService):
         now = datetime.now(UTC)
         if not self._active_membership(tenant_id, user_id, now):
             raise ValueError("User must be ACTIVE")
-        role = self.s.execute(
-            text(
-                """
+        role = (
+            self.s.execute(
+                text(
+                    """
                 SELECT role_key,status FROM security.roles
                 WHERE tenant_id=:tenant_id AND role_id=:role_id
                 """
-            ),
-            {"tenant_id": tenant_id, "role_id": role_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "role_id": role_id},
+            )
+            .mappings()
+            .first()
+        )
         if role is None or role["status"] != "ACTIVE":
             raise ValueError("Role must be ACTIVE")
         role_key = str(role["role_key"])
@@ -276,47 +280,59 @@ class PrivilegedAccessService(TenantRbacGateService):
         return self._public(self._request(tenant_id, request_id), str(request["role_key"]))
 
     def _pending_request(self, tenant_id: str, user_id: str, role_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT r.*,ro.role_key FROM security.privileged_access_requests r
                 JOIN security.roles ro ON ro.tenant_id=r.tenant_id AND ro.role_id=r.role_id
                 WHERE r.tenant_id=:tenant_id AND r.subject_user_id=:user_id
                   AND r.role_id=:role_id AND r.status='PENDING'
                 ORDER BY r.requested_at_utc DESC LIMIT 1
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def _request(self, tenant_id: str, request_id: str) -> dict[str, Any]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT r.*,ro.role_key FROM security.privileged_access_requests r
                 JOIN security.roles ro ON ro.tenant_id=r.tenant_id AND ro.role_id=r.role_id
                 WHERE r.tenant_id=:tenant_id AND r.request_id=:request_id
                 """
-            ),
-            {"tenant_id": tenant_id, "request_id": request_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "request_id": request_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("Privileged access request not found")
         return dict(row)
 
     def _locked_request(self, tenant_id: str, request_id: str) -> dict[str, Any]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT r.*,ro.role_key FROM security.privileged_access_requests r
                 JOIN security.roles ro ON ro.tenant_id=r.tenant_id AND ro.role_id=r.role_id
                 WHERE r.tenant_id=:tenant_id AND r.request_id=:request_id
                 FOR UPDATE OF r
                 """
-            ),
-            {"tenant_id": tenant_id, "request_id": request_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "request_id": request_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("Privileged access request not found")
         return dict(row)

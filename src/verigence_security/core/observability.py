@@ -146,9 +146,7 @@ def _configure_application_logging(settings: Settings, *, logger_provider: Logge
         )
         logger.addHandler(stdout_handler)
 
-    if logger_provider is not None and not any(
-        isinstance(handler, LoggingHandler) for handler in logger.handlers
-    ):
+    if logger_provider is not None and not any(isinstance(handler, LoggingHandler) for handler in logger.handlers):
         logger.addHandler(LoggingHandler(level=logging.INFO, logger_provider=logger_provider))
 
 

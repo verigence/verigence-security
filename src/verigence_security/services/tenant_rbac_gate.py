@@ -39,9 +39,10 @@ class TenantRbacGateService(TenantRbacAdminService):
         permission_key: str,
     ) -> tuple[list[str], list[str]]:
         now = datetime.now(UTC)
-        state = self.s.execute(
-            text(
-                """
+        state = (
+            self.s.execute(
+                text(
+                    """
                 SELECT t.status AS tenant_status,u.status AS user_status,
                        p.status AS principal_status
                 FROM security.users u
@@ -49,9 +50,12 @@ class TenantRbacGateService(TenantRbacAdminService):
                 CROSS JOIN security.tenants t
                 WHERE u.user_id=:user_id AND t.tenant_id=:tenant_id
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         if state is None or state["tenant_status"] != "ACTIVE":
             _deny("TENANT_NOT_ACTIVE")
         if state["principal_status"] != "ACTIVE":
@@ -75,15 +79,19 @@ class TenantRbacGateService(TenantRbacAdminService):
     ) -> bool:
         """Assign ordinary roles immediately; privileged standard roles enter maker-checker."""
         now = datetime.now(UTC)
-        role = self.s.execute(
-            text(
-                """
+        role = (
+            self.s.execute(
+                text(
+                    """
                 SELECT role_key,status FROM security.roles
                 WHERE tenant_id=:tenant_id AND role_id=:role_id
                 """
-            ),
-            {"tenant_id": tenant_id, "role_id": role_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "role_id": role_id},
+            )
+            .mappings()
+            .first()
+        )
         if role is None or role["status"] != "ACTIVE":
             raise ValueError("Role must be ACTIVE")
         if str(role["role_key"]) not in PRIVILEGED_TENANT_ROLE_KEYS:

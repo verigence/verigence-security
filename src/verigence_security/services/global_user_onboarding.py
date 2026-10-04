@@ -19,9 +19,7 @@ from verigence_security.config import Settings
 from verigence_security.core.errors import security_error
 
 _HASHER = PasswordHasher()
-_ALLOWED_ONBOARDING_CHARS = frozenset(
-    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_"
-)
+_ALLOWED_ONBOARDING_CHARS = frozenset("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_")
 
 
 class GlobalUserOnboardingService:
@@ -144,15 +142,19 @@ class GlobalUserOnboardingService:
         return True
 
     def get_onboarding_key(self) -> dict[str, Any]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT key_ciphertext,key_version,status,created_at_utc,updated_at_utc
                 FROM security.platform_user_onboarding_settings
                 WHERE singleton_id=1
                 """
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("Global user onboarding key is not configured")
         return {
@@ -184,15 +186,19 @@ class GlobalUserOnboardingService:
             raise ValueError("Display name is required")
         self._require_valid_onboarding_key(onboarding_key)
 
-        existing = self.s.execute(
-            text(
-                """
+        existing = (
+            self.s.execute(
+                text(
+                    """
                 SELECT user_id,status FROM security.users
                 WHERE lower(primary_email)=:email
                 """
-            ),
-            {"email": clean_email},
-        ).mappings().first()
+                ),
+                {"email": clean_email},
+            )
+            .mappings()
+            .first()
+        )
         if existing is not None:
             raise ValueError("A Verigence USER already exists for this email")
 
@@ -305,17 +311,21 @@ class GlobalUserOnboardingService:
     ) -> dict[str, Any]:
         if identity.provider != "CLERK":
             raise security_error("AUTH_TOKEN_INVALID")
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT r.*,u.status AS user_status
                 FROM security.platform_user_onboarding_requests r
                 JOIN security.users u ON u.user_id=r.user_id
                 WHERE r.onboarding_request_id=:request_id
                 """
-            ),
-            {"request_id": onboarding_request_id},
-        ).mappings().first()
+                ),
+                {"request_id": onboarding_request_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("Onboarding request not found")
         if row["status"] not in {"CLERK_INVITED", "PENDING_ADMIN_APPROVAL"}:
@@ -328,15 +338,19 @@ class GlobalUserOnboardingService:
         if clerk_email is None or clerk_email.lower() != str(row["email"]).lower():
             raise security_error("PERMISSION_DENIED")
 
-        existing = self.s.execute(
-            text(
-                """
+        existing = (
+            self.s.execute(
+                text(
+                    """
                 SELECT user_id,status FROM security.external_identities
                 WHERE provider='CLERK' AND provider_subject=:subject
                 """
-            ),
-            {"subject": clerk_user_id},
-        ).mappings().first()
+                ),
+                {"subject": clerk_user_id},
+            )
+            .mappings()
+            .first()
+        )
         if existing is not None and str(existing["user_id"]) != str(row["user_id"]):
             raise security_error("PERMISSION_DENIED")
 
@@ -427,9 +441,10 @@ class GlobalUserOnboardingService:
         target = new_status.upper()
         if target not in {"ACTIVE", "SUSPENDED", "DISABLED", "EXITED"}:
             raise ValueError("Unsupported USER status")
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,u.status,e.provider_subject AS clerk_user_id,
                        r.onboarding_request_id,r.status AS onboarding_status
                 FROM security.users u
@@ -438,9 +453,12 @@ class GlobalUserOnboardingService:
                 LEFT JOIN security.platform_user_onboarding_requests r ON r.user_id=u.user_id
                 WHERE u.user_id=:user_id
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("USER not found")
         current = str(row["status"])
@@ -542,14 +560,18 @@ class GlobalUserOnboardingService:
     # Helpers
     # ------------------------------------------------------------------
     def _require_valid_onboarding_key(self, supplied: str) -> None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT key_hash,status FROM security.platform_user_onboarding_settings
                 WHERE singleton_id=1
                 """
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None or row["status"] != "ACTIVE":
             raise security_error("PERMISSION_DENIED")
         try:

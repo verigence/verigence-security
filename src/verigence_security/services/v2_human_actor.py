@@ -28,25 +28,19 @@ class HumanActorContext:
     @property
     def is_super_admin(self) -> bool:
         return any(
-            scope.role_key == "SuperAdmin"
-            and scope.scope_type == "PLATFORM"
-            and scope.scope_id is None
+            scope.role_key == "SuperAdmin" and scope.scope_type == "PLATFORM" and scope.scope_id is None
             for scope in self.admin_scopes
         )
 
     def is_tenant_admin(self, tenant_id: str) -> bool:
         return any(
-            scope.role_key == "TenantAdmin"
-            and scope.scope_type == "TENANT"
-            and scope.scope_id == tenant_id
+            scope.role_key == "TenantAdmin" and scope.scope_type == "TENANT" and scope.scope_id == tenant_id
             for scope in self.admin_scopes
         )
 
     def is_module_admin(self, module_key: str) -> bool:
         return any(
-            scope.role_key == "ModuleAdmin"
-            and scope.scope_type == "MODULE"
-            and scope.scope_id == module_key
+            scope.role_key == "ModuleAdmin" and scope.scope_type == "MODULE" and scope.scope_id == module_key
             for scope in self.admin_scopes
         )
 
@@ -112,11 +106,7 @@ class HumanActorAuthenticationService:
             AdminScope(
                 role_key=str(assignment["role_key"]),
                 scope_type=str(assignment["scope_type"]),
-                scope_id=(
-                    str(assignment["scope_id"])
-                    if assignment["scope_id"] is not None
-                    else None
-                ),
+                scope_id=(str(assignment["scope_id"]) if assignment["scope_id"] is not None else None),
             )
             for assignment in self.repository.active_admin_assignments(user_id)
         )

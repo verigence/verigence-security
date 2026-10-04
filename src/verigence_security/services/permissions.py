@@ -28,9 +28,10 @@ def effective_user_permissions(
     user_id: str,
     now: datetime,
 ) -> tuple[list[str], list[str]]:
-    rows = session.execute(
-        text(
-            """
+    rows = (
+        session.execute(
+            text(
+                """
             WITH effective_tenant_roles AS (
                 SELECT r.role_key,r.role_id
                 FROM security.user_role_assignments ura
@@ -86,9 +87,12 @@ def effective_user_permissions(
             SELECT DISTINCT role_key,permission_key
             FROM effective_grants
             """
-        ),
-        {"tenant_id": tenant_id, "user_id": user_id, "now": now},
-    ).mappings().all()
+            ),
+            {"tenant_id": tenant_id, "user_id": user_id, "now": now},
+        )
+        .mappings()
+        .all()
+    )
     roles = sorted({str(row["role_key"]) for row in rows})
     permissions = sorted({str(row["permission_key"]) for row in rows})
     if not permissions:

@@ -55,9 +55,7 @@ def main() -> int:
     if not settings.database_url.strip():
         raise RuntimeError("DATABASE_URL is required for direct onboarding-key provisioning")
     if not settings.security_user_onboarding_key_encryption_key.strip():
-        raise RuntimeError(
-            "SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY is required for onboarding-key storage"
-        )
+        raise RuntimeError("SECURITY_USER_ONBOARDING_KEY_ENCRYPTION_KEY is required for onboarding-key storage")
 
     factory = build_session_factory(settings)
     if factory is None:
@@ -72,10 +70,7 @@ def main() -> int:
             correlation_id=f"direct-db-onboarding-key-{uuid4()}",
         )
 
-    print(
-        "Onboarding key provisioned directly in Security DB; "
-        f"version={result['version']} status={result['status']}"
-    )
+    print(f"Onboarding key provisioned directly in Security DB; version={result['version']} status={result['status']}")
     return 0
 
 

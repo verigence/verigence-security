@@ -43,10 +43,7 @@ user_identity_bearer = HTTPBearer(
     auto_error=False,
     scheme_name="UserIdentityToken",
     bearerFormat="JWT",
-    description=(
-        "Clerk session JWT in UAT/Production or DEV mock identity JWT "
-        "in permitted DEV mode."
-    ),
+    description=("Clerk session JWT in UAT/Production or DEV mock identity JWT in permitted DEV mode."),
 )
 
 

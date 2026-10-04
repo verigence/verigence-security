@@ -177,10 +177,7 @@ class HumanAuthorizationResolver:
             )
 
         admin_assignments = self.repository.active_admin_assignments(resolved_user_id)
-        if (
-            self._is_super_admin(admin_assignments)
-            and required_permission not in SUPER_ADMIN_EXCLUDED_PERMISSIONS
-        ):
+        if self._is_super_admin(admin_assignments) and required_permission not in SUPER_ADMIN_EXCLUDED_PERMISSIONS:
             return self._allow(
                 "ALLOW_SUPER_ADMIN",
                 user_id=resolved_user_id,
@@ -327,9 +324,7 @@ class HumanAuthorizationResolver:
     @staticmethod
     def _is_super_admin(assignments: list[dict[str, Any]]) -> bool:
         return any(
-            row.get("role_key") == "SuperAdmin"
-            and row.get("scope_type") == "PLATFORM"
-            and row.get("scope_id") is None
+            row.get("role_key") == "SuperAdmin" and row.get("scope_type") == "PLATFORM" and row.get("scope_id") is None
             for row in assignments
         )
 

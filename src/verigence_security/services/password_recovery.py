@@ -48,9 +48,10 @@ class PasswordRecoveryService:
         expires_at = now + _RESET_TTL
         public_attempt_id = str(uuid4())
 
-        rows = self.s.execute(
-            text(
-                """
+        rows = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,e.provider_subject
                 FROM security.users u
                 JOIN security.external_identities e
@@ -61,9 +62,12 @@ class PasswordRecoveryService:
                   AND u.status IN ('ACTIVE','SUSPENDED')
                 LIMIT 2
                 """
-            ),
-            {"email": normalized},
-        ).mappings().all()
+                ),
+                {"email": normalized},
+            )
+            .mappings()
+            .all()
+        )
 
         # Keep the public response shape identical for unknown/non-eligible accounts. No attempt
         # record and no Clerk request are created in that case.
@@ -172,17 +176,21 @@ class PasswordRecoveryService:
         self.s.rollback()
 
         verification_id = clerk.prepare_email_verification(email_address_id)
-        updated = self.s.execute(
-            text(
-                """
+        updated = (
+            self.s.execute(
+                text(
+                    """
                 UPDATE security.password_reset_attempts
                 SET clerk_email_verification_id=:verification_id
                 WHERE password_reset_attempt_id=:attempt_id AND status='PENDING'
                 RETURNING expires_at_utc
                 """
-            ),
-            {"verification_id": verification_id, "attempt_id": attempt_id},
-        ).mappings().first()
+                ),
+                {"verification_id": verification_id, "attempt_id": attempt_id},
+            )
+            .mappings()
+            .first()
+        )
         if updated is None:
             self.s.rollback()
             raise ValueError("Password reset request is no longer available")
@@ -293,19 +301,23 @@ class PasswordRecoveryService:
 
     def _load(self, attempt_id: str, *, for_update: bool = False) -> dict[str, Any]:
         suffix = " FOR UPDATE" if for_update else ""
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT password_reset_attempt_id,user_id,clerk_user_id,clerk_email_address_id,
                        clerk_email_verification_id,status,created_at_utc,expires_at_utc,
                        completed_at_utc
                 FROM security.password_reset_attempts
                 WHERE password_reset_attempt_id=:attempt_id
                 """
-                + suffix
-            ),
-            {"attempt_id": attempt_id},
-        ).mappings().first()
+                    + suffix
+                ),
+                {"attempt_id": attempt_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("Password reset request was not found")
         return dict(row)
@@ -357,7 +369,6 @@ class PasswordRecoveryService:
             "status": "EMAIL_VERIFICATION_REQUIRED",
             "expiresAt": expires_at.isoformat(),
             "message": (
-                "If the account is eligible, a verification code has been sent to the registered "
-                "email address."
+                "If the account is eligible, a verification code has been sent to the registered email address."
             ),
         }

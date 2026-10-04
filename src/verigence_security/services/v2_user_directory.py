@@ -65,9 +65,10 @@ class V2UserDirectoryService:
         return [dict(row) for row in rows]
 
     def get_user(self, user_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,u.display_name,u.primary_email,u.primary_mobile,u.status,u.is_employee,
                        u.created_at_utc,u.updated_at_utc,
                        e.provider_subject AS clerk_subject,
@@ -79,7 +80,10 @@ class V2UserDirectoryService:
                   ON r.user_id=u.user_id
                 WHERE u.user_id=:user_id
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None

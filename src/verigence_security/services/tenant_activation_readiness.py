@@ -39,9 +39,7 @@ class TenantActivationReadinessService:
         prerequisites = (
             ActivationPrerequisite(
                 key="SECURITY_POLICY_ACTIVE",
-                passed=(
-                    security_policy is not None and security_policy["status"] == "ACTIVE"
-                ),
+                passed=(security_policy is not None and security_policy["status"] == "ACTIVE"),
                 detail=(
                     "ACTIVE Tenant Security Policy configured"
                     if security_policy is not None and security_policy["status"] == "ACTIVE"
@@ -50,9 +48,7 @@ class TenantActivationReadinessService:
             ),
             ActivationPrerequisite(
                 key="SECURITY_RETENTION_POLICY_ACTIVE",
-                passed=(
-                    retention_policy is not None and retention_policy["status"] == "ACTIVE"
-                ),
+                passed=(retention_policy is not None and retention_policy["status"] == "ACTIVE"),
                 detail=(
                     "ACTIVE Security retention policy configured"
                     if retention_policy is not None and retention_policy["status"] == "ACTIVE"

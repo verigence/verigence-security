@@ -48,15 +48,19 @@ class ScheduleAdminRepository:
         )
 
     def schedule(self, *, tenant_id: str, schedule_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.access_schedules
                 WHERE tenant_id=:tenant_id AND schedule_id=:schedule_id
                 """
-            ),
-            {"tenant_id": tenant_id, "schedule_id": schedule_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "schedule_id": schedule_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def upsert_window(
@@ -103,16 +107,20 @@ class ScheduleAdminRepository:
         )
 
     def windows(self, *, tenant_id: str, schedule_id: str) -> list[dict[str, Any]]:
-        rows = self.s.execute(
-            text(
-                """
+        rows = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.access_schedule_windows
                 WHERE tenant_id=:tenant_id AND schedule_id=:schedule_id
                 ORDER BY iso_day_of_week,start_local_time,schedule_window_id
                 """
-            ),
-            {"tenant_id": tenant_id, "schedule_id": schedule_id},
-        ).mappings().all()
+                ),
+                {"tenant_id": tenant_id, "schedule_id": schedule_id},
+            )
+            .mappings()
+            .all()
+        )
         return [dict(row) for row in rows]
 
     def commit(self) -> None:

@@ -99,17 +99,21 @@ class DeviceSessionLifecycleRepository:
         tenant_id: str,
         user_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT membership_id,status,authorization_version
                 FROM security.tenant_memberships
                 WHERE tenant_id=:tenant_id AND user_id=:user_id
                 FOR UPDATE
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def count_active_devices(self, *, tenant_id: str, user_id: str) -> int:
@@ -134,9 +138,10 @@ class DeviceSessionLifecycleRepository:
         user_id: str,
         device_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.registered_devices
                 WHERE tenant_id=:tenant_id
@@ -145,9 +150,12 @@ class DeviceSessionLifecycleRepository:
                   AND status='PENDING'
                 FOR UPDATE
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def activate_pending_device(
@@ -241,9 +249,10 @@ class DeviceSessionLifecycleRepository:
         tenant_id: str,
         user_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.access_sessions
                 WHERE access_session_id=:access_session_id
@@ -252,13 +261,16 @@ class DeviceSessionLifecycleRepository:
                   AND actor_type='USER'
                 FOR UPDATE
                 """
-            ),
-            {
-                "access_session_id": access_session_id,
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "access_session_id": access_session_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                },
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def revoke_active_user_session(

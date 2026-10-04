@@ -194,9 +194,7 @@ class PlatformTenantService:
                         raise RuntimeError("Tenant create receipt has no Tenant identifier")
                     tenant = self.repository.tenant_by_id(str(prior_tenant_id))
                     if tenant is None:
-                        raise RuntimeError(
-                            "Tenant create receipt exists but the Tenant cannot be reloaded"
-                        )
+                        raise RuntimeError("Tenant create receipt exists but the Tenant cannot be reloaded")
                     self.repository.commit()
                     return tenant
 
@@ -289,9 +287,7 @@ class PlatformTenantService:
                 outcome="SUCCESS",
                 tenant_id=tenant_id,
                 before_state_json=json.dumps(_json_tenant(before)),
-                after_state_json=json.dumps(
-                    {**_json_tenant(before), "tenantName": tenant_name}
-                ),
+                after_state_json=json.dumps({**_json_tenant(before), "tenantName": tenant_name}),
                 now=now,
             )
             self.repository.commit()
@@ -326,9 +322,7 @@ class PlatformTenantService:
                 outcome="SUCCESS",
                 tenant_id=tenant_id,
                 before_state_json=json.dumps(_json_tenant(before)),
-                after_state_json=json.dumps(
-                    {**_json_tenant(before), "status": "ACTIVE"}
-                ),
+                after_state_json=json.dumps({**_json_tenant(before), "status": "ACTIVE"}),
                 now=now,
             )
             self.repository.commit()
@@ -373,9 +367,7 @@ class PlatformTenantService:
                 outcome="SUCCESS",
                 tenant_id=tenant_id,
                 before_state_json=json.dumps(_json_tenant(before)),
-                after_state_json=json.dumps(
-                    {"tenantId": tenant_id, "status": "DELETED"}
-                ),
+                after_state_json=json.dumps({"tenantId": tenant_id, "status": "DELETED"}),
                 now=now,
             )
             self.repository.commit()
@@ -392,9 +384,7 @@ class PlatformTenantService:
                     outcome="FAILED",
                     tenant_id=tenant_id,
                     before_state_json=json.dumps(_json_tenant(before)),
-                    after_state_json=json.dumps(
-                        {"tenantId": tenant_id, "status": "DELETE_FAILED"}
-                    ),
+                    after_state_json=json.dumps({"tenantId": tenant_id, "status": "DELETE_FAILED"}),
                     now=failure_time,
                 )
                 self.repository.commit()
@@ -415,9 +405,10 @@ class PlatformTenantService:
         actor_user_id: str,
         now: datetime,
     ) -> None:
-        defaults = self.s.execute(
-            text(
-                """
+        defaults = (
+            self.s.execute(
+                text(
+                    """
                 SELECT defaults.role_key,defaults.permission_key
                 FROM (
                     SELECT d.role_key,d.permission_key
@@ -434,8 +425,11 @@ class PlatformTenantService:
                 WHERE defaults.role_key IN ('PC','TL','PM','CRM','Executive')
                 ORDER BY defaults.role_key,defaults.permission_key
                 """
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         expected_roles = {"PC", "TL", "PM", "CRM", "Executive"}
         observed_roles = {str(row["role_key"]) for row in defaults}
         if observed_roles != expected_roles:

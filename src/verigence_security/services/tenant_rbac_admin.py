@@ -28,17 +28,21 @@ class TenantRbacAdminService:
         return [dict(row) for row in rows]
 
     def get_group(self, tenant_id: str, group_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT group_id,tenant_id,group_key,group_name,description,status,
                        created_at_utc,updated_at_utc
                 FROM security.groups
                 WHERE tenant_id=:tenant_id AND group_id=:group_id
                 """
-            ),
-            {"tenant_id": tenant_id, "group_id": group_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "group_id": group_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def create_group(
@@ -353,17 +357,21 @@ class TenantRbacAdminService:
         return [dict(row) for row in rows]
 
     def get_role(self, tenant_id: str, role_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT role_id,tenant_id,role_key,role_name,description,status,
                        created_at_utc,updated_at_utc
                 FROM security.roles
                 WHERE tenant_id=:tenant_id AND role_id=:role_id
                 """
-            ),
-            {"tenant_id": tenant_id, "role_id": role_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "role_id": role_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def create_role(
@@ -717,39 +725,48 @@ class TenantRbacAdminService:
         return list(result.values())
 
     def _active_group(self, tenant_id: str, group_id: str) -> bool:
-        return self.s.execute(
-            text(
-                """
+        return (
+            self.s.execute(
+                text(
+                    """
                 SELECT 1 FROM security.groups
                 WHERE tenant_id=:tenant_id AND group_id=:group_id AND status='ACTIVE'
                 """
-            ),
-            {"tenant_id": tenant_id, "group_id": group_id},
-        ).first() is not None
+                ),
+                {"tenant_id": tenant_id, "group_id": group_id},
+            ).first()
+            is not None
+        )
 
     def _active_role(self, tenant_id: str, role_id: str) -> bool:
-        return self.s.execute(
-            text(
-                """
+        return (
+            self.s.execute(
+                text(
+                    """
                 SELECT 1 FROM security.roles
                 WHERE tenant_id=:tenant_id AND role_id=:role_id AND status='ACTIVE'
                 """
-            ),
-            {"tenant_id": tenant_id, "role_id": role_id},
-        ).first() is not None
+                ),
+                {"tenant_id": tenant_id, "role_id": role_id},
+            ).first()
+            is not None
+        )
 
     def _active_membership(self, tenant_id: str, user_id: str, now: datetime) -> bool:
-        return self.s.execute(
-            text(
-                """
+        return (
+            self.s.execute(
+                text(
+                    """
                 SELECT 1 FROM security.tenant_memberships
                 WHERE tenant_id=:tenant_id AND user_id=:user_id AND status='ACTIVE'
                   AND (valid_from_utc IS NULL OR valid_from_utc<=:now)
                   AND (valid_to_utc IS NULL OR valid_to_utc>:now)
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "now": now},
-        ).first() is not None
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "now": now},
+            ).first()
+            is not None
+        )
 
     def _effective_group_users(
         self,

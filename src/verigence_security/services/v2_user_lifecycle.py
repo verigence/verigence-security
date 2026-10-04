@@ -263,9 +263,7 @@ class V2UserLifecycleService:
             "displayName": row["display_name"],
             "primaryEmail": row["primary_email"],
             "requestedByUserId": (
-                str(request["requested_by_user_id"])
-                if request["requested_by_user_id"] is not None
-                else None
+                str(request["requested_by_user_id"]) if request["requested_by_user_id"] is not None else None
             ),
             "requestReason": request["reason"],
         }
@@ -399,10 +397,7 @@ class V2UserLifecycleService:
             note: str | None = None
             if ticked:
                 self.s.execute(
-                    text(
-                        "UPDATE security.users SET is_employee=true, updated_at_utc=:now"
-                        " WHERE user_id=:u"
-                    ),
+                    text("UPDATE security.users SET is_employee=true, updated_at_utc=:now WHERE user_id=:u"),
                     {"now": now, "u": user_id},
                 )
             if suspend:
@@ -413,10 +408,7 @@ class V2UserLifecycleService:
                 else:
                     ban_subject = self._clerk_subject(user_id)
                     self.s.execute(
-                        text(
-                            "UPDATE security.users SET status='SUSPENDED', updated_at_utc=:now"
-                            " WHERE user_id=:u"
-                        ),
+                        text("UPDATE security.users SET status='SUSPENDED', updated_at_utc=:now WHERE user_id=:u"),
                         {"now": now, "u": user_id},
                     )
                     self.s.execute(
@@ -470,30 +462,38 @@ class V2UserLifecycleService:
         return EmployeeSyncOutcome(user_id, True, status, True, ticked, suspended, note)
 
     def _user_for_update(self, user_id: str) -> dict[str, object] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT user_id,status,display_name,primary_email
                 FROM security.users
                 WHERE user_id=:user_id
                 FOR UPDATE
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def _user_snapshot(self, user_id: str) -> dict[str, object] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT user_id,status,display_name,primary_email
                 FROM security.users
                 WHERE user_id=:user_id
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def _clerk_subject(self, user_id: str) -> str | None:
@@ -520,17 +520,22 @@ class V2UserLifecycleService:
         for_update: bool = False,
     ) -> dict[str, object] | None:
         suffix = " FOR UPDATE" if for_update else ""
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT deletion_request_id,user_id,requested_by_user_id,requested_at_utc,
                        reason,status,correlation_id
                 FROM security.user_deletion_requests
                 WHERE user_id=:user_id AND status='REQUESTED'
-                """ + suffix
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                """
+                    + suffix
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def _is_active_super_admin(self, user_id: str) -> bool:

@@ -24,9 +24,7 @@ class HrModuleRoleService:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def assign(
-        self, *, user_id: str, role_key: str, actor_user_id: str, correlation_id: str
-    ) -> tuple[bool, str]:
+    def assign(self, *, user_id: str, role_key: str, actor_user_id: str, correlation_id: str) -> tuple[bool, str]:
         self._require_known_role(role_key)
         now = datetime.now(UTC)
         assignment_id = str(uuid4())

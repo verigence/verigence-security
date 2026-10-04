@@ -20,16 +20,20 @@ class V2RbacRepository:
         self.s = session
 
     def role_definition(self, role_key: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT role_key,role_class,display_name,status
                 FROM security.role_definitions
                 WHERE role_key=:role_key
                 """
-            ),
-            {"role_key": role_key},
-        ).mappings().first()
+                ),
+                {"role_key": role_key},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def role_definitions(self) -> list[dict[str, Any]]:
@@ -179,19 +183,23 @@ class V2RbacRepository:
         for_update: bool = False,
     ) -> dict[str, Any] | None:
         lock = " FOR UPDATE" if for_update else ""
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT assignment_id,user_id,tenant_id,role_key,status,
                        valid_from_utc,valid_to_utc,assigned_by_user_id,
                        assigned_at_utc,ended_at_utc
                 FROM security.user_tenant_operating_roles
                 WHERE user_id=:user_id AND tenant_id=:tenant_id AND status='ACTIVE'
                 """
-                + lock
-            ),
-            {"user_id": user_id, "tenant_id": tenant_id},
-        ).mappings().first()
+                    + lock
+                ),
+                {"user_id": user_id, "tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def active_operating_roles_for_user(self, user_id: str) -> list[dict[str, Any]]:
@@ -294,9 +302,10 @@ class V2RbacRepository:
         scope_type: str,
         scope_id: str | None,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT assignment_id,role_key,scope_type,scope_id
                 FROM security.user_admin_role_assignments
                 WHERE user_id=:user_id AND role_key=:role_key
@@ -304,14 +313,17 @@ class V2RbacRepository:
                   AND scope_id IS NOT DISTINCT FROM :scope_id
                   AND status='ACTIVE'
                 """
-            ),
-            {
-                "user_id": user_id,
-                "role_key": role_key,
-                "scope_type": scope_type,
-                "scope_id": scope_id,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "user_id": user_id,
+                    "role_key": role_key,
+                    "scope_type": scope_type,
+                    "scope_id": scope_id,
+                },
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def active_super_admin_user_id(self) -> str | None:

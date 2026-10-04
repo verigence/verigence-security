@@ -13,17 +13,21 @@ class ModuleCatalogRepository:
         self.s = session
 
     def module(self, module_key: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT module_key,module_name,catalog_version,status,
                        created_at_utc,updated_at_utc
                 FROM security.modules
                 WHERE module_key=:module_key
                 """
-            ),
-            {"module_key": module_key},
-        ).mappings().first()
+                ),
+                {"module_key": module_key},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def modules(self) -> list[dict[str, Any]]:
@@ -121,17 +125,21 @@ class ModuleCatalogRepository:
         )
 
     def permission(self, permission_key: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT permission_key,module_key,resource_key,action_key,description,status,
                        display_name,catalog_version,updated_at_utc
                 FROM security.permissions
                 WHERE permission_key=:permission_key
                 """
-            ),
-            {"permission_key": permission_key},
-        ).mappings().first()
+                ),
+                {"permission_key": permission_key},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def module_permissions(self, module_key: str) -> list[dict[str, Any]]:

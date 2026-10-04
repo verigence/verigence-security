@@ -300,9 +300,7 @@ STANDARD_TENANT_ADMIN_ROLES: tuple[StandardTenantAdminRole, ...] = (
     ),
 )
 
-RESERVED_TENANT_ADMIN_ROLE_KEYS: frozenset[str] = frozenset(
-    role.role_key for role in STANDARD_TENANT_ADMIN_ROLES
-)
+RESERVED_TENANT_ADMIN_ROLE_KEYS: frozenset[str] = frozenset(role.role_key for role in STANDARD_TENANT_ADMIN_ROLES)
 
 
 class StandardTenantAdminRoleSeeder:
@@ -348,17 +346,10 @@ class StandardTenantAdminRoleSeeder:
                 """
             )
         ).mappings()
-        active = {
-            str(row["permission_key"])
-            for row in rows
-            if str(row["status"]) == "ACTIVE"
-        }
+        active = {str(row["permission_key"]) for row in rows if str(row["status"]) == "ACTIVE"}
         missing = SECURITY_ADMIN_PERMISSION_KEYS - active
         if missing:
-            raise RuntimeError(
-                "Security Admin permission catalogue is incomplete: "
-                + ", ".join(sorted(missing))
-            )
+            raise RuntimeError("Security Admin permission catalogue is incomplete: " + ", ".join(sorted(missing)))
 
     def _seed_or_validate_role(
         self,
@@ -367,17 +358,21 @@ class StandardTenantAdminRoleSeeder:
         definition: StandardTenantAdminRole,
         now: datetime,
     ) -> None:
-        existing = self.s.execute(
-            text(
-                """
+        existing = (
+            self.s.execute(
+                text(
+                    """
                 SELECT role_id,role_name,description,status
                 FROM security.roles
                 WHERE tenant_id=:tenant_id AND role_key=:role_key
                 FOR UPDATE
                 """
-            ),
-            {"tenant_id": tenant_id, "role_key": definition.role_key},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "role_key": definition.role_key},
+            )
+            .mappings()
+            .first()
+        )
 
         if existing is None:
             role_id = str(uuid4())
@@ -434,9 +429,7 @@ class StandardTenantAdminRoleSeeder:
             str(existing["status"]),
         )
         if actual_metadata != expected_metadata or actual_permissions != definition.permission_keys:
-            raise RuntimeError(
-                f"Reserved Tenant Admin role drift detected: {definition.role_key}"
-            )
+            raise RuntimeError(f"Reserved Tenant Admin role drift detected: {definition.role_key}")
 
     def _insert_permissions(
         self,

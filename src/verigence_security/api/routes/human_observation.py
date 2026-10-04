@@ -99,9 +99,7 @@ def observe_human_session(
     return {
         "observationMode": "OBSERVE",
         "previousSessionSuperseded": bool(registration["previous_session_superseded"]),
-        "previousSessionDifferentDevice": bool(
-            registration["previous_session_different_device"]
-        ),
+        "previousSessionDifferentDevice": bool(registration["previous_session_different_device"]),
         "activeDeviceCount": active_device_count,
         "deviceLimit": device_limit,
         "deviceLimitExceeded": active_device_count > device_limit,

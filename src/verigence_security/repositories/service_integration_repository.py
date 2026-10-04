@@ -23,9 +23,10 @@ class ServiceIntegrationRepository:
         self.s = session
 
     def active_credential(self, client_id: str, now: datetime) -> ServiceIntegrationCredential:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT c.credential_id,c.client_id,c.secret_hash,c.status AS credential_status,
                        c.valid_from_utc,c.valid_to_utc,
                        p.principal_id,p.actor_type,p.status AS principal_status,
@@ -35,9 +36,12 @@ class ServiceIntegrationRepository:
                 JOIN security.service_integrations si ON si.principal_id=p.principal_id
                 WHERE c.client_id=:client_id
                 """
-            ),
-            {"client_id": client_id},
-        ).mappings().first()
+                ),
+                {"client_id": client_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise security_error("MACHINE_CREDENTIAL_INVALID")
         if row["actor_type"] != "SERVICE_INTEGRATION":

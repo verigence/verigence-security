@@ -113,9 +113,7 @@ class TenantRoleBundleService:
             active = self.repository.active_permission_keys(requested)
             missing = sorted(requested - active)
             if missing:
-                raise ValueError(
-                    "Permissions must exist and be ACTIVE: " + ", ".join(missing)
-                )
+                raise ValueError("Permissions must exist and be ACTIVE: " + ", ".join(missing))
             before = self.repository.tenant_role_permissions(tenant_id, role_key)
             if set(before) == requested:
                 self.repository.rollback()
@@ -195,16 +193,12 @@ class OperatingRoleAssignmentService:
                 {"tenant_id": tenant_id},
             ).scalar_one()
             if str(tenant_status) not in {"CONFIGURING", "ACTIVE"}:
-                raise ValueError(
-                    "Tenant must be CONFIGURING or ACTIVE for an operating-role assignment"
-                )
+                raise ValueError("Tenant must be CONFIGURING or ACTIVE for an operating-role assignment")
             if not self.repository.lock_user(actor_user_id):
                 raise ValueError("Actor USER not found")
 
             if self.repository.active_admin_assignments(user_id):
-                raise ValueError(
-                    "Administrative and operating roles are mutually exclusive"
-                )
+                raise ValueError("Administrative and operating roles are mutually exclusive")
 
             current = self.repository.active_operating_role(
                 user_id=user_id,
@@ -259,9 +253,7 @@ class OperatingRoleAssignmentService:
             self.repository.commit()
         except IntegrityError as exc:
             self.repository.rollback()
-            raise ValueError(
-                "Operating role assignment violates Phase-1 cardinality"
-            ) from exc
+            raise ValueError("Operating role assignment violates Phase-1 cardinality") from exc
         except Exception:
             self.repository.rollback()
             raise
@@ -365,9 +357,7 @@ class AdminRoleAssignmentService:
                 raise ValueError("Actor USER not found")
 
             if self.repository.active_operating_roles_for_user(user_id):
-                raise ValueError(
-                    "Administrative and operating roles are mutually exclusive"
-                )
+                raise ValueError("Administrative and operating roles are mutually exclusive")
 
             if role_key == "TenantAdmin":
                 assert scope_id is not None

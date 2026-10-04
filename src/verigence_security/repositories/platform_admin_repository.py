@@ -87,9 +87,10 @@ class PlatformAdminRepository:
         return user_id
 
     def local_credential_by_login(self, login_name: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT c.user_id,c.login_name,c.password_hash,c.status AS credential_status,
                        c.must_change_password,p.status AS principal_status,
                        u.status AS user_status
@@ -98,9 +99,12 @@ class PlatformAdminRepository:
                 JOIN security.users u ON u.user_id=c.user_id
                 WHERE c.login_name=:login_name
                 """
-            ),
-            {"login_name": login_name},
-        ).mappings().first()
+                ),
+                {"login_name": login_name},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def platform_roles_permissions(self, user_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -127,16 +131,20 @@ class PlatformAdminRepository:
         return roles, permissions
 
     def credential_state_for_user(self, user_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT user_id,login_name,password_hash,status,must_change_password
                 FROM security.local_user_credentials
                 WHERE user_id=:user_id
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def change_password(self, *, user_id: str, password_hash: str, now: datetime) -> bool:
@@ -207,11 +215,7 @@ class PlatformAdminRepository:
     ) -> None:
         self.s.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {
-                "lock_key": (
-                    f"security.platform.tenant.create:{actor_user_id}:{idempotency_key}"
-                )
-            },
+            {"lock_key": (f"security.platform.tenant.create:{actor_user_id}:{idempotency_key}")},
         )
 
     def tenant_create_receipt(
@@ -220,9 +224,10 @@ class PlatformAdminRepository:
         actor_user_id: str,
         idempotency_key: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT resource_id,
                        after_state_json->>'tenantName' AS tenant_name
                 FROM security.admin_change_records
@@ -233,18 +238,22 @@ class PlatformAdminRepository:
                 ORDER BY occurred_at_utc DESC
                 LIMIT 1
                 """
-            ),
-            {
-                "actor_user_id": actor_user_id,
-                "idempotency_key": idempotency_key,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "actor_user_id": actor_user_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def tenant_hard_delete_receipt(self, tenant_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT occurred_at_utc,before_state_json,after_state_json
                 FROM security.admin_change_records
                 WHERE operation_key='platform.tenant.hard_delete'
@@ -254,9 +263,12 @@ class PlatformAdminRepository:
                 ORDER BY occurred_at_utc DESC
                 LIMIT 1
                 """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def create_tenant(
@@ -284,16 +296,20 @@ class PlatformAdminRepository:
         )
 
     def tenant_by_id(self, tenant_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT tenant_id,tenant_code,tenant_name,status,created_at_utc,updated_at_utc
                 FROM security.tenants
                 WHERE tenant_id=:tenant_id
                 """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def tenants(self) -> list[dict[str, Any]]:

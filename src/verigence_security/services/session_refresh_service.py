@@ -242,15 +242,9 @@ class UserSessionRefreshService:
             )
             evidence.schedule = schedule
 
-            if (
-                risk.vpn_status == VpnStatus.DETECTED
-                and policy.vpn_detected_action == PolicyAction.DENY.value
-            ):
+            if risk.vpn_status == VpnStatus.DETECTED and policy.vpn_detected_action == PolicyAction.DENY.value:
                 raise security_error("VPN_ACCESS_DENIED")
-            if (
-                risk.vpn_status == VpnStatus.UNKNOWN
-                and policy.vpn_unknown_action == PolicyAction.DENY.value
-            ):
+            if risk.vpn_status == VpnStatus.UNKNOWN and policy.vpn_unknown_action == PolicyAction.DENY.value:
                 raise security_error("NETWORK_RISK_UNKNOWN_DENIED")
 
             roles, database_permissions = self.security.effective_user_permissions(
@@ -263,9 +257,7 @@ class UserSessionRefreshService:
             started_at = session["started_at_utc"]
             if started_at.tzinfo is None:
                 started_at = started_at.replace(tzinfo=UTC)
-            session_max_end = started_at.astimezone(UTC) + timedelta(
-                minutes=policy.session_max_duration_minutes
-            )
+            session_max_end = started_at.astimezone(UTC) + timedelta(minutes=policy.session_max_duration_minutes)
             expiry = min(
                 now + timedelta(minutes=policy.access_token_ttl_minutes),
                 now + timedelta(seconds=policy.geo_revalidation_interval_seconds),

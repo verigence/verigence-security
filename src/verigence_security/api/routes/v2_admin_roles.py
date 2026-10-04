@@ -35,11 +35,7 @@ def _response(
         scopeType=scope_type,  # type: ignore[arg-type]
         scopeId=scope_id,
         changed=result.changed,
-        assignmentId=(
-            str(result.assignment_id)
-            if result.assignment_id is not None
-            else None
-        ),
+        assignmentId=(str(result.assignment_id) if result.assignment_id is not None else None),
     )
 
 

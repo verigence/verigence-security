@@ -88,15 +88,19 @@ class LocationAdminRepository:
         )
 
     def location(self, *, tenant_id: str, location_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.tenant_locations
                 WHERE tenant_id=:tenant_id AND location_id=:location_id
                 """
-            ),
-            {"tenant_id": tenant_id, "location_id": location_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "location_id": location_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def commit(self) -> None:

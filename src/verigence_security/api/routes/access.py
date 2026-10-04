@@ -61,9 +61,10 @@ class GroupAwareSecurityRepository(SecurityRepository):
 
     def get_user_context(self, user_id: str, tenant_id: str, now: datetime) -> UserContext:
         _ = now
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,u.status AS user_status,p.status AS principal_status,
                        COALESCE(a.authorization_version,1) AS authorization_version
                 FROM security.users u
@@ -72,9 +73,12 @@ class GroupAwareSecurityRepository(SecurityRepository):
                   ON a.user_id=u.user_id AND a.tenant_id=:tenant_id
                 WHERE u.user_id=:user_id
                 """
-            ),
-            {"user_id": user_id, "tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id, "tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise security_error("USER_NOT_ONBOARDED")
         if row["principal_status"] != "ACTIVE":

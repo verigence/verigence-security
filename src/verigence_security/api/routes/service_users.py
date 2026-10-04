@@ -28,9 +28,7 @@ router = APIRouter(prefix="/security/v1/service", tags=["ServiceIntegration"])
 
 
 def _allowed_integrations(settings: Settings) -> frozenset[str]:
-    return frozenset(
-        key.strip() for key in settings.service_user_create_integrations.split(",") if key.strip()
-    )
+    return frozenset(key.strip() for key in settings.service_user_create_integrations.split(",") if key.strip())
 
 
 def _authorize_service(service_token: str, settings: Settings, session: Session) -> tuple[str, str]:
@@ -73,9 +71,7 @@ def create_user_for_service(
     try:
         clerk = ClerkBackendClient(settings)
     except ClerkBackendError as exc:
-        raise HTTPException(
-            status_code=503, detail="Identity provider integration is not configured"
-        ) from exc
+        raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
     try:
         created = V2PlatformUserCreateService(session).create_for_service(
             first_name=body.firstName,
@@ -213,21 +209,15 @@ def set_password_for_service(
         raise HTTPException(status_code=404, detail="User not found")
     status, email, clerk_subject = str(row[0]), row[1], row[2]
     if status != "ACTIVE":
-        raise HTTPException(
-            status_code=409, detail=f"The user is {status.lower()}, not active; allow them first"
-        )
+        raise HTTPException(status_code=409, detail=f"The user is {status.lower()}, not active; allow them first")
     if not clerk_subject:
         raise HTTPException(status_code=409, detail="The user has no sign-in identity")
     try:
         clerk = ClerkBackendClient(settings)
     except ClerkBackendError as exc:
-        raise HTTPException(
-            status_code=503, detail="Identity provider integration is not configured"
-        ) from exc
+        raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
     try:
-        update_password(
-            clerk, clerk_user_id=str(clerk_subject), password=body.password.get_secret_value()
-        )
+        update_password(clerk, clerk_user_id=str(clerk_subject), password=body.password.get_secret_value())
     except ClerkBackendError as exc:
         raise HTTPException(status_code=502, detail="The password could not be set") from exc
     return ServicePasswordResponse(userId=userId, primaryEmail=str(email) if email else None)
@@ -326,9 +316,7 @@ def sync_employees_for_service(
         try:
             clerk = ClerkBackendClient(settings)
         except ClerkBackendError as exc:
-            raise HTTPException(
-                status_code=503, detail="Identity provider integration is not configured"
-            ) from exc
+            raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
     service = V2UserLifecycleService(session)
     results: list[EmployeeSyncResult] = []
     for item in body.items:

@@ -82,15 +82,9 @@ class UserAccessService:
                 override_until_utc=override,
             )
 
-            if (
-                risk.vpn_status == VpnStatus.DETECTED
-                and policy.vpn_detected_action == PolicyAction.DENY.value
-            ):
+            if risk.vpn_status == VpnStatus.DETECTED and policy.vpn_detected_action == PolicyAction.DENY.value:
                 raise security_error("VPN_ACCESS_DENIED")
-            if (
-                risk.vpn_status == VpnStatus.UNKNOWN
-                and policy.vpn_unknown_action == PolicyAction.DENY.value
-            ):
+            if risk.vpn_status == VpnStatus.UNKNOWN and policy.vpn_unknown_action == PolicyAction.DENY.value:
                 raise security_error("NETWORK_RISK_UNKNOWN_DENIED")
 
             roles, database_permissions = self.repo.effective_user_permissions(
@@ -114,9 +108,7 @@ class UserAccessService:
                 started_at = active["started_at_utc"]
                 if started_at.tzinfo is None:
                     started_at = started_at.replace(tzinfo=UTC)
-                session_max_end = started_at.astimezone(UTC) + timedelta(
-                    minutes=policy.session_max_duration_minutes
-                )
+                session_max_end = started_at.astimezone(UTC) + timedelta(minutes=policy.session_max_duration_minutes)
             else:
                 session_max_end = now + timedelta(minutes=policy.session_max_duration_minutes)
 
@@ -341,9 +333,7 @@ class MachineAccessService:
                 raise security_error("AUTH_TOKEN_INVALID")
 
             self._require_active_tenant(tenant_id)
-            machine_permissions = set(
-                self.repo.machine_permissions(credential.principal_id, tenant_id, now)
-            )
+            machine_permissions = set(self.repo.machine_permissions(credential.principal_id, tenant_id, now))
             validated_user_permissions = set(validate_permissions(user_permissions))
             requested = self._requested_permissions(requested_permissions)
             allowed = machine_permissions.intersection(validated_user_permissions)
@@ -408,11 +398,7 @@ class MachineAccessService:
         now: datetime,
     ) -> list[str]:
         requested = self._requested_permissions(requested_permissions)
-        allowed = set(
-            validate_permissions(
-                self.repo.machine_permissions(credential.principal_id, tenant_id, now)
-            )
-        )
+        allowed = set(validate_permissions(self.repo.machine_permissions(credential.principal_id, tenant_id, now)))
         if not set(requested).issubset(allowed):
             raise security_error("PERMISSION_DENIED")
         return requested

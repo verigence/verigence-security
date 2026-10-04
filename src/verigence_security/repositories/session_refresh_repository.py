@@ -21,9 +21,10 @@ class SessionRefreshRepository:
         user_id: str,
     ) -> dict[str, Any] | None:
         """Read session identity/context before entering the canonical device→session lock order."""
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.access_sessions
                 WHERE access_session_id=:access_session_id
@@ -31,13 +32,16 @@ class SessionRefreshRepository:
                   AND principal_id=:user_id
                   AND actor_type='USER'
                 """
-            ),
-            {
-                "access_session_id": access_session_id,
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "access_session_id": access_session_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                },
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def user_session_for_update(
@@ -47,9 +51,10 @@ class SessionRefreshRepository:
         tenant_id: str,
         user_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.access_sessions
                 WHERE access_session_id=:access_session_id
@@ -58,13 +63,16 @@ class SessionRefreshRepository:
                   AND actor_type='USER'
                 FOR UPDATE
                 """
-            ),
-            {
-                "access_session_id": access_session_id,
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "access_session_id": access_session_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                },
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def update_active_session_context(

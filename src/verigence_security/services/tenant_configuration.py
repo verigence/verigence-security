@@ -61,9 +61,7 @@ class TenantConfigurationService:
                 max_active_devices_per_user=configuration.max_active_devices_per_user,
                 max_geo_accuracy_meters=configuration.max_geo_accuracy_meters,
                 max_geo_age_seconds=configuration.max_geo_age_seconds,
-                geo_revalidation_interval_seconds=(
-                    configuration.geo_revalidation_interval_seconds
-                ),
+                geo_revalidation_interval_seconds=(configuration.geo_revalidation_interval_seconds),
                 access_token_ttl_minutes=configuration.access_token_ttl_minutes,
                 machine_token_ttl_minutes=configuration.machine_token_ttl_minutes,
                 session_idle_timeout_minutes=configuration.session_idle_timeout_minutes,
@@ -95,15 +93,9 @@ class TenantConfigurationService:
                 return False
             self.repository.upsert_retention_policy(
                 tenant_id=tenant_id,
-                access_context_retention_days=(
-                    configuration.access_context_retention_days
-                ),
-                access_session_retention_days=(
-                    configuration.access_session_retention_days
-                ),
-                security_event_retention_days=(
-                    configuration.security_event_retention_days
-                ),
+                access_context_retention_days=(configuration.access_context_retention_days),
+                access_session_retention_days=(configuration.access_session_retention_days),
+                security_event_retention_days=(configuration.security_event_retention_days),
                 status=configuration.status,
                 updated_by_user_id=updated_by_user_id,
                 updated_at=updated_at,
@@ -123,10 +115,6 @@ class TenantConfigurationService:
         return TenantConfigurationSnapshot(
             tenant_id=tenant_id,
             tenant_status=str(tenant["status"]),
-            security_policy_status=(
-                str(security_policy["status"]) if security_policy is not None else None
-            ),
-            retention_policy_status=(
-                str(retention_policy["status"]) if retention_policy is not None else None
-            ),
+            security_policy_status=(str(security_policy["status"]) if security_policy is not None else None),
+            retention_policy_status=(str(retention_policy["status"]) if retention_policy is not None else None),
         )

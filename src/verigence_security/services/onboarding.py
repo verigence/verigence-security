@@ -154,9 +154,10 @@ class OnboardingService:
         tenant_id: str,
         invitation_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT i.invitation_id,i.tenant_id,i.invited_user_id,u.display_name,
                        i.invitee_email,i.invitee_mobile,i.employee_code,
                        i.proposed_access_json,i.requires_privileged_approval,i.status,
@@ -166,9 +167,12 @@ class OnboardingService:
                 JOIN security.users u ON u.user_id=i.invited_user_id
                 WHERE i.tenant_id=:tenant_id AND i.invitation_id=:invitation_id
                 """
-            ),
-            {"tenant_id": tenant_id, "invitation_id": invitation_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "invitation_id": invitation_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def cancel_invitation(
@@ -180,16 +184,20 @@ class OnboardingService:
         correlation_id: str,
     ) -> bool:
         now = datetime.now(UTC)
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT invited_user_id,status FROM security.tenant_invitations
                 WHERE tenant_id=:tenant_id AND invitation_id=:invitation_id
                 FOR UPDATE
                 """
-            ),
-            {"tenant_id": tenant_id, "invitation_id": invitation_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "invitation_id": invitation_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             self.s.rollback()
             return False
@@ -246,15 +254,19 @@ class OnboardingService:
         correlation_id: str,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
-        invitation = self.s.execute(
-            text(
-                """
+        invitation = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.tenant_invitations
                 WHERE invitation_id=:invitation_id FOR UPDATE
                 """
-            ),
-            {"invitation_id": invitation_id},
-        ).mappings().first()
+                ),
+                {"invitation_id": invitation_id},
+            )
+            .mappings()
+            .first()
+        )
         if invitation is None or invitation["status"] != "PENDING":
             raise security_error("PERMISSION_DENIED")
         if invitation["expires_at_utc"] <= now:
@@ -286,11 +298,7 @@ class OnboardingService:
                 invitation_id=invitation_id,
                 identity_provider=identity_provider,
                 identity_subject=identity_subject,
-                employee_code=(
-                    str(invitation["employee_code"])
-                    if invitation["employee_code"] is not None
-                    else None
-                ),
+                employee_code=(str(invitation["employee_code"]) if invitation["employee_code"] is not None else None),
                 now=now,
             )
             access = self._json_access(invitation["proposed_access_json"])
@@ -398,14 +406,18 @@ class OnboardingService:
         correlation_id: str,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
-        tenant = self.s.execute(
-            text(
-                """
+        tenant = (
+            self.s.execute(
+                text(
+                    """
                 SELECT tenant_id FROM security.tenants WHERE tenant_code=:tenant_code
                 """
-            ),
-            {"tenant_code": tenant_code},
-        ).mappings().first()
+                ),
+                {"tenant_code": tenant_code},
+            )
+            .mappings()
+            .first()
+        )
         if tenant is None:
             self._log_self_denial(correlation_id, tenant_code, identity_provider)
             raise security_error("PERMISSION_DENIED")
@@ -413,15 +425,19 @@ class OnboardingService:
         if not self._effective_control(tenant_id, "admin.self_onboarding"):
             self._log_self_denial(correlation_id, tenant_code, identity_provider)
             raise security_error("PERMISSION_DENIED")
-        setting = self.s.execute(
-            text(
-                """
+        setting = (
+            self.s.execute(
+                text(
+                    """
                 SELECT token_hash,status FROM security.tenant_self_onboarding_settings
                 WHERE tenant_id=:tenant_id
                 """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         if (
             setting is None
             or setting["status"] != "ACTIVE"
@@ -436,15 +452,19 @@ class OnboardingService:
                 display_name=display_name,
                 now=now,
             )
-            membership = self.s.execute(
-                text(
-                    """
+            membership = (
+                self.s.execute(
+                    text(
+                        """
                     SELECT membership_id,status FROM security.tenant_memberships
                     WHERE tenant_id=:tenant_id AND user_id=:user_id FOR UPDATE
                     """
-                ),
-                {"tenant_id": tenant_id, "user_id": user_id},
-            ).mappings().first()
+                    ),
+                    {"tenant_id": tenant_id, "user_id": user_id},
+                )
+                .mappings()
+                .first()
+            )
             if membership is not None and membership["status"] == "ACTIVE":
                 self.s.commit()
                 return {
@@ -541,9 +561,10 @@ class OnboardingService:
         tenant_id: str,
         request_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT r.self_onboarding_request_id,r.tenant_id,r.user_id,u.display_name,
                        u.primary_email,u.primary_mobile,r.status,r.submitted_at_utc,
                        r.reviewed_by_user_id,r.reviewed_at_utc,r.review_reason,r.correlation_id
@@ -551,9 +572,12 @@ class OnboardingService:
                 JOIN security.users u ON u.user_id=r.user_id
                 WHERE r.tenant_id=:tenant_id AND r.self_onboarding_request_id=:request_id
                 """
-            ),
-            {"tenant_id": tenant_id, "request_id": request_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "request_id": request_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def approve_self_onboarding_request(
@@ -568,16 +592,20 @@ class OnboardingService:
         correlation_id: str,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
-        request_row = self.s.execute(
-            text(
-                """
+        request_row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.self_onboarding_requests
                 WHERE tenant_id=:tenant_id AND self_onboarding_request_id=:request_id
                 FOR UPDATE
                 """
-            ),
-            {"tenant_id": tenant_id, "request_id": request_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "request_id": request_id},
+            )
+            .mappings()
+            .first()
+        )
         if request_row is None:
             raise LookupError("Self-onboarding request not found")
         if request_row["status"] != "PENDING_ADMIN_APPROVAL":
@@ -785,9 +813,10 @@ class OnboardingService:
         employee_code: str | None,
         now: datetime,
     ) -> str:
-        identity = self.s.execute(
-            text(
-                """
+        identity = (
+            self.s.execute(
+                text(
+                    """
                 SELECT e.user_id,e.status,u.status AS user_status,
                        p.status AS principal_status
                 FROM security.external_identities e
@@ -795,9 +824,12 @@ class OnboardingService:
                 JOIN security.security_principals p ON p.principal_id=e.user_id
                 WHERE e.provider=:provider AND e.provider_subject=:subject
                 """
-            ),
-            {"provider": identity_provider, "subject": identity_subject},
-        ).mappings().first()
+                ),
+                {"provider": identity_provider, "subject": identity_subject},
+            )
+            .mappings()
+            .first()
+        )
         if identity is None:
             self.s.execute(
                 text(
@@ -887,9 +919,10 @@ class OnboardingService:
         display_name: str,
         now: datetime,
     ) -> tuple[str, str]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT e.external_identity_id,e.user_id,e.status,
                        u.status AS user_status,p.status AS principal_status
                 FROM security.external_identities e
@@ -897,9 +930,12 @@ class OnboardingService:
                 JOIN security.security_principals p ON p.principal_id=e.user_id
                 WHERE e.provider=:provider AND e.provider_subject=:subject
                 """
-            ),
-            {"provider": identity_provider, "subject": identity_subject},
-        ).mappings().first()
+                ),
+                {"provider": identity_provider, "subject": identity_subject},
+            )
+            .mappings()
+            .first()
+        )
         if row is not None:
             if row["status"] != "ACTIVE" or row["principal_status"] != "ACTIVE":
                 raise security_error("PRINCIPAL_NOT_ACTIVE")
@@ -1020,9 +1056,7 @@ class OnboardingService:
                 },
             ).first()
             if row is None:
-                raise ValueError(
-                    "Location and schedule must belong to the Tenant and be ACTIVE"
-                )
+                raise ValueError("Location and schedule must belong to the Tenant and be ACTIVE")
             locations.append({"locationId": location_id, "scheduleId": schedule_id})
         return {"roleIds": roles, "groupIds": groups, "locationAssignments": locations}, privileged
 
@@ -1110,9 +1144,10 @@ class OnboardingService:
             )
 
     def _effective_control(self, tenant_id: str, control_key: str) -> bool:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT d.configurable,d.default_enabled,d.parent_control_key,
                        p.enabled AS platform_enabled,o.override_mode
                 FROM security.security_control_definitions d
@@ -1122,9 +1157,12 @@ class OnboardingService:
                   ON o.control_key=d.control_key AND o.tenant_id=:tenant_id
                 WHERE d.control_key=:control_key AND d.status='ACTIVE'
                 """
-            ),
-            {"tenant_id": tenant_id, "control_key": control_key},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "control_key": control_key},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             return False
         if not bool(row["configurable"]) or row["override_mode"] == "ENABLED":
@@ -1141,24 +1179,31 @@ class OnboardingService:
         return enabled
 
     def _pending_self_request(self, tenant_id: str, user_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT self_onboarding_request_id,status
                 FROM security.self_onboarding_requests
                 WHERE tenant_id=:tenant_id AND user_id=:user_id
                   AND status='PENDING_ADMIN_APPROVAL'
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def _tenant_exists(self, tenant_id: str) -> bool:
-        return self.s.execute(
-            text("SELECT 1 FROM security.tenants WHERE tenant_id=:tenant_id"),
-            {"tenant_id": tenant_id},
-        ).first() is not None
+        return (
+            self.s.execute(
+                text("SELECT 1 FROM security.tenants WHERE tenant_id=:tenant_id"),
+                {"tenant_id": tenant_id},
+            ).first()
+            is not None
+        )
 
     @staticmethod
     def _json_access(value: Any) -> dict[str, Any]:

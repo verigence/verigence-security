@@ -76,11 +76,7 @@ def _template(repo: SecurityRepository, template_key: str) -> dict[str, Any]:
     return {
         "template_id": str(rows[0]["template_id"]),
         "catalog_version": str(rows[0]["catalog_version"]),
-        "permission_keys": [
-            str(row["permission_key"])
-            for row in rows
-            if row["permission_key"] is not None
-        ],
+        "permission_keys": [str(row["permission_key"]) for row in rows if row["permission_key"] is not None],
     }
 
 

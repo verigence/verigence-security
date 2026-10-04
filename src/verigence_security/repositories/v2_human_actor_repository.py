@@ -19,9 +19,10 @@ class V2HumanActorRepository:
         self.s = session
 
     def human_for_user_id(self, user_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,
                        u.status AS user_status,
                        sp.actor_type AS principal_actor_type,
@@ -34,9 +35,12 @@ class V2HumanActorRepository:
                   ON ei.user_id=u.user_id AND ei.provider='CLERK'
                 WHERE u.user_id=:user_id
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def human_for_external_identity(
@@ -45,9 +49,10 @@ class V2HumanActorRepository:
         provider: str,
         provider_subject: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT ei.status AS identity_status,
                        u.user_id,
                        u.status AS user_status,
@@ -59,9 +64,12 @@ class V2HumanActorRepository:
                 WHERE ei.provider=:provider
                   AND ei.provider_subject=:provider_subject
                 """
-            ),
-            {"provider": provider, "provider_subject": provider_subject},
-        ).mappings().first()
+                ),
+                {"provider": provider, "provider_subject": provider_subject},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def active_admin_assignments(self, user_id: str) -> list[dict[str, Any]]:

@@ -178,9 +178,10 @@ class PlatformIdentityService:
         return user_id
 
     def _clerk_user_state(self, clerk_subject: str) -> dict[str, object] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT e.user_id,e.status AS identity_status,
                        u.status AS user_status,p.status AS principal_status
                 FROM security.external_identities e
@@ -188,9 +189,12 @@ class PlatformIdentityService:
                 JOIN security.security_principals p ON p.principal_id=e.user_id
                 WHERE e.provider='CLERK' AND e.provider_subject=:subject
                 """
-            ),
-            {"subject": clerk_subject},
-        ).mappings().first()
+                ),
+                {"subject": clerk_subject},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     @staticmethod

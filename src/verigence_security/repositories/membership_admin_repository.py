@@ -63,15 +63,19 @@ class MembershipAdminRepository:
         )
 
     def membership(self, *, tenant_id: str, user_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.tenant_memberships
                 WHERE tenant_id=:tenant_id AND user_id=:user_id
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def commit(self) -> None:

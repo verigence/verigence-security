@@ -57,9 +57,10 @@ class RoleAlignedGroupService:
     def group(self, tenant_id: str, role_key: str) -> dict[str, Any] | None:
         if role_key not in OPERATING_ROLE_KEYS:
             return None
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT rd.role_key,rd.display_name,COUNT(utor.assignment_id) AS member_count
                 FROM security.role_definitions rd
                 LEFT JOIN security.user_tenant_operating_roles utor
@@ -71,9 +72,12 @@ class RoleAlignedGroupService:
                   AND rd.status='ACTIVE'
                 GROUP BY rd.role_key,rd.display_name
                 """
-            ),
-            {"tenant_id": tenant_id, "role_key": role_key},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "role_key": role_key},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def users(self, tenant_id: str, role_key: str) -> list[dict[str, Any]]:

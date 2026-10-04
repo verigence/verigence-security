@@ -35,9 +35,7 @@ def _user_response(row: dict[str, object]) -> GlobalUserDirectoryResponse:
         primaryMobile=(str(row["primary_mobile"]) if row["primary_mobile"] is not None else None),
         status=str(row["status"]),
         clerkSubject=(str(row["clerk_subject"]) if row["clerk_subject"] is not None else None),
-        onboardingStatus=(
-            str(row["onboarding_status"]) if row["onboarding_status"] is not None else None
-        ),
+        onboardingStatus=(str(row["onboarding_status"]) if row["onboarding_status"] is not None else None),
         isEmployee=bool(row.get("is_employee", False)),
         createdAtUtc=row["created_at_utc"],  # type: ignore[arg-type]
         updatedAtUtc=row["updated_at_utc"],  # type: ignore[arg-type]

@@ -37,9 +37,7 @@ def _tenant_admin_scope_ids(actor: HumanActorContext) -> set[str]:
     return {
         str(scope.scope_id)
         for scope in actor.admin_scopes
-        if scope.role_key == "TenantAdmin"
-        and scope.scope_type == "TENANT"
-        and scope.scope_id is not None
+        if scope.role_key == "TenantAdmin" and scope.scope_type == "TENANT" and scope.scope_id is not None
     }
 
 
@@ -127,11 +125,7 @@ def list_tenants(
     allowed_tenants = _tenant_admin_scope_ids(actor)
     if not allowed_tenants:
         raise security_error("PERMISSION_DENIED")
-    return [
-        _tenant_response(row)
-        for row in rows
-        if str(row["tenant_id"]) in allowed_tenants
-    ]
+    return [_tenant_response(row) for row in rows if str(row["tenant_id"]) in allowed_tenants]
 
 
 @router.get("/tenants/{tenantId}", response_model=PlatformTenantResponse)

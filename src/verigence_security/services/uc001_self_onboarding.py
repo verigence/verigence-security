@@ -97,11 +97,7 @@ class UC001SelfOnboardingService(Phase1SelfOnboardingService):
         )
         self.s.commit()
 
-        clerk_user_ids = {
-            str(row["clerk_user_id"])
-            for row in [*released, *cleanup_rows]
-            if row.get("clerk_user_id")
-        }
+        clerk_user_ids = {str(row["clerk_user_id"]) for row in [*released, *cleanup_rows] if row.get("clerk_user_id")}
         self._delete_clerk_users(clerk_user_ids, clerk)
 
     def _release_nonowning_users(
@@ -147,11 +143,7 @@ class UC001SelfOnboardingService(Phase1SelfOnboardingService):
             return
 
         user_ids = {str(row["user_id"]) for row in rows}
-        clerk_user_ids = {
-            str(row["clerk_user_id"])
-            for row in rows
-            if row.get("clerk_user_id")
-        }
+        clerk_user_ids = {str(row["clerk_user_id"]) for row in rows if row.get("clerk_user_id")}
 
         for user_id in user_ids:
             self.s.execute(

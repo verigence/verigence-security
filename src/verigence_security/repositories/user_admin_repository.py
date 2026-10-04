@@ -12,15 +12,19 @@ class UserAdminRepository:
         self.s = session
 
     def principal(self, principal_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.security_principals
                 WHERE principal_id=:principal_id
                 """
-            ),
-            {"principal_id": principal_id},
-        ).mappings().first()
+                ),
+                {"principal_id": principal_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def create_user_principal_if_absent(
@@ -115,15 +119,19 @@ class UserAdminRepository:
         provider: str,
         provider_subject: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.external_identities
                 WHERE provider=:provider AND provider_subject=:provider_subject
                 """
-            ),
-            {"provider": provider, "provider_subject": provider_subject},
-        ).mappings().first()
+                ),
+                {"provider": provider, "provider_subject": provider_subject},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def upsert_external_identity(

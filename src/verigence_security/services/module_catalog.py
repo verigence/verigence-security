@@ -82,9 +82,7 @@ class ModuleCatalogService:
             for permission in catalog.permissions:
                 existing = self.repository.permission(permission.key)
                 if existing is not None and str(existing["module_key"]) != module_key:
-                    raise ModuleCatalogError(
-                        f"Permission {permission.key} is owned by another module"
-                    )
+                    raise ModuleCatalogError(f"Permission {permission.key} is owned by another module")
                 if permission.status == "RETIRED":
                     affected = self.repository.effective_role_references(permission.key)
                     if affected:
@@ -156,38 +154,29 @@ class ModuleCatalogService:
             raise ModuleCatalogError("Duplicate module role-template keys are not allowed")
         for template in catalog.role_templates:
             if not template.key.startswith(f"{module_key}."):
-                raise ModuleCatalogError(
-                    f"Template {template.key} does not belong to module {module_key}"
-                )
+                raise ModuleCatalogError(f"Template {template.key} does not belong to module {module_key}")
             if template.status not in _ALLOWED_LIFECYCLE:
                 raise ModuleCatalogError(f"Invalid template status {template.status}")
             if len(template.permissions) != len(set(template.permissions)):
-                raise ModuleCatalogError(
-                    f"Template {template.key} contains duplicate permissions"
-                )
+                raise ModuleCatalogError(f"Template {template.key} contains duplicate permissions")
             for permission_key in template.permissions:
                 if not permission_key.startswith(f"{module_key}."):
-                    raise ModuleCatalogError(
-                        f"Template {template.key} references another module namespace"
-                    )
+                    raise ModuleCatalogError(f"Template {template.key} references another module namespace")
                 if permission_key not in submitted_permissions:
                     existing = self.repository.permission(permission_key)
                     if existing is None or str(existing["module_key"]) != module_key:
                         raise ModuleCatalogError(
-                            f"Template {template.key} references unregistered permission "
-                            f"{permission_key}"
+                            f"Template {template.key} references unregistered permission {permission_key}"
                         )
                     if str(existing["status"]) != "ACTIVE":
                         raise ModuleCatalogError(
-                            f"Template {template.key} references non-ACTIVE permission "
-                            f"{permission_key}"
+                            f"Template {template.key} references non-ACTIVE permission {permission_key}"
                         )
                 else:
                     submitted = next(p for p in catalog.permissions if p.key == permission_key)
                     if submitted.status != "ACTIVE":
                         raise ModuleCatalogError(
-                            f"Template {template.key} references non-ACTIVE permission "
-                            f"{permission_key}"
+                            f"Template {template.key} references non-ACTIVE permission {permission_key}"
                         )
 
     @staticmethod
@@ -195,9 +184,7 @@ class ModuleCatalogService:
         if not is_canonical_permission(permission.key):
             raise ModuleCatalogError(f"Invalid canonical permission {permission.key}")
         if not permission.key.startswith(f"{module_key}."):
-            raise ModuleCatalogError(
-                f"Permission {permission.key} does not belong to module {module_key}"
-            )
+            raise ModuleCatalogError(f"Permission {permission.key} does not belong to module {module_key}")
         if not permission.name.strip():
             raise ModuleCatalogError(f"Permission {permission.key} requires a name")
         if permission.status not in _ALLOWED_LIFECYCLE:

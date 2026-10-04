@@ -52,9 +52,10 @@ class SecurityRepository:
         self.s = session
 
     def resolve_identity_user(self, provider: str, provider_subject: str) -> str:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,
                        sp.actor_type AS principal_actor_type,
                        sp.status AS principal_status
@@ -65,9 +66,12 @@ class SecurityRepository:
                   AND ei.provider_subject=:subject
                   AND ei.status='ACTIVE'
                 """
-            ),
-            {"provider": provider, "subject": provider_subject},
-        ).mappings().first()
+                ),
+                {"provider": provider, "subject": provider_subject},
+            )
+            .mappings()
+            .first()
+        )
         if not row:
             raise security_error("USER_NOT_ONBOARDED")
         if row["principal_actor_type"] != "USER":
@@ -129,12 +133,11 @@ class SecurityRepository:
             raise security_error("TENANT_NOT_ACTIVE")
         return str(row[0])
 
-    def get_user_context(
-        self, user_id: str, tenant_id: str, now: datetime
-    ) -> UserContext:
-        row = self.s.execute(
-            text(
-                """
+    def get_user_context(self, user_id: str, tenant_id: str, now: datetime) -> UserContext:
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,
                        u.status AS user_status,
                        m.membership_id,
@@ -147,9 +150,12 @@ class SecurityRepository:
                   ON m.user_id=u.user_id AND m.tenant_id=:tenant_id
                 WHERE u.user_id=:user_id
                 """
-            ),
-            {"user_id": user_id, "tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id, "tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         if not row:
             raise security_error("USER_NOT_ONBOARDED")
         if row["user_status"] != "ACTIVE":
@@ -173,10 +179,14 @@ class SecurityRepository:
         )
 
     def get_tenant_policy(self, tenant_id: str) -> TenantPolicy:
-        row = self.s.execute(
-            text("SELECT * FROM security.tenant_security_policies WHERE tenant_id=:tenant_id"),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+        row = (
+            self.s.execute(
+                text("SELECT * FROM security.tenant_security_policies WHERE tenant_id=:tenant_id"),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         if not row or row["status"] != "ACTIVE":
             raise security_error("TENANT_SECURITY_NOT_READY")
         return TenantPolicy(
@@ -194,9 +204,10 @@ class SecurityRepository:
         )
 
     def machine_credential(self, client_id: str, now: datetime) -> MachineCredential:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT c.credential_id,c.client_id,c.secret_hash,c.status AS credential_status,
                        c.valid_from_utc,c.valid_to_utc,
                        p.principal_id,p.actor_type,p.status AS principal_status
@@ -204,9 +215,12 @@ class SecurityRepository:
                 JOIN security.security_principals p ON p.principal_id=c.principal_id
                 WHERE c.client_id=:client_id
                 """
-            ),
-            {"client_id": client_id},
-        ).mappings().first()
+                ),
+                {"client_id": client_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise security_error("MACHINE_CREDENTIAL_INVALID")
         if row["principal_status"] != "ACTIVE":
@@ -326,17 +340,21 @@ class SecurityRepository:
         )
 
     def lock_active_device(self, user_id: str, tenant_id: str, device_id: str) -> dict[str, Any]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.registered_devices
                 WHERE tenant_id=:tenant_id AND user_id=:user_id AND device_id=:device_id
                 FOR UPDATE
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
+            )
+            .mappings()
+            .first()
+        )
         if not row:
             raise security_error("DEVICE_NOT_REGISTERED")
         if row["status"] == "PENDING":
@@ -351,9 +369,10 @@ class SecurityRepository:
         tenant_id: str,
         now: datetime,
     ) -> list[LocationCandidate]:
-        rows = self.s.execute(
-            text(
-                """
+        rows = (
+            self.s.execute(
+                text(
+                    """
                 SELECT l.location_id,
                        l.latitude,
                        l.longitude,
@@ -370,9 +389,12 @@ class SecurityRepository:
                   AND (a.valid_from_utc IS NULL OR a.valid_from_utc<=:now)
                   AND (a.valid_to_utc IS NULL OR a.valid_to_utc>:now)
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "now": now},
-        ).mappings().all()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "now": now},
+            )
+            .mappings()
+            .all()
+        )
         return [
             LocationCandidate(
                 location_id=str(row["location_id"]),
@@ -400,16 +422,20 @@ class SecurityRepository:
             raise security_error("ACCESS_SCHEDULE_MISSING")
 
     def schedule_windows(self, tenant_id: str, schedule_id: str) -> list[ScheduleWindow]:
-        rows = self.s.execute(
-            text(
-                """
+        rows = (
+            self.s.execute(
+                text(
+                    """
                 SELECT iso_day_of_week,start_local_time,end_local_time,crosses_midnight
                 FROM security.access_schedule_windows
                 WHERE tenant_id=:tenant_id AND schedule_id=:schedule_id AND status='ACTIVE'
                 """
-            ),
-            {"tenant_id": tenant_id, "schedule_id": schedule_id},
-        ).mappings().all()
+                ),
+                {"tenant_id": tenant_id, "schedule_id": schedule_id},
+            )
+            .mappings()
+            .all()
+        )
         return [
             ScheduleWindow(
                 iso_day_of_week=int(row["iso_day_of_week"]),
@@ -457,9 +483,10 @@ class SecurityRepository:
         user_id: str,
         now: datetime,
     ) -> tuple[list[str], list[str]]:
-        rows = self.s.execute(
-            text(
-                """
+        rows = (
+            self.s.execute(
+                text(
+                    """
                 SELECT DISTINCT r.role_key,p.permission_key
                 FROM security.user_role_assignments ura
                 JOIN security.roles r
@@ -476,9 +503,12 @@ class SecurityRepository:
                   AND (ura.valid_from_utc IS NULL OR ura.valid_from_utc<=:now)
                   AND (ura.valid_to_utc IS NULL OR ura.valid_to_utc>:now)
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "now": now},
-        ).mappings().all()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "now": now},
+            )
+            .mappings()
+            .all()
+        )
         roles = sorted({str(row["role_key"]) for row in rows})
         permissions = sorted({str(row["permission_key"]) for row in rows})
         if not permissions:
@@ -514,9 +544,10 @@ class SecurityRepository:
         user_id: str,
         device_id: str,
     ) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.access_sessions
                 WHERE tenant_id=:tenant_id
@@ -526,9 +557,12 @@ class SecurityRepository:
                   AND status='ACTIVE'
                 LIMIT 1
                 """
-            ),
-            {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def create_user_session(

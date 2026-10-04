@@ -84,15 +84,19 @@ class RbacAdminRepository:
         )
 
     def role(self, *, tenant_id: str, role_key: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT * FROM security.roles
                 WHERE tenant_id=:tenant_id AND role_key=:role_key
                 """
-            ),
-            {"tenant_id": tenant_id, "role_key": role_key},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id, "role_key": role_key},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def assign_permission(

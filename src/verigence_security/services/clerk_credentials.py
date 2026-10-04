@@ -141,9 +141,10 @@ class ClerkCredentialService:
             owns_session = True
 
         try:
-            rows = session.execute(
-                text(
-                    """
+            rows = (
+                session.execute(
+                    text(
+                        """
                     SELECT e.provider_subject,
                            u.status AS user_status,
                            p.status AS principal_status,
@@ -165,9 +166,12 @@ class ClerkCredentialService:
                     WHERE lower(u.primary_email)=:email
                     LIMIT 2
                     """
-                ),
-                {"email": normalized_email},
-            ).mappings().all()
+                    ),
+                    {"email": normalized_email},
+                )
+                .mappings()
+                .all()
+            )
             # Historical REVOKED Clerk identities are deliberately retained for auditability and
             # must not make an otherwise valid active account look ambiguous. Multiple ACTIVE
             # mappings still fail closed via this exact-one requirement.

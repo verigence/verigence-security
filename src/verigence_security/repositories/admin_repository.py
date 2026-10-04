@@ -14,29 +14,37 @@ class SecurityAdminRepository:
         self.s = session
 
     def tenant(self, tenant_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT tenant_id,tenant_code,tenant_name,status,created_at_utc,updated_at_utc
                 FROM security.tenants
                 WHERE tenant_id=:tenant_id
                 """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def security_policy(self, tenant_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.tenant_security_policies
                 WHERE tenant_id=:tenant_id
                 """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def upsert_security_policy(
@@ -112,16 +120,20 @@ class SecurityAdminRepository:
         )
 
     def retention_policy(self, tenant_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT *
                 FROM security.security_retention_policies
                 WHERE tenant_id=:tenant_id
                 """
-            ),
-            {"tenant_id": tenant_id},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenant_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def upsert_retention_policy(

@@ -56,9 +56,7 @@ def assign_hr_role(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return HrRoleMutationResponse(
-        userId=userId, roleKey=roleKey, changed=changed, assignmentId=assignment_id
-    )
+    return HrRoleMutationResponse(userId=userId, roleKey=roleKey, changed=changed, assignmentId=assignment_id)
 
 
 @router.delete("/users/{userId}/module-roles/hr/{roleKey}", response_model=HrRoleMutationResponse)
@@ -80,6 +78,4 @@ def remove_hr_role(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return HrRoleMutationResponse(
-        userId=userId, roleKey=roleKey, changed=changed, assignmentId=assignment_id
-    )
+    return HrRoleMutationResponse(userId=userId, roleKey=roleKey, changed=changed, assignmentId=assignment_id)

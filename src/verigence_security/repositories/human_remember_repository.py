@@ -74,18 +74,22 @@ class HumanRememberRepository:
         self.s.commit()
 
     def lock_by_hash(self, *, token_hash: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT access_session_id,user_id,device_id,token_hash,previous_token_hash,status,
                        created_at_utc,expires_at_utc,last_used_at_utc
                 FROM security.human_remember_sessions
                 WHERE token_hash=:token_hash OR previous_token_hash=:token_hash
                 FOR UPDATE
                 """
-            ),
-            {"token_hash": token_hash},
-        ).mappings().first()
+                ),
+                {"token_hash": token_hash},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def rotate(

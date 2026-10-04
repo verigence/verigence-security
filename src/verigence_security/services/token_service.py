@@ -60,9 +60,7 @@ def _validate_actor_claim_shape(claims: AccessTokenClaims) -> None:
             raise ValueError("USER Security token subject must identify the USER principal")
         return
     if claims.roles or claims.device_id or claims.location_id:
-        raise ValueError(
-            "Machine Security token cannot carry USER-only roles/device/location claims"
-        )
+        raise ValueError("Machine Security token cannot carry USER-only roles/device/location claims")
     if claims.delegated_actor_id is not None:
         raise ValueError("Machine Security token cannot carry a delegated USER actor claim")
     if claims.subject is not None and not claims.subject:
@@ -193,9 +191,7 @@ class TokenService:
                 algorithms=["RS256"],
                 issuer=self.settings.security_token_issuer,
                 audience=self.settings.security_token_audience,
-                options={
-                    "require": ["exp", "iat", "sub", "jti", "actor_type"]
-                },
+                options={"require": ["exp", "iat", "sub", "jti", "actor_type"]},
             )
             if payload.get("actor_type") != ActorType.USER.value:
                 raise security_error("ACTOR_TYPE_NOT_ALLOWED")
@@ -243,11 +239,7 @@ class TokenService:
             except ValueError as exc:
                 raise security_error("AUTH_TOKEN_INVALID") from exc
             if actor_type == ActorType.USER:
-                if (
-                    not payload.get("device_id")
-                    or not payload.get("location_id")
-                    or not payload.get("roles")
-                ):
+                if not payload.get("device_id") or not payload.get("location_id") or not payload.get("roles"):
                     raise security_error("AUTH_TOKEN_INVALID")
             elif payload.get("device_id") or payload.get("location_id") or payload.get("roles"):
                 raise security_error("AUTH_TOKEN_INVALID")
@@ -285,9 +277,7 @@ class TokenService:
                 algorithms=["RS256"],
                 issuer=self.settings.security_token_issuer,
                 audience=audience,
-                options={
-                    "require": ["exp", "iat", "sub", "jti", "actor_type", "aud"]
-                },
+                options={"require": ["exp", "iat", "sub", "jti", "actor_type", "aud"]},
             )
             if payload.get("actor_type") != ActorType.SERVICE_INTEGRATION.value:
                 raise security_error("ACTOR_TYPE_NOT_ALLOWED")
@@ -341,9 +331,7 @@ class TokenService:
         ):
             return False
         try:
-            public_key = serialization.load_pem_public_key(
-                self.settings.security_public_key_pem.encode()
-            )
+            public_key = serialization.load_pem_public_key(self.settings.security_public_key_pem.encode())
             private_key = serialization.load_pem_private_key(
                 self.settings.security_private_key_pem.encode(),
                 password=None,

@@ -15,9 +15,10 @@ class SecurityHousekeepingRepository:
         self.s = session
 
     def preview(self, *, tenant_id: str, cutoff_exclusive_utc: datetime) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT
                     t.tenant_id,
                     rp.status AS retention_status,
@@ -44,12 +45,15 @@ class SecurityHousekeepingRepository:
                   ON rp.tenant_id=t.tenant_id
                 WHERE t.tenant_id=CAST(:tenant_id AS uuid)
                 """
-            ),
-            {
-                "tenant_id": tenant_id,
-                "cutoff_exclusive_utc": cutoff_exclusive_utc,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "cutoff_exclusive_utc": cutoff_exclusive_utc,
+                },
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def purge(self, *, tenant_id: str, cutoff_exclusive_utc: datetime) -> dict[str, int]:

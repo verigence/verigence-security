@@ -47,17 +47,21 @@ def restore_tenant_to_configuring(
     if not actor.is_super_admin:
         raise security_error("PERMISSION_DENIED")
 
-    current = session.execute(
-        text(
-            """
+    current = (
+        session.execute(
+            text(
+                """
             SELECT tenant_id,tenant_code,tenant_name,status,created_at_utc,updated_at_utc
             FROM security.tenants
             WHERE tenant_id=:tenant_id
             FOR UPDATE
             """
-        ),
-        {"tenant_id": tenantId},
-    ).mappings().first()
+            ),
+            {"tenant_id": tenantId},
+        )
+        .mappings()
+        .first()
+    )
     if current is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
@@ -72,17 +76,21 @@ def restore_tenant_to_configuring(
 
     now = datetime.now(UTC)
     try:
-        updated = session.execute(
-            text(
-                """
+        updated = (
+            session.execute(
+                text(
+                    """
                 UPDATE security.tenants
                 SET status='CONFIGURING',updated_at_utc=:now
                 WHERE tenant_id=:tenant_id AND status='ACTIVE'
                 RETURNING tenant_id,tenant_code,tenant_name,status,created_at_utc,updated_at_utc
                 """
-            ),
-            {"tenant_id": tenantId, "now": now},
-        ).mappings().first()
+                ),
+                {"tenant_id": tenantId, "now": now},
+            )
+            .mappings()
+            .first()
+        )
         if updated is None:
             raise RuntimeError("Tenant activation compensation state changed concurrently")
 

@@ -47,11 +47,7 @@ def validate_geo(
     now: datetime | None = None,
 ) -> None:
     now = now or datetime.now(UTC)
-    captured = (
-        sample.captured_at
-        if sample.captured_at.tzinfo
-        else sample.captured_at.replace(tzinfo=UTC)
-    )
+    captured = sample.captured_at if sample.captured_at.tzinfo else sample.captured_at.replace(tzinfo=UTC)
     if sample.integrity_status == GeoIntegrityStatus.SUSPECTED:
         raise security_error("GEO_INTEGRITY_FAILED", sample.integrity_reason)
     if sample.accuracy_meters > max_accuracy_meters:

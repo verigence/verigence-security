@@ -351,19 +351,23 @@ class Phase1SelfOnboardingService:
 
     def _load_attempt(self, signup_attempt_id: str, *, for_update: bool = False) -> dict[str, Any]:
         suffix = " FOR UPDATE" if for_update else ""
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT signup_attempt_id,first_name,last_name,email,mobile,status,
                        created_at_utc,expires_at_utc,clerk_user_id,clerk_email_address_id,
                        clerk_email_verification_id,completed_at_utc
                 FROM security.platform_user_signup_attempts
                 WHERE signup_attempt_id=:attempt_id
                 """
-                + suffix
-            ),
-            {"attempt_id": signup_attempt_id},
-        ).mappings().first()
+                    + suffix
+                ),
+                {"attempt_id": signup_attempt_id},
+            )
+            .mappings()
+            .first()
+        )
         if row is None:
             raise LookupError("Signup attempt was not found")
         return dict(row)
@@ -440,15 +444,19 @@ class Phase1SelfOnboardingService:
                     raise
 
     def _require_valid_onboarding_key(self, supplied: str) -> None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT key_hash,status
                 FROM security.platform_user_onboarding_settings
                 WHERE singleton_id=1
                 """
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if row is None or row["status"] != "ACTIVE":
             raise security_error("PERMISSION_DENIED")
         try:

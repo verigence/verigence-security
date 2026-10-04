@@ -88,15 +88,14 @@ class Phase1TestIdentityProvisioningService:
             ).scalars()
         )
         if len(rows) != 1:
-            raise RuntimeError(
-                "The exact approved Phase-1 SuperAdmin must be provisioned before TestTenant/TestUser"
-            )
+            raise RuntimeError("The exact approved Phase-1 SuperAdmin must be provisioned before TestTenant/TestUser")
         return str(rows[0])
 
     def _ensure_test_user(self) -> tuple[str, bool]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT e.user_id,e.status AS identity_status,
                        u.status AS user_status,p.status AS principal_status
                 FROM security.external_identities e
@@ -104,9 +103,12 @@ class Phase1TestIdentityProvisioningService:
                 JOIN security.security_principals p ON p.principal_id=u.user_id
                 WHERE e.provider='CLERK' AND e.provider_subject=:subject
                 """
-            ),
-            {"subject": PHASE1_TEST_USER_CLERK_USER_ID},
-        ).mappings().first()
+                ),
+                {"subject": PHASE1_TEST_USER_CLERK_USER_ID},
+            )
+            .mappings()
+            .first()
+        )
         if row is not None:
             if (
                 row["identity_status"] != "ACTIVE"
@@ -196,16 +198,20 @@ class Phase1TestIdentityProvisioningService:
                 raise RuntimeError(message)
 
     def _ensure_test_tenant(self, actor_user_id: str) -> tuple[str, bool]:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT tenant_id,tenant_name,status
                 FROM security.tenants
                 WHERE tenant_code=:tenant_code
                 """
-            ),
-            {"tenant_code": PHASE1_TEST_TENANT_CODE},
-        ).mappings().first()
+                ),
+                {"tenant_code": PHASE1_TEST_TENANT_CODE},
+            )
+            .mappings()
+            .first()
+        )
         service = PlatformTenantService(self.s)
         created = False
         if row is None:
@@ -280,16 +286,20 @@ class Phase1TestIdentityProvisioningService:
             raise RuntimeError("Existing TestTenant role bundles differ from current platform defaults")
 
     def _ensure_singleton_binding(self, *, user_id: str, tenant_id: str) -> None:
-        existing = self.s.execute(
-            text(
-                """
+        existing = (
+            self.s.execute(
+                text(
+                    """
                 SELECT user_id,tenant_id,status
                 FROM security.phase1_test_identity
                 WHERE singleton_id=1
                 FOR UPDATE
                 """
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if existing is not None:
             if str(existing["user_id"]) != user_id or str(existing["tenant_id"]) != tenant_id:
                 raise RuntimeError("Canonical Phase-1 TestUser/TestTenant binding conflicts with existing data")

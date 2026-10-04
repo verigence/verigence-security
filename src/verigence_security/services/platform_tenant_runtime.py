@@ -28,9 +28,10 @@ class PlatformTenantService(BasePlatformTenantService):
         actor_user_id: str,
         now: datetime,
     ) -> None:
-        summary = self.s.execute(
-            text(
-                """
+        summary = (
+            self.s.execute(
+                text(
+                    """
                 SELECT count(*) AS permission_count,
                        count(DISTINCT d.role_key) AS role_count
                 FROM security.platform_role_permission_defaults d
@@ -40,8 +41,11 @@ class PlatformTenantService(BasePlatformTenantService):
                 WHERE d.status='ACTIVE'
                   AND d.role_key IN ('PC','TL','PM','CRM','Executive')
                 """
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         if int(summary["role_count"]) != 5 or int(summary["permission_count"]) <= 0:
             raise RuntimeError("Approved v2 operating-role platform defaults are not ready")
 

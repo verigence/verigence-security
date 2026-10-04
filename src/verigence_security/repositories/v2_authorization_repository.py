@@ -33,9 +33,10 @@ class V2AuthorizationRepository:
         )
 
     def human_for_user_id(self, user_id: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT u.user_id,
                        e.status AS identity_status,
                        u.status AS user_status,
@@ -47,23 +48,30 @@ class V2AuthorizationRepository:
                   ON e.user_id=u.user_id AND e.provider='CLERK'
                 WHERE u.user_id=:user_id
                 """
-            ),
-            {"user_id": user_id},
-        ).mappings().first()
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def active_permission(self, permission_key: str) -> dict[str, Any] | None:
-        row = self.s.execute(
-            text(
-                """
+        row = (
+            self.s.execute(
+                text(
+                    """
                 SELECT permission_key,module_key,resource_key,action_key,status
                 FROM security.permissions
                 WHERE permission_key=:permission_key
                   AND status='ACTIVE'
                 """
-            ),
-            {"permission_key": permission_key},
-        ).mappings().first()
+                ),
+                {"permission_key": permission_key},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row is not None else None
 
     def tenant_status(self, tenant_id: str) -> str | None:

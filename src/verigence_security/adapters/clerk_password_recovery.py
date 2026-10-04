@@ -34,9 +34,7 @@ def prepare_password_recovery_email(
     )
     _delete_recovery_placeholders(clerk, clerk_user_id=clerk_user_id)
 
-    placeholder_email = (
-        f"{_RECOVERY_PLACEHOLDER_PREFIX}{uuid4().hex}{_RECOVERY_PLACEHOLDER_SUFFIX}"
-    )
+    placeholder_email = f"{_RECOVERY_PLACEHOLDER_PREFIX}{uuid4().hex}{_RECOVERY_PLACEHOLDER_SUFFIX}"
     placeholder = clerk._request_object(  # noqa: SLF001 - internal Security adapter boundary
         "POST",
         "/email_addresses",

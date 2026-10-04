@@ -82,33 +82,39 @@ class HumanObservationRepository:
             },
         )
 
-        existing = self.s.execute(
-            text(
-                """
+        existing = (
+            self.s.execute(
+                text(
+                    """
                 SELECT status
                 FROM security.human_access_sessions
                 WHERE access_session_id=:session_id AND user_id=:user_id AND device_id=:device_id
                 """
-            ),
-            {"session_id": str(session_id), "user_id": user_id, "device_id": str(device_id)},
-        ).mappings().first()
+                ),
+                {"session_id": str(session_id), "user_id": user_id, "device_id": str(device_id)},
+            )
+            .mappings()
+            .first()
+        )
 
         superseded = 0
         previous_different_device = False
         if existing is None:
-            previous = self.s.execute(
-                text(
-                    """
+            previous = (
+                self.s.execute(
+                    text(
+                        """
                     SELECT device_id
                     FROM security.human_access_sessions
                     WHERE user_id=:user_id AND status='ACTIVE'
                     """
-                ),
-                {"user_id": user_id},
-            ).mappings().all()
-            previous_different_device = any(
-                str(row["device_id"]) != str(device_id) for row in previous
+                    ),
+                    {"user_id": user_id},
+                )
+                .mappings()
+                .all()
             )
+            previous_different_device = any(str(row["device_id"]) != str(device_id) for row in previous)
             superseded = len(previous)
             self.s.execute(
                 text(
