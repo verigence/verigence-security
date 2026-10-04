@@ -1,12 +1,12 @@
 # UC-001 OTP Final Deploy Proof
 
-- run_id: 32482288182
-- source_sha: 04f582687c31f5bf750e815886356541c38a53de
+- run_id: 37213636672
+- source_sha: 0640f256c73fb10c5da61ad1f64f3085035090ec
 - source_contract: PASS
 - targeted_tests: PASS
 - database_migration: PASS
-- previous_railway_deployment_id: e252c9f8-8407-45c1-b4b9-924f5f55d8dc
-- new_railway_deployment_id: 48e7b3c4-70a5-427c-9db5-d791faff5106
+- previous_railway_deployment_id: 286d4a2e-9c40-49cf-9aa7-c39490ec15a0
+- new_railway_deployment_id: c1e2f741-c3a2-48e7-92af-0754648352ed
 - source_upload: PASS
 - deployment: PASS
 - readiness: PASS
