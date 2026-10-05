@@ -18,6 +18,7 @@ from verigence_security.api.v2_user_directory_schemas import (
 )
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
+from verigence_security.services.service_contact_change import ContactConflict, ServiceContactChange
 from verigence_security.services.token_service import TokenService
 from verigence_security.services.v2_platform_user_create import (
     InvalidUserInput,
@@ -168,6 +169,70 @@ def mark_user_as_employee_for_service(
         raise HTTPException(status_code=404, detail="User not found")
     session.commit()
     return ServiceUserEmployeeResponse(userId=userId, isEmployee=True)
+
+
+class ServiceContactRequest(BaseModel):
+    email: str | None = Field(default=None, max_length=320)
+    mobile: str | None = Field(default=None, max_length=20)
+
+
+class ServiceContactResponse(BaseModel):
+    userId: str
+    email: str | None
+    mobile: str | None
+    emailChanged: bool
+    mobileChanged: bool
+    oldEmailRemoved: bool
+
+
+@router.post("/users/{userId}/contact", response_model=ServiceContactResponse)
+def change_contact_for_service(
+    userId: str,
+    body: ServiceContactRequest,
+    request: Request,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> ServiceContactResponse:
+    """The HR service corrects an employee's email and/or mobile on the SAME login (same user id,
+    same identity-provider user). Same guard as user creation. The email is replaced at the
+    provider first, then in Security; a repeat of the same request is safe."""
+    principal_id, subject = _authorize_service(service_token, settings, session)
+    try:
+        clerk = ClerkBackendClient(settings)
+    except ClerkBackendError as exc:
+        raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
+    try:
+        done = ServiceContactChange(session).change(
+            user_id=userId,
+            email=body.email,
+            mobile=body.mobile,
+            principal_id=principal_id,
+            integration_key=subject,
+            correlation_id=request.state.correlation_id,
+            clerk=clerk,
+        )
+    except InvalidUserInput as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="User not found") from exc
+    except ContactConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ClerkBackendError as exc:
+        if exc.provider_code == "form_identifier_exists":
+            raise HTTPException(status_code=409, detail="This email already exists in the identity provider.") from exc
+        logger.warning("Service contact change failed at the provider; status=%s", exc.status_code)
+        raise HTTPException(status_code=502, detail="The identity provider could not change the email") from exc
+    return ServiceContactResponse(
+        userId=done.user_id,
+        email=done.email,
+        mobile=done.mobile,
+        emailChanged=done.email_changed,
+        mobileChanged=done.mobile_changed,
+        oldEmailRemoved=done.old_email_removed,
+    )
 
 
 class ServicePasswordRequest(BaseModel):
