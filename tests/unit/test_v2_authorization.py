@@ -404,3 +404,28 @@ def test_other_hr_roles_do_not_approve_payroll() -> None:
     decision = resolver.check(user_id=USER_ID, tenant_id=None, permission_key="hr.payroll.approve")
 
     assert decision.allowed is False
+
+
+def test_only_the_ceo_role_approves_an_employee_status_change_and_super_admin_does_not() -> None:
+    repo = _hr_repo()
+    repo.permissions["hr.employee.status_approve"] = "hr"
+    repo.module_role_permissions.add(("hr", "CEO", "hr.employee.status_approve"))
+
+    repo.admin_assignments = [{"role_key": "SuperAdmin", "scope_type": "PLATFORM", "scope_id": None}]
+    super_admin = HumanAuthorizationResolver(repo).check(
+        user_id=USER_ID, tenant_id=None, permission_key="hr.employee.status_approve"
+    )
+    assert super_admin.allowed is False
+
+    repo.admin_assignments = []
+    repo.module_roles["hr"] = ["HRADMIN"]
+    hr_admin = HumanAuthorizationResolver(repo).check(
+        user_id=USER_ID, tenant_id=None, permission_key="hr.employee.status_approve"
+    )
+    assert hr_admin.allowed is False
+
+    repo.module_roles["hr"] = ["CEO"]
+    ceo = HumanAuthorizationResolver(repo).check(
+        user_id=USER_ID, tenant_id=None, permission_key="hr.employee.status_approve"
+    )
+    assert ceo.allowed is True and ceo.role_key == "CEO"
