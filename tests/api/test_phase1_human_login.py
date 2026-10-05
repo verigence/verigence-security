@@ -164,3 +164,44 @@ def test_non_active_security_user_cannot_receive_human_token(
     assert response.status_code == 403
     assert response.json()["code"] == "USER_NOT_ACTIVE"
     assert _dependencies.claims is None
+
+
+def test_every_login_attempt_is_recorded_with_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    _dependencies: _FakeTokens,
+) -> None:
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(access, "record_login_attempt", lambda settings, **kw: seen.append(kw))
+    device = {"deviceId": "22222222-2222-2222-2222-222222222222", "deviceType": "MOBILE",
+              "platform": "ANDROID", "appVersion": "1.4"}
+    ok = client.post(
+        "/security/v1/auth/login",
+        json={"identifier": "amit@example.com", "password": "safe-password-123", "device": device},
+    )
+    assert ok.status_code == 200
+
+    monkeypatch.setattr(access, "HumanActorAuthenticationService", _InactiveHumanActorService)
+    refused = client.post(
+        "/security/v1/auth/login",
+        json={"identifier": "amit@example.com", "password": "safe-password-123"},
+    )
+    assert refused.status_code == 403
+
+    assert [(a["outcome"], a["reason"], a["platform"], a["app_version"]) for a in seen] == [
+        ("SUCCESS", None, "ANDROID", "1.4"),
+        ("FAILED", "USER_NOT_ACTIVE", None, None),
+    ]
+    assert seen[0]["user_id"] == "11111111-1111-1111-1111-111111111111"
+    assert "safe-password-123" not in repr(seen)
+
+
+def test_a_failed_recording_never_blocks_the_sign_in(
+    monkeypatch: pytest.MonkeyPatch,
+    _dependencies: _FakeTokens,
+) -> None:
+    # No database is configured in this test, so recording has nowhere to write: the sign-in still works.
+    response = client.post(
+        "/security/v1/auth/login",
+        json={"identifier": "amit@example.com", "password": "safe-password-123"},
+    )
+    assert response.status_code == 200

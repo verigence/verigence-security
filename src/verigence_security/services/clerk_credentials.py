@@ -76,6 +76,8 @@ class ClerkCredentialService:
         self.settings = settings
         self.clerk = clerk or _shared_clerk(settings)
         self.session = session
+        # The coarse reason of the last refusal, for the SuperAdmin login activity report.
+        self.denial_stage: str | None = None
 
     def authenticate(
         self,
@@ -119,6 +121,7 @@ class ClerkCredentialService:
                 )
                 raise security_error("IDENTITY_PROVIDER_UNAVAILABLE") from exc
             # Do not expose identifier existence/provider details on authentication failures.
+            self.denial_stage = "clerk_provider_rejected"
             logger.warning(
                 "Human credential authentication denied; stage=clerk_provider_rejected status=%s code=%s",
                 exc.status_code,
@@ -126,8 +129,8 @@ class ClerkCredentialService:
             )
             raise security_error("AUTH_TOKEN_INVALID") from exc
 
-    @staticmethod
-    def _log_denial(stage: str) -> None:
+    def _log_denial(self, stage: str) -> None:
+        self.denial_stage = stage
         logger.warning("Human credential authentication denied; stage=%s", stage)
 
     def _resolve_verigence_clerk_subject(self, normalized_email: str) -> str | None:

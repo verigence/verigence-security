@@ -17,6 +17,7 @@ from verigence_security.api.routes import (
     human_remember,
     jwks,
     legacy_onboarding_compat,
+    login_activity,
     password_recovery,
     platform_admin,
     platform_modules,
@@ -72,6 +73,7 @@ app.include_router(hr_roles.router)
 app.include_router(feature_access.router)
 app.include_router(announcements.router)
 app.include_router(client_diagnostics.router)
+app.include_router(login_activity.router)
 app.include_router(platform_admin.router)
 app.include_router(security_housekeeping.router)
 app.include_router(tenant_activation_compensation.router)

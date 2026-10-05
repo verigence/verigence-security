@@ -35,6 +35,7 @@ from verigence_security.repositories.security_repository import SecurityReposito
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.geo import GeoSample
+from verigence_security.services.login_activity import record_login_attempt
 from verigence_security.services.permissions import effective_user_permissions
 from verigence_security.services.token_service import HumanTokenClaims, TokenService
 from verigence_security.services.v2_human_actor import HumanActorAuthenticationService
@@ -170,20 +171,43 @@ def credential_login(
     settings: Settings = Depends(get_settings),
     repo: SecurityRepository = Depends(repository),
     tokens: TokenService = Depends(token_service),
+    ip: str = Depends(source_ip),
 ) -> dict[str, object]:
     """Authenticate a global human USER through Security -> Clerk Backend API."""
 
-    authenticated = ClerkCredentialService(settings, session=repo.s).authenticate(
-        identifier=body.identifier,
-        password=body.password.get_secret_value(),
-    )
-    identity = AuthenticatedIdentity(
-        provider="CLERK",
-        provider_subject=authenticated.clerk_user.user_id,
-        session_id=f"clerk-backend-{uuid4()}",
-    )
-    actor = HumanActorAuthenticationService(repo.s).authenticate(identity)
+    credentials = ClerkCredentialService(settings, session=repo.s)
+    device = body.device
+
+    def record(outcome: str, user_id: str | None, reason: str | None) -> None:
+        # Who tried, and how it went, for the SuperAdmin login activity report. Never blocks sign-in.
+        record_login_attempt(
+            settings,
+            identifier=body.identifier,
+            user_id=user_id,
+            outcome=outcome,
+            reason=reason,
+            device_type=device.deviceType if device else None,
+            platform=device.platform if device else None,
+            app_version=device.appVersion if device else None,
+            source_ip=ip,
+        )
+
+    try:
+        authenticated = credentials.authenticate(
+            identifier=body.identifier,
+            password=body.password.get_secret_value(),
+        )
+        identity = AuthenticatedIdentity(
+            provider="CLERK",
+            provider_subject=authenticated.clerk_user.user_id,
+            session_id=f"clerk-backend-{uuid4()}",
+        )
+        actor = HumanActorAuthenticationService(repo.s).authenticate(identity)
+    except SecurityError as exc:
+        record("FAILED", None, getattr(credentials, "denial_stage", None) or exc.code)
+        raise
     attach_trusted_user_id(actor.user_id)
+    record("SUCCESS", actor.user_id, None)
 
     ttl = settings.platform_admin_token_ttl_minutes
     if ttl is None:
