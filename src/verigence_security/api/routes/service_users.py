@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import text
@@ -24,6 +26,7 @@ from verigence_security.services.v2_platform_user_create import (
 from verigence_security.services.v2_user_directory import V2UserDirectoryService
 from verigence_security.services.v2_user_lifecycle import V2UserLifecycleService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/security/v1/service", tags=["ServiceIntegration"])
 
 
@@ -218,8 +221,16 @@ def set_password_for_service(
         raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
     try:
         update_password(clerk, clerk_user_id=str(clerk_subject), password=body.password.get_secret_value())
+        # Never hand out a password that does not work: confirm it with the identity provider
+        # before HR emails it.
+        confirmed = clerk.verify_password(
+            clerk_user_id=str(clerk_subject), password=body.password.get_secret_value()
+        )
     except ClerkBackendError as exc:
         raise HTTPException(status_code=502, detail="The password could not be set") from exc
+    if not confirmed:
+        logger.warning("Service password was set but not confirmed; stage=set_password_not_confirmed")
+        raise HTTPException(status_code=502, detail="The password could not be confirmed")
     return ServicePasswordResponse(userId=userId, primaryEmail=str(email) if email else None)
 
 

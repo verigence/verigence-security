@@ -256,12 +256,21 @@ class _PasswordSession:
         pass
 
 
+def _fake_clerk(monkeypatch: pytest.MonkeyPatch, *, confirms: bool) -> None:
+    class _Clerk:
+        def verify_password(self, **_: object) -> bool:
+            return confirms
+
+    monkeypatch.setattr(service_users, "ClerkBackendClient", lambda settings: _Clerk())
+
+
 def _password_caller(
     monkeypatch: pytest.MonkeyPatch, row: tuple[str, str | None, str | None] | None
 ) -> list[tuple[str, str]]:
     _caller(monkeypatch)
     app.dependency_overrides[platform_session] = lambda: _PasswordSession(row)
     set_calls: list[tuple[str, str]] = []
+    _fake_clerk(monkeypatch, confirms=True)
     monkeypatch.setattr(
         service_users,
         "update_password",
@@ -278,6 +287,16 @@ def test_allowed_integration_sets_a_password_for_an_active_user(monkeypatch: pyt
     assert response.status_code == 200
     assert response.json() == {"userId": USER, "primaryEmail": "emp@example.test"}
     assert calls == [("user_clerk_1", "Temp-Pass-123")]
+    assert "Temp-Pass-123" not in response.text
+
+
+def test_a_password_the_provider_does_not_confirm_is_not_reported_as_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    _password_caller(monkeypatch, ("ACTIVE", "emp@example.test", "user_clerk_1"))
+    _fake_clerk(monkeypatch, confirms=False)
+    response = client.post(
+        f"/security/v1/service/users/{USER}/password", json={"password": "Temp-Pass-123"}, headers=AUTH
+    )
+    assert response.status_code == 502
     assert "Temp-Pass-123" not in response.text
 
 
