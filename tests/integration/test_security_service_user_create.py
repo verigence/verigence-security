@@ -92,7 +92,7 @@ def _create(db: Session, clerk: _FakeClerk, principal_id: str, *, email: str, mo
     )
 
 
-def test_service_creates_a_pending_user_and_records_the_integration(session: Session) -> None:
+def test_service_creates_an_active_employee_and_records_the_integration(session: Session) -> None:
     principal_id = _seed_integration(session)
     clerk = _FakeClerk()
     email = f"emp.{uuid4().hex[:8]}@example.test"
@@ -111,7 +111,7 @@ def test_service_creates_a_pending_user_and_records_the_integration(session: Ses
         ),
         {"id": created.user_id},
     ).mappings().one()
-    assert row["status"] == "PENDING" and row["principal_status"] == "ACTIVE"
+    assert row["status"] == "ACTIVE" and row["principal_status"] == "ACTIVE"
     assert row["is_employee"] is True
     assert row["primary_email"] == email and row["primary_mobile"] == "+919000000001"
     assert row["provider_subject"] == created.clerk_subject
