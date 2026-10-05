@@ -221,16 +221,20 @@ def set_password_for_service(
         raise HTTPException(status_code=503, detail="Identity provider integration is not configured") from exc
     try:
         update_password(clerk, clerk_user_id=str(clerk_subject), password=body.password.get_secret_value())
-        # Never hand out a password that does not work: confirm it with the identity provider
-        # before HR emails it.
+    except ClerkBackendError as exc:
+        raise HTTPException(status_code=502, detail="The password could not be set") from exc
+    # A check for operators only, written to the log. It never stops the email: if the provider
+    # does not confirm the new password, HR is not blocked, and the log shows why a sign-in fails.
+    try:
         confirmed = clerk.verify_password(
             clerk_user_id=str(clerk_subject), password=body.password.get_secret_value()
         )
-    except ClerkBackendError as exc:
-        raise HTTPException(status_code=502, detail="The password could not be set") from exc
-    if not confirmed:
-        logger.warning("Service password was set but not confirmed; stage=set_password_not_confirmed")
-        raise HTTPException(status_code=502, detail="The password could not be confirmed")
+    except ClerkBackendError:
+        confirmed = None
+    if confirmed is not True:
+        logger.warning(
+            "Service password was set but not confirmed by the provider; stage=set_password_not_confirmed"
+        )
     return ServicePasswordResponse(userId=userId, primaryEmail=str(email) if email else None)
 
 

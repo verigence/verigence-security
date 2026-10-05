@@ -290,14 +290,17 @@ def test_allowed_integration_sets_a_password_for_an_active_user(monkeypatch: pyt
     assert "Temp-Pass-123" not in response.text
 
 
-def test_a_password_the_provider_does_not_confirm_is_not_reported_as_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_password_the_provider_does_not_confirm_is_still_reported_set_so_hr_is_never_blocked(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     _password_caller(monkeypatch, ("ACTIVE", "emp@example.test", "user_clerk_1"))
     _fake_clerk(monkeypatch, confirms=False)
     response = client.post(
         f"/security/v1/service/users/{USER}/password", json={"password": "Temp-Pass-123"}, headers=AUTH
     )
-    assert response.status_code == 502
-    assert "Temp-Pass-123" not in response.text
+    assert response.status_code == 200
+    assert "Temp-Pass-123" not in response.text and "Temp-Pass-123" not in caplog.text
+    assert "set_password_not_confirmed" in caplog.text
 
 
 def test_a_password_is_refused_for_a_user_who_is_not_active(monkeypatch: pytest.MonkeyPatch) -> None:
