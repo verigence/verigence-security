@@ -189,3 +189,18 @@ def test_only_the_ceo_role_holds_the_employee_status_approval(session: Session) 
         " WHERE permission_key='hr.employee.status_approve' AND status='ACTIVE'",
     )
     assert active == {("hr.employee.status_approve",)}
+
+
+def test_only_the_ceo_role_holds_the_direct_status_change_and_hr_admin_does_not(session: Session) -> None:
+    held = _rows(
+        session,
+        "SELECT role_key FROM security.module_role_permissions"
+        " WHERE permission_key='hr.employee.status_direct' AND status='ACTIVE'",
+    )
+    assert held == {("CEO",)}
+    active = _rows(
+        session,
+        "SELECT permission_key FROM security.permissions"
+        " WHERE permission_key='hr.employee.status_direct' AND status='ACTIVE'",
+    )
+    assert active == {("hr.employee.status_direct",)}
