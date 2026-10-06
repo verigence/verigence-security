@@ -429,3 +429,154 @@ def test_only_the_ceo_role_approves_an_employee_status_change_and_super_admin_do
         user_id=USER_ID, tenant_id=None, permission_key="hr.employee.status_approve"
     )
     assert ceo.allowed is True and ceo.role_key == "CEO"
+
+
+class _CountingRepository(FakeAuthorizationRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: dict[str, int] = {}
+
+    def _count(self, name: str) -> None:
+        self.reads[name] = self.reads.get(name, 0) + 1
+
+    def human_for_user_id(self, user_id: str) -> dict[str, Any] | None:
+        self._count("human_for_user_id")
+        return super().human_for_user_id(user_id)
+
+    def active_admin_assignments(self, user_id: str) -> list[dict[str, Any]]:
+        self._count("active_admin_assignments")
+        return super().active_admin_assignments(user_id)
+
+    def active_operating_role(self, *, user_id: str, tenant_id: str) -> str | None:
+        self._count("active_operating_role")
+        return super().active_operating_role(user_id=user_id, tenant_id=tenant_id)
+
+
+def _service_with_token(repo: FakeAuthorizationRepository) -> tuple[AuthorizationCheckService, str]:
+    tokens = _token_service()
+    token = tokens.issue_service_token(
+        ServiceTokenClaims(
+            subject="audit-core",
+            audience="security",
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
+        )
+    )
+    return AuthorizationCheckService(repo, tokens), token
+
+
+def test_batch_check_gives_exactly_the_single_answers_in_the_order_asked() -> None:
+    repo = _CountingRepository()
+    repo.operating_roles[TENANT_A] = "PC"
+    repo.role_permissions.add((TENANT_A, "PC", "audit.project.read"))
+    service, token = _service_with_token(repo)
+    keys = [
+        "audit.journey.update",  # active permission the role does not hold
+        "audit.project.read",  # held
+        "no.such.permission",  # not registered
+        "di.document.read",  # active permission the role does not hold
+        "audit.project.read",  # asked twice: answered twice, same way
+    ]
+
+    many = service.check_many(
+        service_token=token, user_id=USER_ID, tenant_id=TENANT_A, permission_keys=keys
+    )
+    single = [
+        service.check(
+            service_token=token, user_id=USER_ID, tenant_id=TENANT_A, permission_key=key
+        )
+        for key in keys
+    ]
+
+    assert many == single
+    assert [d.permission_key for d in many] == keys
+    assert [d.allowed for d in many] == [False, True, False, False, True]
+
+
+def test_batch_check_reads_the_user_once_not_once_per_permission() -> None:
+    repo = _CountingRepository()
+    repo.operating_roles[TENANT_A] = "PC"
+    service, token = _service_with_token(repo)
+    keys = ["audit.project.read", "audit.master.publish", "audit.journey.update", "di.document.read"]
+
+    service.check_many(
+        service_token=token, user_id=USER_ID, tenant_id=TENANT_A, permission_keys=keys
+    )
+
+    assert repo.reads["human_for_user_id"] == 1
+    assert repo.reads["active_admin_assignments"] == 1
+    assert repo.reads["active_operating_role"] == 1
+
+    repo.reads.clear()
+    for key in keys:
+        service.check(service_token=token, user_id=USER_ID, tenant_id=TENANT_A, permission_key=key)
+    assert repo.reads["human_for_user_id"] == len(keys)  # the single check is unchanged
+
+
+def test_batch_check_keeps_the_hr_rules_for_super_admin_and_module_roles() -> None:
+    repo = _hr_repo()
+    repo.permissions["hr.employee.status_approve"] = "hr"
+    repo.admin_assignments = [
+        {"role_key": "SuperAdmin", "scope_type": "PLATFORM", "scope_id": None}
+    ]
+    service, token = _service_with_token(repo)
+    keys = ["hr.payroll.read", "hr.payroll.approve", "hr.employee.status_approve"]
+
+    many = service.check_many(
+        service_token=token, user_id=USER_ID, tenant_id=None, permission_keys=keys
+    )
+
+    assert [d.allowed for d in many] == [True, False, False]  # SuperAdmin never gets the CEO-only two
+    assert [d.reason_code for d in many][0] == "ALLOW_SUPER_ADMIN"
+
+
+def test_batch_check_needs_the_same_service_token_as_the_single_check() -> None:
+    repo = FakeAuthorizationRepository()
+    tokens = _token_service()
+    service = AuthorizationCheckService(repo, tokens)
+    wrong_audience = tokens.issue_service_token(
+        ServiceTokenClaims(
+            subject="audit-core",
+            audience="di",
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
+        )
+    )
+    with pytest.raises(SecurityError) as wrong:
+        service.check_many(
+            service_token=wrong_audience,
+            user_id=USER_ID,
+            tenant_id=None,
+            permission_keys=["audit.project.read"],
+        )
+    assert wrong.value.code == "AUTH_TOKEN_INVALID"
+
+    good = tokens.issue_service_token(
+        ServiceTokenClaims(
+            subject="audit-core",
+            audience="security",
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
+        )
+    )
+    repo.service_active = False
+    with pytest.raises(SecurityError) as unregistered:
+        service.check_many(
+            service_token=good,
+            user_id=USER_ID,
+            tenant_id=None,
+            permission_keys=["audit.project.read"],
+        )
+    assert unregistered.value.code == "AUTH_TOKEN_INVALID"
+
+
+def test_batch_request_rejects_blank_keys_and_too_many_and_trims() -> None:
+    from pydantic import ValidationError
+
+    from verigence_security.api.authorization_schemas import (
+        MAX_BATCH_PERMISSIONS,
+        AuthorizationBatchCheckRequest,
+    )
+
+    ok = AuthorizationBatchCheckRequest(userId=USER_ID, permissionKeys=["  hr.payroll.read "])
+    assert ok.permissionKeys == ["hr.payroll.read"]
+    for bad in ([], ["   "], ["x" * 181], ["a.b"] * (MAX_BATCH_PERMISSIONS + 1)):
+        with pytest.raises(ValidationError):
+            AuthorizationBatchCheckRequest(userId=USER_ID, permissionKeys=bad)

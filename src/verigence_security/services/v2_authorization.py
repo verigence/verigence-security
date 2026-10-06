@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from verigence_security.core.errors import security_error
 from verigence_security.services.token_service import TokenService
@@ -392,6 +393,41 @@ class HumanAuthorizationResolver:
         )
 
 
+class _RequestScopedRepository:
+    """Wraps a repository for ONE batch request. A read that the batch asks again with the same
+    arguments (who the user is, their roles, the tenant status) is answered from the first answer, so
+    asking 18 questions about the same person reads that person once, not 18 times. Nothing is kept
+    after the request, and every decision is still made by the same resolver."""
+
+    _REUSED = frozenset(
+        {
+            "human_for_user_id",
+            "tenant_status",
+            "active_admin_assignments",
+            "active_module_roles",
+            "active_operating_role",
+            "active_test_identity_for_user",
+        }
+    )
+
+    def __init__(self, inner: AuthorizationRepository) -> None:
+        self._inner = inner
+        self._answers: dict[tuple[Any, ...], Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._inner, name)
+        if name not in self._REUSED:
+            return target
+
+        def reused(*args: Any, **kwargs: Any) -> Any:
+            key = (name, args, tuple(sorted(kwargs.items())))
+            if key not in self._answers:
+                self._answers[key] = cast(Callable[..., Any], target)(*args, **kwargs)
+            return self._answers[key]
+
+        return reused
+
+
 class AuthorizationCheckService:
     """Authenticate the backend caller and make one synchronous human AuthZ decision."""
 
@@ -399,6 +435,14 @@ class AuthorizationCheckService:
         self.repository = repository
         self.tokens = tokens
         self.humans = HumanAuthorizationResolver(repository)
+
+    def _authenticate(self, service_token: str) -> None:
+        claims = self.tokens.verify_service_token(service_token, audience="security")
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject.strip():
+            raise security_error("AUTH_TOKEN_INVALID")
+        if not self.repository.active_service_integration(subject):
+            raise security_error("AUTH_TOKEN_INVALID")
 
     def check(
         self,
@@ -408,14 +452,28 @@ class AuthorizationCheckService:
         tenant_id: str | None,
         permission_key: str,
     ) -> AuthorizationDecision:
-        claims = self.tokens.verify_service_token(service_token, audience="security")
-        subject = claims.get("sub")
-        if not isinstance(subject, str) or not subject.strip():
-            raise security_error("AUTH_TOKEN_INVALID")
-        if not self.repository.active_service_integration(subject):
-            raise security_error("AUTH_TOKEN_INVALID")
+        self._authenticate(service_token)
         return self.humans.check(
             user_id=user_id,
             tenant_id=tenant_id,
             permission_key=permission_key,
         )
+
+    def check_many(
+        self,
+        *,
+        service_token: str,
+        user_id: str,
+        tenant_id: str | None,
+        permission_keys: Sequence[str],
+    ) -> list[AuthorizationDecision]:
+        """One decision per permission, in the order asked, each exactly what `check` would give.
+        The caller is authenticated once, and the user's own records are read once for the batch."""
+        self._authenticate(service_token)
+        resolver = HumanAuthorizationResolver(
+            cast(AuthorizationRepository, _RequestScopedRepository(self.repository))
+        )
+        return [
+            resolver.check(user_id=user_id, tenant_id=tenant_id, permission_key=key)
+            for key in permission_keys
+        ]
