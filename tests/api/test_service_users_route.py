@@ -401,3 +401,73 @@ def test_employee_sync_reports_each_user_and_needs_the_service_guard(monkeypatch
     _caller(monkeypatch, subject="audit-core")
     assert client.post("/security/v1/service/users/employee-sync", json=body, headers=AUTH).status_code == 403
     assert client.post("/security/v1/service/users/employee-sync", json={"items": []}, headers=AUTH).status_code == 422
+
+
+def _contact(monkeypatch: pytest.MonkeyPatch, *, raises: Exception | None = None) -> list[dict[str, object]]:
+    from verigence_security.services.service_contact_change import ContactChangeResult
+
+    _caller(monkeypatch)
+    app.dependency_overrides[platform_session] = lambda: _PasswordSession(None)
+    _fake_clerk(monkeypatch, confirms=True)
+    seen: list[dict[str, object]] = []
+
+    class _Change:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        def change(self, **kwargs: object) -> ContactChangeResult:
+            seen.append(kwargs)
+            if raises is not None:
+                raise raises
+            return ContactChangeResult(USER, "new@example.test", None, True, False, True)
+
+    monkeypatch.setattr(service_users, "ServiceContactChange", _Change)
+    return seen
+
+
+def test_allowed_integration_changes_the_email_of_a_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _contact(monkeypatch)
+    response = client.post(
+        f"/security/v1/service/users/{USER}/contact", json={"email": "new@example.test"}, headers=AUTH
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "userId": USER,
+        "email": "new@example.test",
+        "mobile": None,
+        "emailChanged": True,
+        "mobileChanged": False,
+        "oldEmailRemoved": True,
+    }
+    assert seen[0]["email"] == "new@example.test" and seen[0]["mobile"] is None
+
+
+def test_contact_change_errors_are_told_apart(monkeypatch: pytest.MonkeyPatch) -> None:
+    from verigence_security.adapters.clerk_backend import ClerkBackendError
+    from verigence_security.services.service_contact_change import ContactConflict
+    from verigence_security.services.v2_platform_user_create import InvalidUserInput
+
+    cases: list[tuple[Exception, int]] = [
+        (InvalidUserInput("bad"), 422),
+        (LookupError("none"), 404),
+        (ContactConflict("taken"), 409),
+        (ValueError("no identity"), 409),
+        (ClerkBackendError("x", status_code=422, provider_code="form_identifier_exists"), 409),
+        (ClerkBackendError("x", status_code=503), 502),
+    ]
+    for error, expected in cases:
+        _contact(monkeypatch, raises=error)
+        response = client.post(
+            f"/security/v1/service/users/{USER}/contact", json={"email": "a@example.test"}, headers=AUTH
+        )
+        assert response.status_code == expected, (error, response.text)
+
+
+def test_contact_change_refuses_other_integrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _contact(monkeypatch)
+    _caller(monkeypatch, subject="audit-core")
+    app.dependency_overrides[platform_session] = lambda: _PasswordSession(None)
+    response = client.post(
+        f"/security/v1/service/users/{USER}/contact", json={"email": "a@example.test"}, headers=AUTH
+    )
+    assert response.status_code == 403 and seen == []

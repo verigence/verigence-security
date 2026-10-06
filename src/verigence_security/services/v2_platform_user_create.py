@@ -81,8 +81,9 @@ class V2PlatformUserCreateService:
     ) -> CreatedUser:
         """Creation by an authenticated, explicitly allowed ServiceIntegration (the HR service
         creating an employee's login). Same rules and same transient password as the SuperAdmin
-        path, but the user starts PENDING (no OTP step): it appears under Pending Approvals and can
-        sign in only after SuperAdmin allows it. The audit record names the integration."""
+        path: the user is an employee created by HR, so it starts ACTIVE (no OTP step, no SuperAdmin
+        approval; approval is needed only for users who are not employees). The audit record names
+        the integration."""
         return self._create_user(
             first_name=first_name,
             last_name=last_name,
@@ -94,7 +95,7 @@ class V2PlatformUserCreateService:
             service_integration_key=service_integration_key,
             correlation_id=correlation_id,
             clerk=clerk,
-            initial_status="PENDING",
+            initial_status="ACTIVE",
         )
 
     def _create_user(

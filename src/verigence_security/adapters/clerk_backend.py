@@ -413,6 +413,82 @@ class ClerkBackendClient:
     def unban_user(self, clerk_user_id: str) -> None:
         self._request_object("POST", f"/users/{clerk_user_id}/unban")
 
+    def replace_primary_email(self, clerk_user_id: str, new_email: str) -> str | None:
+        """Make `new_email` the verified primary email of this Clerk user, keeping the same user.
+
+        The new address is added and checked BEFORE the old one is touched (the provider needs at
+        least one verified email at all times). Safe to repeat: an address that is already there,
+        verified or primary is left as it is. Returns the previous primary email, or None.
+        Nothing is deleted here; see `remove_other_emails`."""
+        wanted = new_email.strip().lower()
+        user = self.get_user(clerk_user_id)
+        previous = self.primary_email(clerk_user_id)
+        created_id: str | None = None
+        try:
+            item = self._find_email_item(user, wanted)
+            if item is None:
+                added = self._request_object(
+                    "POST",
+                    "/email_addresses",
+                    json={
+                        "user_id": clerk_user_id,
+                        "email_address": wanted,
+                        "primary": False,
+                        "verified": True,
+                    },
+                )
+                created_id = added.get("id") if isinstance(added.get("id"), str) else None
+                user = self.get_user(clerk_user_id)
+                item = self._email_item(user, wanted)
+            address_id = item.get("id")
+            if not isinstance(address_id, str) or not address_id:
+                raise ClerkBackendError("Clerk did not return the new email address ID")
+            verification = item.get("verification")
+            if not isinstance(verification, dict) or verification.get("status") != "verified":
+                raise ClerkBackendError("The new email address is not verified at Clerk")
+            if user.get("primary_email_address_id") != address_id:
+                self._request_object(
+                    "PATCH",
+                    f"/email_addresses/{address_id}",
+                    json={"primary": True, "verified": True},
+                )
+                if self.get_user(clerk_user_id).get("primary_email_address_id") != address_id:
+                    raise ClerkBackendError("The new email address did not become primary")
+        except Exception:
+            if created_id is not None:
+                # What this call added is taken back, unless it has become the primary one.
+                with suppress(Exception):
+                    if self.get_user(clerk_user_id).get("primary_email_address_id") != created_id:
+                        self._request_json("DELETE", f"/email_addresses/{created_id}", allow_empty=True)
+            raise
+        return previous
+
+    def remove_other_emails(self, clerk_user_id: str, keep_email: str) -> int:
+        """Delete every email address of this Clerk user except `keep_email` (which must be primary).
+        Returns how many were removed. Refuses to run if `keep_email` is not the primary."""
+        user = self.get_user(clerk_user_id)
+        keep = self._find_email_item(user, keep_email.strip().lower())
+        if keep is None or user.get("primary_email_address_id") != keep.get("id"):
+            raise ClerkBackendError("The email to keep is not the primary email")
+        removed = 0
+        for item in user.get("email_addresses") or []:
+            if not isinstance(item, dict) or item.get("id") == keep.get("id"):
+                continue
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                self._request_json("DELETE", f"/email_addresses/{item_id}", allow_empty=True)
+                removed += 1
+        return removed
+
+    @staticmethod
+    def _find_email_item(user: dict[str, Any], email: str) -> dict[str, Any] | None:
+        for item in user.get("email_addresses") or []:
+            if isinstance(item, dict):
+                value = item.get("email_address")
+                if isinstance(value, str) and value.strip().lower() == email:
+                    return item
+        return None
+
     def _reconcile_email_verification(self, email_address_id: str) -> bool:
         """Observe Clerk's EmailAddress state without spending another OTP attempt."""
 
