@@ -51,8 +51,9 @@ GLOBAL_MODULE_ROLE_MODULES = frozenset({"attendance", "hr"})
 
 
 # Permissions SuperAdmin does not get through its blanket access. They are held only through the
-# module role named for them: approving a payroll run belongs to the CEO role alone.
-SUPER_ADMIN_EXCLUDED_PERMISSIONS = frozenset({"hr.payroll.approve"})
+# module role named for them: approving a payroll run, or an employee's status change, belongs to
+# the CEO role alone.
+SUPER_ADMIN_EXCLUDED_PERMISSIONS = frozenset({"hr.payroll.approve", "hr.employee.status_approve"})
 
 
 class AuthorizationRepository(Protocol):
