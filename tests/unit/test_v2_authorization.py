@@ -580,3 +580,90 @@ def test_batch_request_rejects_blank_keys_and_too_many_and_trims() -> None:
     for bad in ([], ["   "], ["x" * 181], ["a.b"] * (MAX_BATCH_PERMISSIONS + 1)):
         with pytest.raises(ValidationError):
             AuthorizationBatchCheckRequest(userId=USER_ID, permissionKeys=bad)
+
+
+class _BulkRepository(FakeAuthorizationRepository):
+    """A repository that can read many permissions, and a module role's permissions, in one query each."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queries: dict[str, int] = {}
+
+    def _q(self, name: str) -> None:
+        self.queries[name] = self.queries.get(name, 0) + 1
+
+    def active_permission(self, permission_key: str) -> dict[str, Any] | None:
+        self._q("active_permission")
+        return super().active_permission(permission_key)
+
+    def module_role_has_permission(
+        self, *, module_key: str, role_key: str, permission_key: str
+    ) -> bool:
+        self._q("module_role_has_permission")
+        return super().module_role_has_permission(
+            module_key=module_key, role_key=role_key, permission_key=permission_key
+        )
+
+    def active_permissions(self, permission_keys: Any) -> dict[str, dict[str, Any]]:
+        self._q("active_permissions")
+        found: dict[str, dict[str, Any]] = {}
+        for key in permission_keys:
+            row = FakeAuthorizationRepository.active_permission(self, key)
+            if row is not None:
+                found[key] = row
+        return found
+
+    def module_role_permission_keys(self, *, module_key: str, role_key: str) -> set[str]:
+        self._q("module_role_permission_keys")
+        return {
+            permission
+            for (module, role, permission) in self.module_role_permissions
+            if module == module_key and role == role_key
+        }
+
+
+def _hr_world(repo: FakeAuthorizationRepository) -> list[str]:
+    for key in ("hr.a", "hr.b", "hr.c", "hr.d", "hr.e", "hr.f"):
+        repo.permissions[key] = "hr"
+    repo.module_roles["hr"] = ["HRADMIN"]
+    repo.module_role_permissions.update({("hr", "HRADMIN", "hr.a"), ("hr", "HRADMIN", "hr.c")})
+    return ["hr.a", "hr.b", "hr.c", "hr.d", "hr.e", "hr.f", "hr.unknown"]
+
+
+def test_fast_batch_gives_the_same_answers_as_the_slow_one_with_far_fewer_reads() -> None:
+    plain = FakeAuthorizationRepository()
+    keys = _hr_world(plain)
+    plain_service, plain_token = _service_with_token(plain)
+    slow = plain_service.check_many(
+        service_token=plain_token, user_id=USER_ID, tenant_id=None, permission_keys=keys
+    )
+
+    bulk = _BulkRepository()
+    _hr_world(bulk)
+    bulk_service, bulk_token = _service_with_token(bulk)
+    fast = bulk_service.check_many(
+        service_token=bulk_token, user_id=USER_ID, tenant_id=None, permission_keys=keys
+    )
+
+    assert fast == slow
+    assert [d.allowed for d in fast] == [True, False, True, False, False, False, False]
+    # the permissions came in one read, and the role's permissions once, not once per permission
+    assert bulk.queries.get("active_permissions") == 1
+    assert "active_permission" not in bulk.queries
+    assert bulk.queries.get("module_role_permission_keys") == 1
+    assert "module_role_has_permission" not in bulk.queries
+
+
+def test_fast_batch_keeps_the_super_admin_exclusions() -> None:
+    bulk = _BulkRepository()
+    bulk.permissions["hr.payroll.read"] = "hr"
+    bulk.permissions["hr.payroll.approve"] = "hr"
+    bulk.admin_assignments = [{"role_key": "SuperAdmin", "scope_type": "PLATFORM", "scope_id": None}]
+    service, token = _service_with_token(bulk)
+    got = service.check_many(
+        service_token=token,
+        user_id=USER_ID,
+        tenant_id=None,
+        permission_keys=["hr.payroll.read", "hr.payroll.approve"],
+    )
+    assert [d.allowed for d in got] == [True, False]

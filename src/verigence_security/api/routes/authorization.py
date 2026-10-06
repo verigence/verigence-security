@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Security
@@ -24,6 +26,7 @@ from verigence_security.services.v2_authorization import (
     AuthorizationDecision,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/security/v1", tags=["Authorization"])
 
 service_bearer = HTTPBearer(
@@ -68,6 +71,7 @@ def authorization_check_batch(
 ) -> AuthorizationBatchCheckResponse:
     """Up to 64 permission questions about one user in one call. Each answer is exactly what the
     single check gives; the caller is authenticated once and the user is read once."""
+    started = time.perf_counter()
     decisions = AuthorizationCheckService(
         V2AuthorizationRepository(session),
         TokenService(settings),
@@ -76,6 +80,13 @@ def authorization_check_batch(
         user_id=str(body.userId),
         tenant_id=str(body.tenantId) if body.tenantId is not None else None,
         permission_keys=body.permissionKeys,
+    )
+    # Only a count and a time, so the cost of a batch can be read from the logs.
+    logger.info(
+        "authorization_check_batch permissions=%d allowed=%d ms=%d",
+        len(decisions),
+        sum(1 for d in decisions if d.allowed),
+        round((time.perf_counter() - started) * 1000),
     )
     return AuthorizationBatchCheckResponse(decisions=[_response(d) for d in decisions])
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 
@@ -73,6 +74,46 @@ class V2AuthorizationRepository:
             .first()
         )
         return dict(row) if row is not None else None
+
+    def active_permissions(self, permission_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """The same rows `active_permission` gives, for many keys in ONE query. A key that is not an
+        active permission is simply absent."""
+        if not permission_keys:
+            return {}
+        rows = self.s.execute(
+            text(
+                """
+                SELECT permission_key,module_key,resource_key,action_key,status
+                FROM security.permissions
+                WHERE permission_key IN :permission_keys
+                  AND status='ACTIVE'
+                """
+            ).bindparams(bindparam("permission_keys", expanding=True)),
+            {"permission_keys": list(permission_keys)},
+        ).mappings()
+        return {str(row["permission_key"]): dict(row) for row in rows}
+
+    def module_role_permission_keys(self, *, module_key: str, role_key: str) -> set[str]:
+        """Every active permission one module role holds, in ONE query: what
+        `module_role_has_permission` answers one permission at a time."""
+        return {
+            str(value)
+            for value in self.s.execute(
+                text(
+                    """
+                    SELECT rp.permission_key
+                    FROM security.module_role_permissions rp
+                    JOIN security.permissions p
+                      ON p.permission_key=rp.permission_key
+                     AND p.status='ACTIVE'
+                    WHERE rp.module_key=:module_key
+                      AND rp.role_key=:role_key
+                      AND rp.status='ACTIVE'
+                    """
+                ),
+                {"module_key": module_key, "role_key": role_key},
+            ).scalars()
+        }
 
     def tenant_status(self, tenant_id: str) -> str | None:
         value = self.s.execute(

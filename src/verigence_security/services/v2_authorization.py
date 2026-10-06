@@ -394,10 +394,12 @@ class HumanAuthorizationResolver:
 
 
 class _RequestScopedRepository:
-    """Wraps a repository for ONE batch request. A read that the batch asks again with the same
-    arguments (who the user is, their roles, the tenant status) is answered from the first answer, so
-    asking 18 questions about the same person reads that person once, not 18 times. Nothing is kept
-    after the request, and every decision is still made by the same resolver."""
+    """Wraps a repository for ONE batch request so that asking many questions about the same person
+    does not read the same things over and over. A read the batch repeats (who the user is, their
+    roles, the tenant status) is answered from the first answer. When the repository can, the batch's
+    permissions are read in one query, and a module role's permissions are read once per role, instead
+    of one query per permission. Nothing is kept after the request, and every decision is still made by
+    the same resolver, so the answers are the same as the single check gives."""
 
     _REUSED = frozenset(
         {
@@ -410,9 +412,34 @@ class _RequestScopedRepository:
         }
     )
 
-    def __init__(self, inner: AuthorizationRepository) -> None:
+    def __init__(self, inner: AuthorizationRepository, permission_keys: Sequence[str] = ()) -> None:
         self._inner = inner
+        self._keys = list(dict.fromkeys(permission_keys))
         self._answers: dict[tuple[Any, ...], Any] = {}
+        self._permissions: dict[str, dict[str, Any]] | None = None
+        self._module_role_keys: dict[tuple[str, str], set[str]] = {}
+
+    def active_permission(self, permission_key: str) -> dict[str, Any] | None:
+        bulk = getattr(self._inner, "active_permissions", None)
+        if bulk is None or permission_key not in self._keys:
+            return self._inner.active_permission(permission_key)
+        if self._permissions is None:
+            self._permissions = bulk(self._keys)
+        found = self._permissions.get(permission_key)
+        return dict(found) if found is not None else None
+
+    def module_role_has_permission(
+        self, *, module_key: str, role_key: str, permission_key: str
+    ) -> bool:
+        bulk = getattr(self._inner, "module_role_permission_keys", None)
+        if bulk is None:
+            return self._inner.module_role_has_permission(
+                module_key=module_key, role_key=role_key, permission_key=permission_key
+            )
+        pair = (module_key, role_key)
+        if pair not in self._module_role_keys:
+            self._module_role_keys[pair] = set(bulk(module_key=module_key, role_key=role_key))
+        return permission_key in self._module_role_keys[pair]
 
     def __getattr__(self, name: str) -> Any:
         target = getattr(self._inner, name)
@@ -471,7 +498,10 @@ class AuthorizationCheckService:
         The caller is authenticated once, and the user's own records are read once for the batch."""
         self._authenticate(service_token)
         resolver = HumanAuthorizationResolver(
-            cast(AuthorizationRepository, _RequestScopedRepository(self.repository))
+            cast(
+                AuthorizationRepository,
+                _RequestScopedRepository(self.repository, permission_keys),
+            )
         )
         return [
             resolver.check(user_id=user_id, tenant_id=tenant_id, permission_key=key)
