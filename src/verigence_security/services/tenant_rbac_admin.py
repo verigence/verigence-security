@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import text
+from sqlalchemy import ScalarResult, text
 from sqlalchemy.orm import Session
 
 
@@ -757,7 +757,7 @@ class TenantRbacAdminService:
         group_id: str,
         now: datetime,
     ) -> list[str]:
-        rows = self.s.execute(
+        rows: ScalarResult[str] = self.s.execute(
             text(
                 """
                 SELECT gm.user_id
@@ -783,7 +783,7 @@ class TenantRbacAdminService:
         role_id: str,
         now: datetime,
     ) -> list[str]:
-        rows = self.s.execute(
+        rows: ScalarResult[str] = self.s.execute(
             text(
                 """
                 SELECT DISTINCT user_id

@@ -113,7 +113,7 @@ class DeviceSessionLifecycleRepository:
         return dict(row) if row else None
 
     def count_active_devices(self, *, tenant_id: str, user_id: str) -> int:
-        value = self.s.execute(
+        value: int = self.s.execute(
             text(
                 """
                 SELECT count(*)

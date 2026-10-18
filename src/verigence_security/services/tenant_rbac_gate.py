@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import NoReturn
 from uuid import uuid4
 
-from sqlalchemy import text
+from sqlalchemy import ScalarResult, text
 from sqlalchemy.exc import IntegrityError
 
 from verigence_security.core.errors import ERRORS, SecurityError
@@ -214,7 +214,7 @@ class TenantRbacGateService(TenantRbacAdminService):
         group_id: str,
         now: datetime,
     ) -> list[str]:
-        rows = self.s.execute(
+        rows: ScalarResult[str] = self.s.execute(
             text(
                 """
                 SELECT gm.user_id
@@ -238,7 +238,7 @@ class TenantRbacGateService(TenantRbacAdminService):
         role_id: str,
         now: datetime,
     ) -> list[str]:
-        rows = self.s.execute(
+        rows: ScalarResult[str] = self.s.execute(
             text(
                 """
                 SELECT DISTINCT user_id

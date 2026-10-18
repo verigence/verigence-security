@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import ScalarResult, text
 
 from verigence_security.api.dependencies import bearer_token, identity_from_token, repository
 from verigence_security.config import Settings, get_settings
@@ -98,7 +98,7 @@ def _details(repo: SecurityRepository, tenant_id: str, role_id: str) -> dict[str
     role = _service(repo).get_role(tenant_id, role_id)
     if role is None:
         raise LookupError("Role not found")
-    permissions = list(
+    permissions: list[str] = list(
         repo.s.execute(
             text(
                 """
@@ -268,7 +268,7 @@ def _affected_users(
     role_id: str,
     now: datetime,
 ) -> list[str]:
-    rows = repo.s.execute(
+    rows: ScalarResult[str] = repo.s.execute(
         text(
             """
             SELECT DISTINCT user_id FROM (

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import text
+from sqlalchemy import ScalarResult, text
 from sqlalchemy.orm import Session
 
 SECURITY_ADMIN_PERMISSION_KEYS: frozenset[str] = frozenset(
@@ -410,19 +410,17 @@ class StandardTenantAdminRoleSeeder:
             return
 
         role_id = str(existing["role_id"])
-        actual_permissions = frozenset(
-            str(value)
-            for value in self.s.execute(
-                text(
-                    """
-                    SELECT permission_key
-                    FROM security.role_permissions
-                    WHERE tenant_id=:tenant_id AND role_id=:role_id
-                    """
-                ),
-                {"tenant_id": tenant_id, "role_id": role_id},
-            ).scalars()
-        )
+        permission_keys: ScalarResult[str] = self.s.execute(
+            text(
+                """
+                SELECT permission_key
+                FROM security.role_permissions
+                WHERE tenant_id=:tenant_id AND role_id=:role_id
+                """
+            ),
+            {"tenant_id": tenant_id, "role_id": role_id},
+        ).scalars()
+        actual_permissions = frozenset(str(value) for value in permission_keys)
         expected_metadata = (
             definition.role_name,
             definition.description,
