@@ -4,7 +4,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-OperatingRoleKey = Literal["PC", "TL", "PM", "CRM", "Executive"]
+# The operating roles a Tenant may assign. Casing is the contract Audit Core
+# sends on its operating-role call, so "Executive" is capitalised and the rest
+# are codes. Kept in step with security.role_definitions, where migration 0046
+# added REVIEWER, and with the CHECK on user_tenant_operating_roles.role_key.
+OperatingRoleKey = Literal["PC", "TL", "PM", "CRM", "Executive", "REVIEWER"]
 RoleClass = Literal["OPERATING", "ADMIN", "TEST"]
 RoleStatus = Literal["ACTIVE", "INACTIVE"]
 
