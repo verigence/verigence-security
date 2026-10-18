@@ -81,27 +81,51 @@ def test_catalog_filename_matches_its_module_and_version(path: Path) -> None:
     assert path.stem == f"{raw['moduleKey']}-v{raw['catalogVersion']}"
 
 
-def test_audit_catalog_carries_the_five_operating_roles() -> None:
-    """The operating roles Audit Core maps people to: PC, TL, PM, CRM and
-    REVIEWER (AUDIT_CORE_DEFAULT_ROLE_BUNDLES_v1.1). Executive is intentionally
-    absent -- that document does not define its permission set.
-
-    REVIEWER differs from CRM by exactly one permission, `audit.journey.update`:
-    a Reviewer corrects what Document Intelligence read wrongly, where CRM
-    reads only. It withholds `audit.evidence.upload` so a Reviewer cannot
-    upload, and the whole `audit.work.*` family so they cannot close a task.
-    """
+def _audit_templates() -> dict[str, set[str]]:
     raw = json.loads(Path("catalogs/audit-v2.2.json").read_text())
-    templates = {item["name"]: set(item["permissions"]) for item in raw["roleTemplates"]}
+    return {item["name"]: set(item["permissions"]) for item in raw["roleTemplates"]}
 
-    assert set(templates) == {"PC", "TL", "PM", "CRM", "REVIEWER"}
 
+def test_audit_catalog_carries_the_six_operating_roles() -> None:
+    """The operating roles Audit Core maps people to
+    (AUDIT_CORE_DEFAULT_ROLE_BUNDLES_v1.1)."""
+    assert set(_audit_templates()) == {"PC", "TL", "PM", "CRM", "REVIEWER", "EXECUTIVE"}
+
+
+def test_reviewer_may_correct_a_value_but_not_upload_or_close_a_task() -> None:
+    """REVIEWER differs from CRM by exactly one permission,
+    `audit.journey.update`: a Reviewer corrects what Document Intelligence read
+    wrongly, where CRM reads only.
+
+    The limits are what the token withholds rather than a role-name check in
+    Audit Core, so they are asserted here where the bundle is defined.
+    """
+    templates = _audit_templates()
     reviewer = templates["REVIEWER"]
+
     assert "audit.journey.read" in reviewer
     assert "audit.journey.update" in reviewer
     assert "audit.evidence.upload" not in reviewer
     assert not {key for key in reviewer if key.startswith("audit.work.")}
     assert not {key for key in reviewer if key.endswith(".verify")}
 
-    assert reviewer - templates["CRM"] >= {"audit.journey.update"}
+    assert reviewer - templates["CRM"] == {"audit.journey.update", "audit.master.read",
+                                           "audit.evidence.refresh", "audit.analytics.read"}
     assert "audit.journey.update" not in templates["CRM"]
+
+
+def test_executive_holds_every_audit_privilege() -> None:
+    """Executive holds all audit privileges across the whole project (owner
+    decision 2026-10-18), so its bundle is the module's permission set itself.
+
+    Asserted against the catalogue's own permissions rather than a fixed list,
+    so a permission added to the module and not to Executive fails here instead
+    of quietly leaving Executive short of a privilege it is meant to have.
+    """
+    raw = json.loads(Path("catalogs/audit-v2.2.json").read_text())
+    every_permission = {item["key"] for item in raw["permissions"]}
+    templates = _audit_templates()
+
+    assert templates["EXECUTIVE"] == every_permission
+    for role, permissions in templates.items():
+        assert permissions <= templates["EXECUTIVE"], f"{role} exceeds Executive"
