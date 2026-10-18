@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from functools import lru_cache
-from uuid import uuid4
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
