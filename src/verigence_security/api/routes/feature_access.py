@@ -11,6 +11,7 @@ from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
 from verigence_security.services.feature_access import FeatureAccessService
 from verigence_security.services.v2_human_actor import HumanActorContext
+from verigence_security.services.v2_user_directory import V2UserDirectoryService
 
 router = APIRouter(prefix="/security/v1", tags=["Feature access"])
 
@@ -19,6 +20,11 @@ FeatureKeyPath = Literal["AUDIT", "ANALYTICS"]
 
 class MyFeaturesResponse(BaseModel):
     features: dict[str, bool]
+
+
+class MyProfileResponse(BaseModel):
+    userId: str
+    displayName: str | None
 
 
 class EveryoneBody(BaseModel):
@@ -47,6 +53,17 @@ def my_features(
     return MyFeaturesResponse(
         features=FeatureAccessService(session).resolve(user_id=actor.user_id, is_super_admin=actor.is_super_admin)
     )
+
+
+@router.get("/me/profile", response_model=MyProfileResponse)
+def my_profile(
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> MyProfileResponse:
+    """The signed-in person's own name, so apps can show and record who did something."""
+    row = V2UserDirectoryService(session).get_user(actor.user_id)
+    name = " ".join(str(row["display_name"] or "").split()) if row else ""
+    return MyProfileResponse(userId=actor.user_id, displayName=name or None)
 
 
 @router.get("/admin/features")
