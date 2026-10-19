@@ -88,3 +88,19 @@ def test_unknown_feature_and_extra_fields_are_refused(monkeypatch: pytest.Monkey
     assert client.put("/security/v1/admin/features/PAYROLL/everyone", json={"enabled": True}).status_code == 422
     assert client.put("/security/v1/admin/features/AUDIT/everyone", json={"enabled": True, "x": 1}).status_code == 422
     assert calls == []
+
+
+def test_anyone_signed_in_reads_their_own_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    _as()
+
+    class _Directory:
+        def __init__(self, session: object) -> None:
+            _ = session
+
+        def get_user(self, user_id: str) -> dict[str, object] | None:
+            return {"user_id": user_id, "display_name": "  Priya   Sharma "}
+
+    monkeypatch.setattr(feature_access, "V2UserDirectoryService", _Directory)
+    r = client.get("/security/v1/me/profile")
+    assert r.status_code == 200
+    assert r.json() == {"userId": "00000000-0000-4000-8000-000000000001", "displayName": "Priya Sharma"}
