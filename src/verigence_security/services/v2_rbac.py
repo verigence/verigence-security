@@ -13,7 +13,10 @@ from sqlalchemy.orm import Session
 
 from verigence_security.repositories.v2_rbac_repository import V2RbacRepository
 
-OPERATING_ROLE_KEYS = frozenset({"PC", "TL", "PM", "CRM", "Executive"})
+# REVIEWER (migration 0046) is an assignable operating role like the other
+# five. It was missing here, so Role Mapping got HTTP 409 "Role must be an
+# ACTIVE Phase-1 operating role" for it on dev (23 Oct 2026).
+OPERATING_ROLE_KEYS = frozenset({"PC", "TL", "PM", "CRM", "Executive", "REVIEWER"})
 ADMIN_ROLE_SCOPES = {
     "SuperAdmin": "PLATFORM",
     "TenantAdmin": "TENANT",

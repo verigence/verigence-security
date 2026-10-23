@@ -126,3 +126,20 @@ def test_existing_tenants_are_backfilled() -> None:
     backfill = source.split("INSERT INTO security.tenant_role_permissions", 1)[1]
     assert "d.role_key='REVIEWER'" in backfill
     assert "ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING" in backfill
+
+
+def test_the_operating_role_check_accepts_an_active_reviewer_role() -> None:
+    """Assigning Reviewer in Role Mapping was refused with HTTP 409 on dev
+    (23 Oct 2026): the schema and migration 0046 accept REVIEWER, but
+    `_require_operating_role` also tests membership of OPERATING_ROLE_KEYS,
+    which still listed only the five foundation roles."""
+    from verigence_security.services.v2_rbac import OperatingRoleAssignmentService
+
+    class _Repository:
+        def role_definition(self, role_key: str) -> dict[str, str]:
+            return {"status": "ACTIVE", "role_class": "OPERATING"}
+
+    service = OperatingRoleAssignmentService.__new__(OperatingRoleAssignmentService)
+    service.repository = _Repository()  # type: ignore[assignment]
+    service._require_operating_role("REVIEWER")
+    service._require_operating_role("PC")
