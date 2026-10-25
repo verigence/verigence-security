@@ -1,0 +1,72 @@
+name: Ops smoke live Project Administration Security fix
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - .github/workflows/ops-project-admin-security-deploy-verify.yml
+
+permissions:
+  contents: read
+
+env:
+  PLATFORM_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+  SECURITY_SERVICE_ID: bf14bcdc-c224-4371-bbae-2f3fac97fc1a
+
+jobs:
+  smoke-live:
+    name: Verify latest Railway Security deployment and live routes
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+    steps:
+      - name: Install Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @railway/cli
+          railway --version
+
+      - name: Verify latest Railway Security deployment
+        id: railway
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway deployment list \
+            --service "$SECURITY_SERVICE_ID" \
+            --environment "$PLATFORM_ENVIRONMENT_ID" \
+            --limit 5 --json >/tmp/deployments.json
+          deployment_id="$(jq -r '.[0].id // empty' /tmp/deployments.json)"
+          status="$(jq -r '.[0].status // empty' /tmp/deployments.json)"
+          created_at="$(jq -r '.[0].createdAt // empty' /tmp/deployments.json)"
+          image_digest="$(jq -r '.[0].meta.imageDigest // empty' /tmp/deployments.json)"
+          echo "RAILWAY_SECURITY_DEPLOYMENT=$deployment_id"
+          echo "RAILWAY_SECURITY_STATUS=$status"
+          echo "RAILWAY_SECURITY_CREATED_AT=$created_at"
+          echo "RAILWAY_SECURITY_IMAGE_DIGEST=$image_digest"
+          [ -n "$deployment_id" ] || { echo "No Security deployment found" >&2; exit 1; }
+          [ "$status" = "SUCCESS" ] || { echo "Latest Security deployment is not SUCCESS" >&2; exit 1; }
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "SECURITY_LATEST_RAILWAY_DEPLOYMENT=PASS"
+
+      - name: Smoke live Security routes
+        shell: bash
+        env:
+          DEPLOYMENT_ID: ${{ steps.railway.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          health_status="$(curl --silent --show-error --max-time 5 --output /tmp/health.body --write-out '%{http_code}' https://security-dev.up.railway.app/health/live || true)"
+          echo "SECURITY_HEALTH_HTTP=$health_status"
+          [ "$health_status" = "200" ] || { cat /tmp/health.body || true; exit 1; }
+
+          admin_status="$(curl --silent --show-error --max-time 5 --output /tmp/admin.body --write-out '%{http_code}' https://security-dev.up.railway.app/security/v1/platform/admin-context || true)"
+          echo "SECURITY_ADMIN_CONTEXT_UNAUTH_HTTP=$admin_status"
+          [ "$admin_status" = "401" ] || { cat /tmp/admin.body || true; exit 1; }
+
+          echo "SECURITY_LIVE_HEALTH=PASS"
+          echo "SECURITY_ADMIN_ROUTE=PASS"
+          echo "SECURITY_DEPLOYMENT_ID=$DEPLOYMENT_ID"
+          echo "PROJECT_ADMIN_SECURITY_RUNTIME_SMOKE=PASS"
