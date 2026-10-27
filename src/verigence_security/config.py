@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # ServiceIntegrations (by integration_key, comma separated) allowed to create ACTIVE users
     # through POST /security/v1/service/users. Only the HR service is expected here.
     service_user_create_integrations: str = "hrmgmt"
+    # ServiceIntegrations allowed only to read people's display names by user id through
+    # GET /security/v1/service/user-names (2026-10-27: Audit Core shows names, not ids, in the
+    # Task Manager). Read-only: no email, no status changes, no user creation.
+    service_user_name_read_integrations: str = "hrmgmt,audit-core"
 
     security_token_issuer: str = "verigence-security"
     security_token_audience: str = "verigence-platform"

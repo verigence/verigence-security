@@ -471,3 +471,50 @@ def test_contact_change_refuses_other_integrations(monkeypatch: pytest.MonkeyPat
         f"/security/v1/service/users/{USER}/contact", json={"email": "a@example.test"}, headers=AUTH
     )
     assert response.status_code == 403 and seen == []
+
+
+class _NamesSession:
+    """The integration lookup, then the names query."""
+
+    def __init__(self, principal: str | None, names: list[tuple[str, str]]) -> None:
+        self.principal = principal
+        self.names = names
+        self.calls = 0
+
+    def execute(self, *_: object, **__: object) -> object:
+        self.calls += 1
+        if self.calls == 1:
+            return _Result((self.principal,) if self.principal else None)
+        names = self.names
+
+        class _Rows:
+            def all(self) -> list[tuple[str, str]]:
+                return names
+
+        return _Rows()
+
+    def rollback(self) -> None:
+        pass
+
+
+def _names_caller(monkeypatch: pytest.MonkeyPatch, subject: str, names: list[tuple[str, str]]) -> None:
+    _caller(monkeypatch, subject=subject)
+    app.dependency_overrides[platform_session] = lambda: _NamesSession(PRINCIPAL, names)
+
+
+def test_audit_core_reads_names_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    _names_caller(monkeypatch, "audit-core", [(USER, "Sample Person")])
+    response = client.get("/security/v1/service/user-names", params={"ids": USER}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json() == [{"userId": USER, "displayName": "Sample Person"}]
+
+
+def test_audit_core_still_cannot_use_the_hr_user_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _caller(monkeypatch, subject="audit-core")
+    assert client.get("/security/v1/service/users", params={"ids": USER}, headers=AUTH).status_code == 403
+    assert client.post("/security/v1/service/users", json=BODY, headers=AUTH).status_code == 403
+
+
+def test_names_refused_to_an_integration_not_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    _names_caller(monkeypatch, "di-worker", [])
+    assert client.get("/security/v1/service/user-names", params={"ids": USER}, headers=AUTH).status_code == 403

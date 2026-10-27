@@ -35,7 +35,9 @@ def _allowed_integrations(settings: Settings) -> frozenset[str]:
     return frozenset(key.strip() for key in settings.service_user_create_integrations.split(",") if key.strip())
 
 
-def _authorize_service(service_token: str, settings: Settings, session: Session) -> tuple[str, str]:
+def _authorize_service(
+    service_token: str, settings: Settings, session: Session, allowed: frozenset[str] | None = None,
+) -> tuple[str, str]:
     """Returns (service principal id, integration key) for an allowed ServiceIntegration, else raises."""
     claims = TokenService(settings).verify_service_token(service_token, audience="security")
     subject = str(claims.get("sub") or "").strip()
@@ -55,7 +57,7 @@ def _authorize_service(service_token: str, settings: Settings, session: Session)
     ).first()
     if row is None:
         raise security_error("AUTH_TOKEN_INVALID")
-    if subject not in _allowed_integrations(settings):
+    if subject not in (allowed if allowed is not None else _allowed_integrations(settings)):
         raise security_error("PERMISSION_DENIED")
     return str(row[0]), subject
 
@@ -435,3 +437,45 @@ def sync_employees_for_service(
             )
         )
     return results
+
+
+class ServiceUserName(BaseModel):
+    userId: str
+    displayName: str | None
+
+
+_MAX_NAME_IDS = 200
+
+
+@router.get("/user-names", response_model=list[ServiceUserName])
+def user_names_for_service(
+    ids: str = Query(min_length=1, max_length=8000),
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> list[ServiceUserName]:
+    """Display names of the given users (comma-separated ids, at most 200), for a ServiceIntegration
+    named in SERVICE_USER_NAME_READ_INTEGRATIONS (Audit Core shows people by name, 2026-10-27).
+    Names only: no email, no status, nothing writable. Unknown ids are left out."""
+    allowed = frozenset(
+        key.strip() for key in settings.service_user_name_read_integrations.split(",") if key.strip()
+    )
+    _authorize_service(service_token, settings, session, allowed=allowed)
+    id_list = list(dict.fromkeys(i.strip() for i in ids.split(",") if i.strip()))
+    if not id_list or len(id_list) > _MAX_NAME_IDS:
+        raise HTTPException(status_code=422, detail=f"Give 1 to {_MAX_NAME_IDS} user ids")
+    try:
+        rows = session.execute(
+            text(
+                """
+                SELECT user_id::text, display_name
+                FROM security.users
+                WHERE user_id::text = ANY(CAST(:ids AS text[]))
+                """
+            ),
+            {"ids": id_list},
+        ).all()
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail="The request could not be read") from exc
+    return [ServiceUserName(userId=r[0], displayName=r[1]) for r in rows]
