@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 
@@ -43,6 +47,27 @@ from verigence_security.core.problem import (
 
 settings = get_settings()
 
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Boot row, a beat a minute and CPU/memory for the SuperAdmin System Health page
+    (product owner 2026-10-27); a clean stop is stamped on shutdown. Only against
+    PostgreSQL: the shared platform_ops tables live there."""
+    from verigence_security.db.session import _is_postgresql, build_engine
+    from verigence_security.platform_heartbeat import start_platform_heartbeat
+
+    settings = get_settings()
+    stop = threading.Event()
+    heartbeat = None
+    if settings.database_url and _is_postgresql(settings.database_url):
+        heartbeat = start_platform_heartbeat(build_engine(settings), "security", stop)
+    try:
+        yield
+    finally:
+        stop.set()
+        if heartbeat is not None:
+            heartbeat.join(timeout=5)
+
+
 app = FastAPI(
     title="Verigence Security API",
     version="0.3.0",
@@ -51,6 +76,7 @@ app = FastAPI(
         "Security-owned authorization, and Security-issued ServiceIntegration machine tokens"
     ),
     dependencies=[Depends(correlation_header_parameter)],
+    lifespan=_lifespan,
 )
 app.add_middleware(CorrelationIdMiddleware)
 app.add_exception_handler(RequestValidationError, request_validation_error_handler)
