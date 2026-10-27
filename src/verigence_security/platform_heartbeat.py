@@ -130,11 +130,22 @@ class PlatformHeartbeat:
         current = _minute(time.time())
         done = {m: self.minutes.pop(m) for m in list(self.minutes) if include_current or m < current}
         with self.engine.begin() as connection:
-            connection.execute(
+            seen = connection.execute(
                 text("UPDATE platform_ops.service_heartbeats SET last_seen_at_utc = now() "
                      "WHERE boot_id = CAST(:b AS uuid)"),
                 {"b": self.boot_id},
             )
+            if seen.rowcount == 0:
+                # The boot row was never written (the process started before the
+                # tables existed): write it now so the page sees this process.
+                connection.execute(
+                    text(
+                        "INSERT INTO platform_ops.service_heartbeats (boot_id, service_name, replica_id, "
+                        "deployment_id, version) VALUES (CAST(:b AS uuid), :s, :r, :d, :v) "
+                        "ON CONFLICT (boot_id) DO UPDATE SET last_seen_at_utc = now()"
+                    ),
+                    {"b": self.boot_id, "s": self.service, "r": self.replica, "d": self.deployment, "v": self.version},
+                )
             for minute, r in done.items():
                 connection.execute(
                     text(

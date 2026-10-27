@@ -37,3 +37,32 @@ def test_without_a_database_the_thread_starts_and_stops_cleanly() -> None:
     stop.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_a_missing_boot_row_is_written_by_the_next_beat() -> None:
+    executed: list[str] = []
+
+    class _Result:
+        def __init__(self, rowcount: int) -> None:
+            self.rowcount = rowcount
+
+    class _Conn:
+        def execute(self, statement: object, params: object = None) -> _Result:
+            sql = str(statement)
+            executed.append(sql.split()[0])
+            return _Result(0 if sql.startswith("UPDATE") else 1)
+
+    class _Begin:
+        def __enter__(self) -> _Conn:
+            return _Conn()
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    class _Engine:
+        def begin(self) -> _Begin:
+            return _Begin()
+
+    beat = hb.PlatformHeartbeat(_Engine(), "security")  # type: ignore[arg-type]
+    beat.beat()
+    assert executed == ["UPDATE", "INSERT"]
