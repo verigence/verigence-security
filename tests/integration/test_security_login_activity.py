@@ -94,6 +94,18 @@ def test_the_report_tells_each_person_apart(session: Session) -> None:
     assert (app_row["appLogins"], app_row["webLogins"], app_row["appVersion"]) == (1, 1, "1.4")
     assert _row(report, got_apk)["state"] == "DOWNLOADED"
     assert _row(report, got_apk)["downloads"] == 1
+    # Which app they took, and when (2026-10-30).
+    apk_row = _row(report, got_apk)
+    assert apk_row["lastDownloadVersion"] == "1.4"
+    assert [h["version"] for h in apk_row["downloadHistory"]] == ["1.4"]
+    assert apk_row["downloadHistory"][0]["at"] == apk_row["lastDownloadAt"]
+    service.record_download(user_id=got_apk, app_version="1.5", source_ip="1.2.3.4")
+    again = _row(service.report(), got_apk)
+    assert again["downloads"] == 2 and again["lastDownloadVersion"] == "1.5"
+    assert [h["version"] for h in again["downloadHistory"]] == ["1.5", "1.4"]
+    # Nobody with no download has a history.
+    assert _row(report, web_user)["downloadHistory"] == []
+    assert _row(report, web_user)["lastDownloadVersion"] is None
     assert _row(report, web_user)["state"] == "WEB_ONLY"
     failed = _row(report, failed_user)
     assert (failed["state"], failed["loginsFailed"], failed["lastOutcome"]) == ("TRIED_FAILED", 2, "FAILED")
