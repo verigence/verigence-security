@@ -71,8 +71,12 @@ class LoginActivityService:
         try:
             self.session.execute(
                 text(
-                    "INSERT INTO security.app_downloads (user_id,app_version,source_ip)"
-                    " VALUES (CAST(:u AS uuid),:v,:ip)"
+                    # clock_timestamp(), not the column default (the
+                    # transaction's start): the moment of the download, and
+                    # two downloads never share a timestamp, so "the version
+                    # they took last" is never ambiguous.
+                    "INSERT INTO security.app_downloads (user_id,app_version,source_ip,downloaded_at_utc)"
+                    " VALUES (CAST(:u AS uuid),:v,:ip,clock_timestamp())"
                 ),
                 {"u": user_id, "v": app_version and app_version[:30], "ip": source_ip and source_ip[:64]},
             )
@@ -116,6 +120,27 @@ class LoginActivityService:
                   SELECT user_id AS uid, count(*) AS downloads, min(downloaded_at_utc) AS first_dl,
                          max(downloaded_at_utc) AS last_dl
                   FROM security.app_downloads GROUP BY user_id
+                ),
+                -- Which app each person took, and when: the version of their
+                -- most recent download, and their last 20 downloads, so the
+                -- SuperAdmin can see who has which app (product owner
+                -- 2026-10-30: "history ... who have downloaded the mobile app
+                -- and they are on which version").
+                last_dl AS (
+                  SELECT DISTINCT ON (user_id) user_id AS uid, app_version
+                  FROM security.app_downloads
+                  ORDER BY user_id, downloaded_at_utc DESC, download_id DESC
+                ),
+                dl_history AS (
+                  SELECT uid,
+                         array_agg(at ORDER BY at DESC, download_id DESC) AS history_at,
+                         array_agg(version ORDER BY at DESC, download_id DESC) AS history_version
+                  FROM (
+                    SELECT user_id AS uid, downloaded_at_utc AS at, app_version AS version, download_id,
+                           row_number() OVER (PARTITION BY user_id
+                             ORDER BY downloaded_at_utc DESC, download_id DESC) AS rn
+                    FROM security.app_downloads
+                  ) recent WHERE rn <= 20 GROUP BY uid
                 )
                 SELECT u.user_id::text AS user_id, u.display_name, u.primary_email, u.status,
                        COALESCE(u.is_employee,false) AS is_employee,
@@ -124,12 +149,16 @@ class LoginActivityService:
                        att.first_ok, att.last_ok, att.last_at,
                        last_try.outcome AS last_outcome, last_try.reason AS last_reason,
                        last_app.app_version,
-                       COALESCE(dl.downloads,0) AS downloads, dl.first_dl, dl.last_dl
+                       COALESCE(dl.downloads,0) AS downloads, dl.first_dl, dl.last_dl,
+                       last_dl.app_version AS downloaded_version,
+                       dl_history.history_at, dl_history.history_version
                 FROM security.users u
                 LEFT JOIN att ON att.uid=u.user_id
                 LEFT JOIN last_try ON last_try.uid=u.user_id
                 LEFT JOIN last_app ON last_app.uid=u.user_id
                 LEFT JOIN dl ON dl.uid=u.user_id
+                LEFT JOIN last_dl ON last_dl.uid=u.user_id
+                LEFT JOIN dl_history ON dl_history.uid=u.user_id
                 WHERE u.primary_email IS NOT NULL
                 ORDER BY lower(u.display_name)
                 """
@@ -199,4 +228,12 @@ def _person(row: Any) -> dict[str, Any]:
         "downloads": int(row["downloads"]),
         "firstDownloadAt": _iso(row["first_dl"]),
         "lastDownloadAt": _iso(row["last_dl"]),
+        # The version of their most recent download, and their last 20
+        # downloads (newest first). ``appVersion`` above is what their app
+        # last reported when signing in -- what they are actually running.
+        "lastDownloadVersion": row["downloaded_version"],
+        "downloadHistory": [
+            {"at": _iso(at), "version": version}
+            for at, version in zip(row["history_at"] or [], row["history_version"] or [], strict=False)
+        ],
     }
