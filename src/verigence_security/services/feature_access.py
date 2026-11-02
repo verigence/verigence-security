@@ -8,8 +8,10 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-FeatureKey = Literal["AUDIT", "ANALYTICS"]
-FEATURE_KEYS: tuple[FeatureKey, ...] = ("AUDIT", "ANALYTICS")
+# CHECKOUT_GATE_REGISTER (2026-11-02): when on, a PC cannot check out until the previous day's gate
+# register of their onsite outlets is done; when off, the app only warns.
+FeatureKey = Literal["AUDIT", "ANALYTICS", "CHECKOUT_GATE_REGISTER"]
+FEATURE_KEYS: tuple[FeatureKey, ...] = ("AUDIT", "ANALYTICS", "CHECKOUT_GATE_REGISTER")
 
 
 class FeatureAccessService:

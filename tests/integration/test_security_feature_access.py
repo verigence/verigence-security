@@ -64,7 +64,8 @@ def _user(db: Session) -> str:
 def test_hidden_until_switched_on_and_a_persons_own_choice_wins(session: Session) -> None:
     service = FeatureAccessService(session)
     admin, person, other = _user(session), _user(session), _user(session)
-    assert service.resolve(user_id=person, is_super_admin=False) == {"AUDIT": False, "ANALYTICS": False}
+    assert service.resolve(user_id=person, is_super_admin=False) == {
+        "AUDIT": False, "ANALYTICS": False, "CHECKOUT_GATE_REGISTER": False}
 
     service.set_person(feature_key="AUDIT", user_id=person, enabled=True, actor_user_id=admin, correlation_id="c1")
     assert service.resolve(user_id=person, is_super_admin=False)["AUDIT"] is True
@@ -77,7 +78,8 @@ def test_hidden_until_switched_on_and_a_persons_own_choice_wins(session: Session
     service.set_person(feature_key="ANALYTICS", user_id=other, enabled=None, actor_user_id=admin, correlation_id="c4")
     assert service.resolve(user_id=other, is_super_admin=False)["ANALYTICS"] is True  # back to everyone
 
-    assert service.resolve(user_id=other, is_super_admin=True) == {"AUDIT": True, "ANALYTICS": True}
+    assert service.resolve(user_id=other, is_super_admin=True) == {
+        "AUDIT": True, "ANALYTICS": True, "CHECKOUT_GATE_REGISTER": True}
 
 
 def test_overview_lists_the_people_set_on_their_own_and_changes_are_recorded(session: Session) -> None:

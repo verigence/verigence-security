@@ -104,3 +104,13 @@ def test_anyone_signed_in_reads_their_own_name(monkeypatch: pytest.MonkeyPatch) 
     r = client.get("/security/v1/me/profile")
     assert r.status_code == 200
     assert r.json() == {"userId": "00000000-0000-4000-8000-000000000001", "displayName": "Priya Sharma"}
+
+
+def test_the_checkout_gate_register_switch_can_be_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CHECKOUT_GATE_REGISTER (2026-11-02): on, a PC cannot check out without yesterday's gate register."""
+    _as(AdminScope("SuperAdmin", "PLATFORM", None))
+    calls = _service(monkeypatch)
+    switched = client.put("/security/v1/admin/features/CHECKOUT_GATE_REGISTER/everyone", json={"enabled": True})
+    assert switched.status_code == 200
+    assert client.put("/security/v1/admin/features/UNKNOWN/everyone", json={"enabled": True}).status_code == 422
+    assert calls == [("everyone", "CHECKOUT_GATE_REGISTER", True)]
