@@ -15,7 +15,7 @@ from verigence_security.services.v2_user_directory import V2UserDirectoryService
 
 router = APIRouter(prefix="/security/v1", tags=["Feature access"])
 
-FeatureKeyPath = Literal["AUDIT", "ANALYTICS"]
+FeatureKeyPath = Literal["AUDIT", "ANALYTICS", "CHECKOUT_GATE_REGISTER"]
 
 
 class MyFeaturesResponse(BaseModel):

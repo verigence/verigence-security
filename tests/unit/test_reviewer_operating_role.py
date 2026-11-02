@@ -16,6 +16,7 @@ from pathlib import Path
 from verigence_security.api.v2_rbac_schemas import OperatingRoleKey
 
 REVIEWER_MIGRATION = Path("migrations/0046_reviewer_operating_role.sql")
+REVIEWER_TASKS_MIGRATION = Path("migrations/0047_reviewer_closes_team_lead_tasks.sql")
 DEFAULTS_MIGRATION = Path("migrations/0013_v2_operating_role_defaults.sql")
 FOUNDATION_MIGRATION = Path("migrations/0011_security_v2_role_foundation.sql")
 
@@ -55,7 +56,7 @@ def test_an_operating_role_assignment_accepts_reviewer() -> None:
     )
 
 
-def test_reviewer_may_correct_a_value_but_not_upload_or_close_a_task() -> None:
+def test_reviewer_may_correct_a_value_but_not_upload() -> None:
     reviewer = _bundle(REVIEWER_MIGRATION, "REVIEWER")
 
     assert "audit.journey.read" in reviewer
@@ -66,7 +67,7 @@ def test_reviewer_may_correct_a_value_but_not_upload_or_close_a_task() -> None:
     # No upload, on either side of the boundary.
     assert "audit.evidence.upload" not in reviewer
     assert "di.document.upload" not in reviewer
-    # No task queue, so no way to complete, cancel or close one.
+    # 0046 gave no task queue; 0047 adds it (see the test below).
     assert not {key for key in reviewer if key.startswith("audit.work.")}
     # Neither raises nor adjudicates findings, and verification stays with
     # TL/PM; the documents-reviewed marks are Audit Core journey state under
@@ -143,3 +144,20 @@ def test_the_operating_role_check_accepts_an_active_reviewer_role() -> None:
     service.repository = _Repository()  # type: ignore[assignment]
     service._require_operating_role("REVIEWER")
     service._require_operating_role("PC")
+
+
+def test_reviewer_closes_the_team_leads_tasks_without_managing_work() -> None:
+    """Product owner 2026-11-02: a Reviewer closes the Team Lead's tasks of their
+    outlets. 0047 adds the Task Queue read and the task action, for new Projects
+    (platform defaults) and existing ones (tenant_role_permissions), and nothing
+    else: no reassigning or cancelling others' work, no verification."""
+    source = REVIEWER_TASKS_MIGRATION.read_text()
+    granted = set(re.findall(r"'(audit\.[a-z_.]+)'", source))
+    assert granted == {"audit.work.read", "audit.work.update"}
+    assert "INSERT INTO security.platform_role_permission_defaults" in source
+    assert "INSERT INTO security.tenant_role_permissions" in source
+    assert "role_key='REVIEWER'" in source
+    assert "ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING" in source
+
+    registered = set(re.findall(r"\('([a-z0-9._]+)','(?:audit|di)'", DEFAULTS_MIGRATION.read_text()))
+    assert granted <= registered
