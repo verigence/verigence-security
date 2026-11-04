@@ -8,10 +8,12 @@ import pytest
 from verigence_security.core.errors import SecurityError
 from verigence_security.services.app_version_policy import (
     Policy,
+    can_show_update_page,
     is_native_app,
     parse_version,
     require_supported_app,
     require_supported_device,
+    update_notice,
 )
 
 NOW = datetime(2026, 11, 5, 10, 0, tzinfo=UTC)
@@ -53,21 +55,35 @@ def test_only_the_native_app_is_checked():
     require_supported_app(_Session(_policy()), browser_name="Firefox", app_version=None, now=NOW)
 
 
-def test_an_older_app_is_refused_with_where_to_get_the_latest():
-    with pytest.raises(SecurityError) as refused:
-        require_supported_app(
-            _Session(_policy()), browser_name="Capacitor WebView", app_version="1.4.0", now=NOW
-        )
-    assert refused.value.code == "APP_UPDATE_REQUIRED" and refused.value.status_code == 426
-    assert "1.5.0 or newer" in refused.value.detail and "https://example.test/apps" in refused.value.detail
-    # too old to report a version at all
-    with pytest.raises(SecurityError):
-        require_supported_app(
-            _Session(_policy()), browser_name="Capacitor WebView", app_version=None, now=NOW
-        )
+def test_an_old_app_that_cannot_show_the_update_page_is_refused_with_where_to_get_the_latest():
+    for version in ("0.1.0", "1.0.0", None):
+        with pytest.raises(SecurityError) as refused:
+            require_supported_app(
+                _Session(_policy()), browser_name="Capacitor WebView", app_version=version, now=NOW
+            )
+        assert refused.value.code == "APP_UPDATE_REQUIRED" and refused.value.status_code == 426
+        assert "1.5.0 or newer" in refused.value.detail
+        assert "https://example.test/apps" in refused.value.detail
     require_supported_app(
         _Session(_policy()), browser_name="Capacitor WebView", app_version="1.5.0", now=NOW
     )
+
+
+def test_an_old_app_that_can_show_the_update_page_signs_in_and_is_shown_it():
+    assert can_show_update_page("1.1.0") and can_show_update_page("1.4.0")
+    assert not can_show_update_page("1.0.0") and not can_show_update_page(None)
+    require_supported_app(
+        _Session(_policy()), browser_name="Capacitor WebView", app_version="1.4.0", now=NOW
+    )
+    policy = Policy("1.5.1", None, "https://example.test/apps")
+    for version in ("1.4.0", "1.5.0", None):
+        notice = update_notice(policy, version, NOW)
+        assert notice is not None and notice["kind"] == "MAINTENANCE" and notice["active"]
+        assert "https://example.test/apps" in notice["body"] and "1.5.1" in notice["body"]
+    assert update_notice(policy, "1.5.1", NOW) is None
+    assert update_notice(Policy(None, None, "x"), "0.1.0", NOW) is None
+    later = Policy("1.5.1", NOW + timedelta(hours=1), "x")
+    assert update_notice(later, "1.4.0", NOW) is None
 
 
 def test_nothing_is_refused_before_the_effective_time_or_without_a_minimum():
@@ -96,7 +112,7 @@ def test_an_unreadable_policy_never_breaks_sign_in():
 def test_session_renewal_uses_the_device_recorded_at_sign_in():
     with pytest.raises(SecurityError):
         require_supported_device(
-            _Session(_policy(), device=("Capacitor WebView", "1.3.2")), user_id="u", device_id="d"
+            _Session(_policy(), device=("Capacitor WebView", "0.1.0")), user_id="u", device_id="d"
         )
     require_supported_device(_Session(_policy(), device=("Chrome", None)), user_id="u", device_id="d")
     require_supported_device(_Session(_policy(), device=None), user_id="u", device_id="d")

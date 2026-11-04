@@ -175,12 +175,53 @@ class AppVersionPolicyService:
         return (row[0], row[1]) if row else None
 
 
+# Every released app from 1.1.0 has the full-screen notice page (it asks /status/maintenance before and
+# after sign-in). Such an app below the minimum may sign in -- so the person can be shown "Update the
+# Verigence app" and where to download it -- and the page then replaces the whole app. An app older
+# than this, or one that does not report its version, cannot show any message: it is refused.
+CAN_SHOW_UPDATE_PAGE = (1, 1, 0)
+
+# The origins the Android app's WebView sends (Capacitor serves the app from localhost).
+NATIVE_ORIGINS = {"https://localhost", "http://localhost", "capacitor://localhost"}
+
+
+def can_show_update_page(app_version: str | None) -> bool:
+    found = parse_version(app_version)
+    return found is not None and found >= CAN_SHOW_UPDATE_PAGE
+
+
+def update_notice(policy: Policy, app_version: str | None, now: datetime) -> dict[str, Any] | None:
+    """For an app asking the public status: the "Update the Verigence app" notice when the app is below
+    the minimum in force, in the shape of a maintenance notice so every released app since 1.1.0
+    shows it (on the sign-in page, and in place of the whole app after sign-in)."""
+    if not policy.in_force(now) or not policy.too_old(app_version):
+        return None
+    return {
+        "announcementId": "00000000-0000-0000-0000-00000000a99e",
+        "kind": "MAINTENANCE",
+        "title": "Update the Verigence app to continue",
+        "body": (
+            f"This version of the app can no longer be used. Open {policy.download_url} in your phone's "
+            f"browser (Chrome), sign in there and install version {policy.minimum_version} or newer. "
+            "Then open the new app."
+        ),
+        "backAt": None,
+        "startsAt": (policy.effective_from or now).isoformat(),
+        "endsAt": None,
+        "audience": "EVERYONE",
+        "active": True,
+    }
+
+
 def require_supported_app(
     session: Any, *, browser_name: str | None, app_version: str | None, now: datetime | None = None
 ) -> None:
-    """Refuses an app older than the minimum in force. A web browser always passes. If the policy
-    cannot be read the check lets the request through (sign-in then fails or succeeds on its own)."""
+    """Refuses an app older than the minimum in force that cannot show the update page itself. A web
+    browser always passes; so does an outdated app from 1.1.0, which is shown "Update the Verigence app"
+    instead (see update_notice). If the policy cannot be read the check lets the request through."""
     if not is_native_app(browser_name=browser_name, app_version=app_version):
+        return
+    if can_show_update_page(app_version):
         return
     try:
         policy = AppVersionPolicyService(session).policy()

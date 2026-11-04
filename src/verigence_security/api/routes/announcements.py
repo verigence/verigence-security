@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,11 @@ from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
 from verigence_security.services.announcements import AnnouncementService
+from verigence_security.services.app_version_policy import (
+    NATIVE_ORIGINS,
+    AppVersionPolicyService,
+    update_notice,
+)
 from verigence_security.services.v2_human_actor import HumanActorContext
 
 router = APIRouter(prefix="/security/v1", tags=["Announcements"])
@@ -49,9 +54,22 @@ def _require_super_admin(actor: HumanActorContext) -> None:
 
 
 @router.get("/status/maintenance")
-def maintenance_status(session: Session = Depends(platform_session)) -> dict[str, Any]:
-    """Whether the apps are paused for maintenance. Needs no sign-in, so a person sees it first."""
+def maintenance_status(
+    request: Request,
+    appVersion: str | None = Query(default=None, max_length=30),
+    session: Session = Depends(platform_session),
+) -> dict[str, Any]:
+    """Whether the apps are paused for maintenance. Needs no sign-in, so a person sees it first.
+
+    The Android app below the minimum version gets "Update the Verigence app" here instead: released
+    apps before 1.5.1 do not send their version, and are known by their WebView origin."""
     notice = AnnouncementService(session).maintenance()
+    if notice is None and (request.headers.get("origin") or "").rstrip("/") in NATIVE_ORIGINS:
+        try:
+            policy = AppVersionPolicyService(session).policy()
+            notice = update_notice(policy, appVersion, datetime.now(UTC))
+        except Exception:  # noqa: BLE001 - never let the policy break the maintenance check
+            notice = None
     return {"maintenance": notice}
 
 
