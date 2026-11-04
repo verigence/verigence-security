@@ -49,6 +49,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "ACCESS_SESSION_CONTEXT_CONFLICT": (409, "Active access session context conflicts"),
     "SESSION_REVOKED": (401, "Access session is revoked"),
     "SESSION_SUPERSEDED": (401, "Access session has been superseded by a newer login"),
+    "APP_UPDATE_REQUIRED": (426, "This version of the Verigence app is no longer supported"),
     "PRINCIPAL_NOT_ACTIVE": (403, "Security principal is not active"),
     "PRINCIPAL_TENANT_SCOPE_REQUIRED": (403, "Principal Tenant scope is required"),
     "MACHINE_CREDENTIAL_INVALID": (401, "Machine credential is invalid"),

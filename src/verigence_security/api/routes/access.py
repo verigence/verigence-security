@@ -33,6 +33,7 @@ from verigence_security.core.types import ActorType
 from verigence_security.repositories.human_observation_repository import HumanObservationRepository
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
+from verigence_security.services.app_version_policy import require_supported_app, require_supported_device
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.geo import GeoSample
 from verigence_security.services.login_activity import record_login_attempt
@@ -193,6 +194,16 @@ def credential_login(
         )
 
     try:
+        # An app older than the minimum version SuperAdmin set cannot be used at all.
+        require_supported_app(
+            repo.s,
+            browser_name=device.browserName if device else None,
+            app_version=device.appVersion if device else None,
+        )
+    except SecurityError as exc:
+        record("FAILED", None, exc.code)
+        raise
+    try:
         authenticated = credentials.authenticate(
             identifier=body.identifier,
             password=body.password.get_secret_value(),
@@ -257,6 +268,7 @@ def refresh_human_access_token(
 
     session_id = _uuid_or_new(claims, "session_id")
     device_id = _uuid_or_new(claims, "device_id")
+    require_supported_device(repo.s, user_id=actor.user_id, device_id=str(device_id))
     observation = HumanObservationRepository(repo.s)
     status = observation.session_status(
         user_id=actor.user_id,

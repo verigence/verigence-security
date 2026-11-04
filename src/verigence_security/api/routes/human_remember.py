@@ -23,6 +23,7 @@ from verigence_security.core.types import ActorType
 from verigence_security.repositories.human_observation_repository import HumanObservationRepository
 from verigence_security.repositories.human_remember_repository import HumanRememberRepository
 from verigence_security.repositories.security_repository import SecurityRepository
+from verigence_security.services.app_version_policy import require_supported_app
 from verigence_security.services.token_service import HumanTokenClaims, TokenService
 from verigence_security.services.v2_human_actor import HumanActorAuthenticationService
 
@@ -267,6 +268,9 @@ def _resume_human_session(
         raise security_error("AUTH_TOKEN_EXPIRED")
     if body.device.deviceId != device_id:
         raise security_error("AUTH_TOKEN_INVALID")
+    require_supported_app(
+        repo.s, browser_name=body.device.browserName, app_version=body.device.appVersion
+    )
 
     actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(user_id)
     attach_trusted_user_id(actor.user_id)
