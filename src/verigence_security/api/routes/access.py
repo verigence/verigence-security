@@ -32,6 +32,7 @@ from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.core.types import ActorType
 from verigence_security.repositories.human_observation_repository import HumanObservationRepository
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
+from verigence_security.services.access_blocks import require_not_blocked
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
 from verigence_security.services.app_version_policy import require_supported_app, require_supported_device
 from verigence_security.services.clerk_credentials import ClerkCredentialService
@@ -218,6 +219,11 @@ def credential_login(
         record("FAILED", None, getattr(credentials, "denial_stage", None) or exc.code)
         raise
     attach_trusted_user_id(actor.user_id)
+    try:
+        require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
+    except SecurityError as exc:
+        record("FAILED", actor.user_id, exc.code)
+        raise
     record("SUCCESS", actor.user_id, None)
 
     ttl = settings.platform_admin_token_ttl_minutes
@@ -268,6 +274,7 @@ def refresh_human_access_token(
 
     session_id = _uuid_or_new(claims, "session_id")
     device_id = _uuid_or_new(claims, "device_id")
+    require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
     require_supported_device(repo.s, user_id=actor.user_id, device_id=str(device_id))
     observation = HumanObservationRepository(repo.s)
     status = observation.session_status(
