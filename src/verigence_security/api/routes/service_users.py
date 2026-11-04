@@ -18,6 +18,7 @@ from verigence_security.api.v2_user_directory_schemas import (
 )
 from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
+from verigence_security.services import access_blocks
 from verigence_security.services.service_contact_change import ContactConflict, ServiceContactChange
 from verigence_security.services.token_service import TokenService
 from verigence_security.services.v2_platform_user_create import (
@@ -479,3 +480,71 @@ def user_names_for_service(
         session.rollback()
         raise HTTPException(status_code=422, detail="The request could not be read") from exc
     return [ServiceUserName(userId=r[0], displayName=r[1]) for r in rows]
+
+
+
+# ---- access pauses (product owner, 4 Nov 2026) ------------------------------------------------
+
+
+class AccessBlockRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class AccessRestoreRequest(BaseModel):
+    restoredByUserId: str = Field(min_length=36, max_length=36)
+    note: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/users/{userId}/access-block")
+def block_user_access_for_service(
+    userId: str,
+    body: AccessBlockRequest,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    """The HR service pauses a person's whole Verigence access (a Team Lead who missed the Monday
+    09:00 approvals deadline). Idempotent: an active pause is returned as it is."""
+    _, subject = _authorize_service(service_token, settings, session)
+    try:
+        pause, created = access_blocks.block(
+            session, user_id=userId, reason=body.reason, source=subject
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="User not found") from exc
+    return {"userId": userId, "created": created, **pause}
+
+
+@router.post("/users/{userId}/access-restore")
+def restore_user_access_for_service(
+    userId: str,
+    body: AccessRestoreRequest,
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    """The HR service ends a pause, for SuperAdmin acting in myHR Settings (who and why recorded)."""
+    _authorize_service(service_token, settings, session)
+    try:
+        restored = access_blocks.restore(
+            session, user_id=userId, restored_by=body.restoredByUserId, note=body.note
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="User not found") from exc
+    return {"userId": userId, "restored": restored}
+
+
+@router.get("/access-blocks")
+def list_access_blocks_for_service(
+    service_token: str = Depends(service_integration_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    _authorize_service(service_token, settings, session)
+    return {"items": access_blocks.active_blocks(session)}
