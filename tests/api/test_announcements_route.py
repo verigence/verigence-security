@@ -122,3 +122,46 @@ def test_bad_announcements_are_refused(monkeypatch: pytest.MonkeyPatch, body: di
     calls = _service(monkeypatch)
     assert client.post("/security/v1/admin/announcements", json=body).status_code == 422
     assert calls == []
+
+
+def test_an_outdated_android_app_is_told_to_update_through_the_maintenance_status(monkeypatch):
+    """Released apps before 1.5.1 send no version: they are known by the WebView origin."""
+    from datetime import UTC, datetime
+
+    from verigence_security.api.routes import announcements as route
+    from verigence_security.services.app_version_policy import Policy
+
+    class _NoMaintenance:
+        def __init__(self, session):
+            pass
+
+        def maintenance(self):
+            return None
+
+    class _Policy:
+        def __init__(self, session):
+            pass
+
+        def policy(self):
+            return Policy("1.5.1", datetime(2026, 1, 1, tzinfo=UTC), "https://example.test/apps")
+
+    monkeypatch.setattr(route, "AnnouncementService", _NoMaintenance)
+    monkeypatch.setattr(route, "AppVersionPolicyService", _Policy)
+    from fastapi.testclient import TestClient
+
+    from verigence_security.api.platform_dependencies import platform_session
+    from verigence_security.main import app
+
+    app.dependency_overrides[platform_session] = lambda: object()
+    try:
+        client = TestClient(app)
+        old = client.get("/security/v1/status/maintenance", headers={"Origin": "https://localhost"})
+        assert old.json()["maintenance"]["title"] == "Update the Verigence app to continue"
+        new = client.get(
+            "/security/v1/status/maintenance?appVersion=1.5.1", headers={"Origin": "https://localhost"}
+        )
+        assert new.json()["maintenance"] is None
+        browser = client.get("/security/v1/status/maintenance", headers={"Origin": "https://example.org"})
+        assert browser.json()["maintenance"] is None
+    finally:
+        app.dependency_overrides.pop(platform_session, None)
