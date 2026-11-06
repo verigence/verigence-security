@@ -94,7 +94,10 @@ def test_existing_projects_are_backfilled_with_sevasutra_permissions_only() -> N
 def test_the_binding_workflow_never_handles_the_plaintext_secret() -> None:
     source = WORKFLOW.read_text()
     assert "workflow_dispatch" in source
-    assert "push:" not in source
+    # It runs on dev only when its own file changes (dispatch needs the file on main, which is not touched).
+    trigger = source.split("permissions:", 1)[0]
+    push = trigger.split("  push:", 1)[1].split("  workflow_dispatch:", 1)[0]
+    assert push.split() == ["branches:", "-", "dev", "paths:", "-", ".github/workflows/sevasutra-security-bind.yml"]
     assert "SEVASUTRA_SECRET_HASH" in source
     assert "$argon2id$" in source
     assert "CLIENT_SECRET" not in source
