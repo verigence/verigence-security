@@ -23,6 +23,7 @@ from verigence_security.api.routes import (
     jwks,
     legacy_onboarding_compat,
     login_activity,
+    night_control,
     password_recovery,
     platform_admin,
     platform_modules,
@@ -98,6 +99,7 @@ app.include_router(service_users.router)
 app.include_router(authorization.router)
 app.include_router(hr_roles.router)
 app.include_router(feature_access.router)
+app.include_router(night_control.router)
 app.include_router(announcements.router)
 app.include_router(app_version.router)
 app.include_router(client_diagnostics.router)
