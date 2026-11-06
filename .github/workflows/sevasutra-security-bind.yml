@@ -6,6 +6,13 @@ name: SevaSutra Security binding
 # service token. See docs/SEVASUTRA_MODULE_RBAC_2026-11-06.md.
 
 on:
+  # Dispatch needs the file on the default branch (main), which is not touched: like the UC03 binding,
+  # a push to dev that changes this file runs it.
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/sevasutra-security-bind.yml
   workflow_dispatch:
 
 permissions:
