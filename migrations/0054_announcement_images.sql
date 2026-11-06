@@ -1,4 +1,4 @@
--- Verigence Security v2: an announcement may carry one image (a poster, a graphic), product owner
+-- Verigence Security v2 (0054): an announcement may carry one image (a poster, a graphic), product owner
 -- 6 Nov 2026. The image is kept in the database (at most 2 MB, PNG/JPEG/WebP/GIF); the apps fetch it
 -- by the announcement's id. A graphic can stand on its own, so the text body may now be empty.
 -- Additive and idempotent.
