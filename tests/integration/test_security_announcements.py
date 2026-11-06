@@ -161,3 +161,46 @@ def test_maintenance_blocks_until_ended_and_only_one_can_run(session: Session) -
         correlation_id="c",
     )
     assert service.maintenance() is None
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+def test_an_announcement_can_carry_one_image_that_replaces_and_removes(session: Session) -> None:
+    service = AnnouncementService(session)
+    admin = _user(session)
+    person = _user(session)
+    announcement = _make(service, admin, body="")  # a graphic needs no text
+    assert service.image(announcement) is None
+    version = service.set_image(
+        announcement_id=announcement, data=PNG, width=1200, height=800, actor_user_id=admin, correlation_id="c"
+    )
+    content_type, data, digest = service.image(announcement)  # type: ignore[misc]
+    assert content_type == "image/png" and data == PNG and digest.startswith(version)
+    shown = service.next_for(user_id=person)
+    assert shown is not None and shown["imageVersion"] == version and shown["body"] == ""
+    assert service.listing()[0]["imageVersion"] == version
+    jpeg = b"\xff\xd8\xff\xe0" + b"\x01" * 32
+    newer = service.set_image(
+        announcement_id=announcement, data=jpeg, width=None, height=None, actor_user_id=admin, correlation_id="c"
+    )
+    assert newer != version and service.image(announcement)[0] == "image/jpeg"  # type: ignore[index]
+    service.remove_image(announcement_id=announcement, actor_user_id=admin, correlation_id="c")
+    assert service.image(announcement) is None
+    with pytest.raises(LookupError):
+        service.remove_image(announcement_id=announcement, actor_user_id=admin, correlation_id="c")
+
+
+def test_only_real_images_of_at_most_2_mb_are_kept(session: Session) -> None:
+    service = AnnouncementService(session)
+    admin = _user(session)
+    announcement = _make(service, admin)
+    for bad in (b"<svg onload=alert(1)>", b"%PDF-1.7", PNG + b"\x00" * (2 * 1024 * 1024)):
+        with pytest.raises(ValueError):
+            service.set_image(
+                announcement_id=announcement, data=bad, width=None, height=None, actor_user_id=admin, correlation_id="c"
+            )
+    with pytest.raises(LookupError):
+        service.set_image(
+            announcement_id=str(uuid4()), data=PNG, width=None, height=None, actor_user_id=admin, correlation_id="c"
+        )

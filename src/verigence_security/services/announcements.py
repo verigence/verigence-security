@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -14,7 +15,29 @@ Audience = Literal["EVERYONE", "PEOPLE"]
 # Until SuperAdmin sets it: a person sees at most one notice or greeting in this many hours.
 DEFAULT_QUIET_HOURS = 20
 
-_COLUMNS = "announcement_id, kind, title, body, back_at_utc, starts_at_utc, ends_at_utc, audience, active"
+# Every query reading these names the announcements table "a".
+_COLUMNS = (
+    "a.announcement_id, a.kind, a.title, a.body, a.back_at_utc, a.starts_at_utc, a.ends_at_utc,"
+    " a.audience, a.active,"
+    " (SELECT left(i.sha256, 16) FROM security.announcement_images i"
+    "  WHERE i.announcement_id = a.announcement_id)"
+)
+
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+
+
+def sniff_image(data: bytes) -> str | None:
+    """The image type from the file's first bytes (never from what the uploader claims)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
 
 
 def _view(row: Any) -> dict[str, Any]:
@@ -28,6 +51,8 @@ def _view(row: Any) -> dict[str, Any]:
         "endsAt": row[6].isoformat() if row[6] else None,
         "audience": row[7],
         "active": bool(row[8]),
+        # Changes when the image changes, so the apps can cache it by this version.
+        "imageVersion": row[9],
     }
 
 
@@ -44,10 +69,10 @@ class AnnouncementService:
         """The maintenance notice in force now, if any. Read before sign-in, so it needs no login."""
         row = self.session.execute(
             text(
-                f"SELECT {_COLUMNS} FROM security.announcements"
-                " WHERE kind='MAINTENANCE' AND active AND starts_at_utc<=CURRENT_TIMESTAMP"
-                " AND (ends_at_utc IS NULL OR ends_at_utc>CURRENT_TIMESTAMP)"
-                " ORDER BY starts_at_utc DESC LIMIT 1"
+                f"SELECT {_COLUMNS} FROM security.announcements a"
+                " WHERE a.kind='MAINTENANCE' AND a.active AND a.starts_at_utc<=CURRENT_TIMESTAMP"
+                " AND (a.ends_at_utc IS NULL OR a.ends_at_utc>CURRENT_TIMESTAMP)"
+                " ORDER BY a.starts_at_utc DESC LIMIT 1"
             )
         ).first()
         return _view(row) if row else None
@@ -142,7 +167,7 @@ class AnnouncementService:
                 " FROM security.announcements a ORDER BY a.created_at_utc DESC LIMIT 100"
             )
         ).all()
-        return [{**_view(r), "seenBy": int(r[9]), "chosenPeople": int(r[10])} for r in rows]
+        return [{**_view(r), "seenBy": int(r[10]), "chosenPeople": int(r[11])} for r in rows]
 
     def people_of(self, announcement_id: str) -> list[dict[str, Any]]:
         rows = self.session.execute(
@@ -254,6 +279,99 @@ class AnnouncementService:
                 correlation_id,
                 now,
             )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+
+    # ---- the image ---------------------------------------------------------------------------
+
+    def image(self, announcement_id: str) -> tuple[str, bytes, str] | None:
+        """(content type, bytes, sha256) of the announcement's image, if it has one."""
+        row = self.session.execute(
+            text(
+                "SELECT content_type, data, sha256 FROM security.announcement_images"
+                " WHERE announcement_id=CAST(:a AS uuid)"
+            ),
+            {"a": announcement_id},
+        ).first()
+        return (str(row[0]), bytes(row[1]), str(row[2])) if row else None
+
+    def set_image(
+        self,
+        *,
+        announcement_id: str,
+        data: bytes,
+        width: int | None,
+        height: int | None,
+        actor_user_id: str,
+        correlation_id: str,
+    ) -> str:
+        """Adds or replaces the image. Returns its version. The type is read from the bytes."""
+        if not data or len(data) > MAX_IMAGE_BYTES:
+            raise ValueError("The image must be at most 2 MB")
+        content_type = sniff_image(data)
+        if content_type is None:
+            raise ValueError("Only PNG, JPEG, WebP or GIF images can be added")
+        digest = hashlib.sha256(data).hexdigest()
+        now = datetime.now(UTC)
+        try:
+            exists = self.session.execute(
+                text("SELECT 1 FROM security.announcements WHERE announcement_id=CAST(:a AS uuid) FOR UPDATE"),
+                {"a": announcement_id},
+            ).first()
+            if exists is None:
+                raise LookupError("Announcement not found")
+            self.session.execute(
+                text(
+                    "INSERT INTO security.announcement_images (announcement_id,content_type,data,sha256,"
+                    " width,height,uploaded_by_user_id,uploaded_at_utc) VALUES (CAST(:a AS uuid),:t,:d,:s,"
+                    " :w,:h,CAST(:actor AS uuid),:now) ON CONFLICT (announcement_id) DO UPDATE SET"
+                    " content_type=EXCLUDED.content_type, data=EXCLUDED.data, sha256=EXCLUDED.sha256,"
+                    " width=EXCLUDED.width, height=EXCLUDED.height,"
+                    " uploaded_by_user_id=EXCLUDED.uploaded_by_user_id, uploaded_at_utc=EXCLUDED.uploaded_at_utc"
+                ),
+                {
+                    "a": announcement_id,
+                    "t": content_type,
+                    "d": data,
+                    "s": digest,
+                    "w": width,
+                    "h": height,
+                    "actor": actor_user_id,
+                    "now": now,
+                },
+            )
+            self.session.execute(
+                text("UPDATE security.announcements SET updated_at_utc=:now WHERE announcement_id=CAST(:a AS uuid)"),
+                {"a": announcement_id, "now": now},
+            )
+            self._audit(
+                announcement_id,
+                None,
+                {"image": content_type, "bytes": len(data), "sha256": digest},
+                actor_user_id,
+                correlation_id,
+                now,
+            )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return digest[:16]
+
+    def remove_image(self, *, announcement_id: str, actor_user_id: str, correlation_id: str) -> None:
+        now = datetime.now(UTC)
+        try:
+            removed = self.session.execute(
+                text(
+                    "DELETE FROM security.announcement_images WHERE announcement_id=CAST(:a AS uuid) RETURNING sha256"
+                ),
+                {"a": announcement_id},
+            ).first()
+            if removed is None:
+                raise LookupError("This announcement has no image")
+            self._audit(announcement_id, {"sha256": removed[0]}, {"image": None}, actor_user_id, correlation_id, now)
             self.session.commit()
         except Exception:
             self.session.rollback()

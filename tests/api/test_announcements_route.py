@@ -66,6 +66,17 @@ def _service(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
         def update(self, **kw: Any) -> None:
             calls.append(("update", kw["announcement_id"], kw["active"]))
 
+        def image(self, announcement_id: str) -> tuple[str, bytes, str] | None:
+            calls.append(("image", announcement_id))
+            return ("image/png", b"\x89PNG-bytes", "a" * 64) if announcement_id == ID else None
+
+        def set_image(self, **kw: Any) -> str:
+            calls.append(("set_image", kw["announcement_id"], kw["data"], kw["width"]))
+            return "a" * 16
+
+        def remove_image(self, **kw: Any) -> None:
+            calls.append(("remove_image", kw["announcement_id"]))
+
     monkeypatch.setattr(announcements, "AnnouncementService", _Service)
     return calls
 
@@ -165,3 +176,36 @@ def test_an_outdated_android_app_is_told_to_update_through_the_maintenance_statu
         assert browser.json()["maintenance"] is None
     finally:
         app.dependency_overrides.pop(platform_session, None)
+
+
+def test_the_image_is_read_without_sign_in_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _service(monkeypatch)
+    r = client.get(f"/security/v1/announcements/{ID}/image")
+    assert r.status_code == 200 and r.content == b"\x89PNG-bytes"
+    assert r.headers["content-type"] == "image/png" and r.headers["x-content-type-options"] == "nosniff"
+    again = client.get(f"/security/v1/announcements/{ID}/image", headers={"If-None-Match": r.headers["etag"]})
+    assert again.status_code == 304
+    assert client.get("/security/v1/announcements/00000000-0000-4000-8000-000000000099/image").status_code == 404
+    assert calls[0] == ("image", ID)
+
+
+def test_super_admin_adds_and_removes_the_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    import base64
+
+    _as(AdminScope("SuperAdmin", "PLATFORM", None))
+    calls = _service(monkeypatch)
+    data = base64.b64encode(b"\x89PNG\r\n\x1a\nxx").decode()
+    r = client.put(f"/security/v1/admin/announcements/{ID}/image", json={"data": data, "width": 800, "height": 600})
+    assert r.status_code == 200 and r.json()["imageVersion"] == "a" * 16
+    assert client.put(f"/security/v1/admin/announcements/{ID}/image", json={"data": "not base64!!"}).status_code == 422
+    assert client.delete(f"/security/v1/admin/announcements/{ID}/image").status_code == 200
+    assert calls == [("set_image", ID, b"\x89PNG\r\n\x1a\nxx", 800), ("remove_image", ID)]
+
+
+def test_only_super_admin_changes_the_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    _as(AdminScope("TenantAdmin", "TENANT", "t1"))
+    calls = _service(monkeypatch)
+    image = {"data": "aGVsbG8gd29ybGQ="}
+    assert client.put(f"/security/v1/admin/announcements/{ID}/image", json=image).status_code == 403
+    assert client.delete(f"/security/v1/admin/announcements/{ID}/image").status_code == 403
+    assert calls == []

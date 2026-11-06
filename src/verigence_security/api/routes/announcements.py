@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from verigence_security.api.platform_dependencies import platform_session
 from verigence_security.api.v2_human_dependencies import security_human_actor
 from verigence_security.core.errors import security_error
-from verigence_security.services.announcements import AnnouncementService
+from verigence_security.services.announcements import MAX_IMAGE_BYTES, AnnouncementService
 from verigence_security.services.app_version_policy import (
     NATIVE_ORIGINS,
     AppVersionPolicyService,
@@ -25,7 +27,8 @@ class AnnouncementIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["NOTICE", "WELCOME", "MAINTENANCE"]
     title: str = Field(min_length=1, max_length=120)
-    body: str = Field(min_length=1, max_length=1000)
+    # May be empty when the announcement is a picture (a poster or a graphic) added after creating it.
+    body: str = Field(default="", max_length=1000)
     backAt: datetime | None = None
     startsAt: datetime | None = None
     endsAt: datetime | None = None
@@ -41,6 +44,14 @@ class AnnouncementPatch(BaseModel):
     endsAt: datetime | None = None
     active: bool | None = None
     people: list[str] | None = Field(default=None, max_length=500)
+
+
+class ImageIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # The picture as base64 (no data: prefix). The apps shrink it before sending; at most 2 MB.
+    data: str = Field(min_length=8, max_length=(MAX_IMAGE_BYTES * 4) // 3 + 8)
+    width: int | None = Field(default=None, ge=1, le=10000)
+    height: int | None = Field(default=None, ge=1, le=10000)
 
 
 class SettingsIn(BaseModel):
@@ -185,4 +196,79 @@ def update_announcement(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=409, detail="This change conflicts with what is already set") from exc
+    return {"announcementId": announcementId}
+
+
+@router.get("/announcements/{announcementId}/image")
+def announcement_image(
+    announcementId: str,
+    request: Request,
+    session: Session = Depends(platform_session),
+) -> Response:
+    """The announcement's picture. Needs no sign-in, like the maintenance notice it can belong to:
+    the id is not guessable, and announcements are messages meant to be shown."""
+    try:
+        found = AnnouncementService(session).image(announcementId)
+    except Exception:  # noqa: BLE001 - a malformed id is simply not found
+        found = None
+    if found is None:
+        raise HTTPException(status_code=404, detail="No image")
+    content_type, data, digest = found
+    etag = f'"{digest[:32]}"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "public, max-age=86400, immutable",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=data, media_type=content_type, headers=headers)
+
+
+@router.put("/admin/announcements/{announcementId}/image")
+def put_announcement_image(
+    announcementId: str,
+    body: ImageIn,
+    request: Request,
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> dict[str, str]:
+    _require_super_admin(actor)
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="The image could not be read") from exc
+    try:
+        version = AnnouncementService(session).set_image(
+            announcement_id=announcementId,
+            data=data,
+            width=body.width,
+            height=body.height,
+            actor_user_id=actor.user_id,
+            correlation_id=request.state.correlation_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"announcementId": announcementId, "imageVersion": version}
+
+
+@router.delete("/admin/announcements/{announcementId}/image")
+def delete_announcement_image(
+    announcementId: str,
+    request: Request,
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> dict[str, str]:
+    _require_super_admin(actor)
+    try:
+        AnnouncementService(session).remove_image(
+            announcement_id=announcementId,
+            actor_user_id=actor.user_id,
+            correlation_id=request.state.correlation_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"announcementId": announcementId}
