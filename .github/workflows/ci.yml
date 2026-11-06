@@ -237,10 +237,26 @@ jobs:
             FROM security.platform_role_permission_defaults d
             JOIN security.permissions p ON p.permission_key=d.permission_key
             WHERE d.status='ACTIVE' AND p.status='ACTIVE'
-              AND d.role_key IN ('PC','TL','PM','CRM','Executive');
+              AND d.role_key IN ('PC','TL','PM','CRM','Executive')
+              AND d.permission_key NOT LIKE 'sevasutra.%';
           ")"
           [ "$v2_default_count" = "159" ] || {
             echo "::error::Security v2 operating-role default seed verification failed."
+            exit 1
+          }
+
+          # SevaSutra module bundles (migration 0052): ANALYST 6, TL 10, PM 12.
+          sevasutra_default_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT string_agg(d.role_key || '=' || n, ',' ORDER BY d.role_key) FROM (
+              SELECT d.role_key, count(*) AS n
+              FROM security.platform_role_permission_defaults d
+              JOIN security.permissions p ON p.permission_key=d.permission_key
+              WHERE d.status='ACTIVE' AND p.status='ACTIVE' AND d.permission_key LIKE 'sevasutra.%'
+              GROUP BY d.role_key
+            ) d;
+          ")"
+          [ "$sevasutra_default_count" = "ANALYST=6,PM=12,TL=10" ] || {
+            echo "::error::SevaSutra module role bundles are not as migration 0052 defines (got: ${sevasutra_default_count})."
             exit 1
           }
 
