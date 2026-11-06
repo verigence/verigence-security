@@ -100,6 +100,11 @@ class _FakeRememberRepository:
         record["token_hash"] = new_token_hash
         record["last_used_at_utc"] = now
 
+    def rotate_retry(self, *, session_id: str, new_token_hash: str) -> None:
+        record = self.__class__.record
+        assert record is not None
+        record["token_hash"] = new_token_hash
+
     def revoke_session(self, *, session_id: str, now: datetime) -> None:
         _ = now
         record = self.__class__.record
@@ -204,7 +209,8 @@ def test_replaying_rotated_mobile_credential_revokes_remember_family() -> None:
         "status": "ACTIVE",
         "created_at_utc": datetime.now(UTC),
         "expires_at_utc": expires_at,
-        "last_used_at_utc": datetime.now(UTC),
+        # rotated well outside the retry window
+        "last_used_at_utc": datetime.now(UTC) - timedelta(minutes=30),
     }
 
     replay = client.post(
@@ -291,3 +297,53 @@ def test_web_resume_rotates_cookie_with_a_driver_returned_utc_tzinfo() -> None:
     cookie = response.headers["set-cookie"].lower()
     assert "verigence_remember=" in cookie
     assert "httponly" in cookie
+
+
+def test_a_retry_after_a_lost_reply_is_allowed_within_the_window_and_never_extends_it() -> None:
+    """The phone sent the resume, Security rotated, the reply was lost: the phone retries with the
+    credential it still holds. Within five minutes of the rotation that is a retry, not copying."""
+    expires_at = datetime.now(UTC) + timedelta(days=30)
+    held = "h" * 48
+    held_hash = hashlib.sha256(held.encode()).hexdigest()
+    lost_hash = hashlib.sha256(("l" * 48).encode()).hexdigest()
+    rotated_at = datetime.now(UTC) - timedelta(seconds=40)
+    _FakeRememberRepository.record = {
+        "access_session_id": SESSION_ID,
+        "user_id": USER_ID,
+        "device_id": DEVICE_ID,
+        "token_hash": lost_hash,
+        "previous_token_hash": held_hash,
+        "status": "ACTIVE",
+        "created_at_utc": datetime.now(UTC) - timedelta(days=1),
+        "expires_at_utc": expires_at,
+        "last_used_at_utc": rotated_at,
+    }
+    retry = client.post("/security/v1/auth/resume", json={"device": _device("MOBILE"), "rememberToken": held})
+    assert retry.status_code == 200, retry.text
+    issued = retry.json()["rememberToken"]
+    record = _FakeRememberRepository.record
+    assert record["status"] == "ACTIVE"
+    assert record["token_hash"] == hashlib.sha256(issued.encode()).hexdigest()
+    assert record["previous_token_hash"] == held_hash  # still the one the phone may retry with
+    assert record["last_used_at_utc"] == rotated_at  # the window does not grow
+    # the newly issued credential works and rotates normally
+    after = client.post("/security/v1/auth/resume", json={"device": _device("MOBILE"), "rememberToken": issued})
+    assert after.status_code == 200
+    assert _FakeRememberRepository.record["previous_token_hash"] == hashlib.sha256(issued.encode()).hexdigest()
+
+
+def test_a_retry_from_another_device_is_still_refused() -> None:
+    held = "q" * 48
+    _FakeRememberRepository.record = {
+        "access_session_id": SESSION_ID,
+        "user_id": USER_ID,
+        "device_id": "00000000-0000-4000-8000-0000000000ff",
+        "token_hash": hashlib.sha256(("z" * 48).encode()).hexdigest(),
+        "previous_token_hash": hashlib.sha256(held.encode()).hexdigest(),
+        "status": "ACTIVE",
+        "created_at_utc": datetime.now(UTC),
+        "expires_at_utc": datetime.now(UTC) + timedelta(days=30),
+        "last_used_at_utc": datetime.now(UTC) - timedelta(seconds=10),
+    }
+    r = client.post("/security/v1/auth/resume", json={"device": _device("MOBILE"), "rememberToken": held})
+    assert r.status_code in {401, 403}
