@@ -1,0 +1,237 @@
+name: SevaSutra Security binding
+
+# Registers SevaSutra (the workshop audit product) as a ServiceIntegration so it can ask Security what a
+# signed-in person may do. SevaSutra keeps its client secret as a Worker secret and publishes only the
+# argon2id hash; this workflow registers that hash and then asks SevaSutra to prove it can obtain a
+# service token. See docs/SEVASUTRA_MODULE_RBAC_2026-11-06.md.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-dev-operation
+  cancel-in-progress: false
+
+env:
+  SEVASUTRA_BASE_URL: https://sevasutra.jbrconsulting.in
+  SEVASUTRA_CLIENT_ID: sevasutra
+  SECURITY_BASE_URL: https://security-dev.up.railway.app
+
+jobs:
+  bind:
+    name: Register the SevaSutra ServiceIntegration credential
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+
+    steps:
+      - name: Check out Security DEV
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Security runtime
+        run: python -m pip install -e .
+
+      - name: Read SevaSutra's published credential hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="$(curl --silent --show-error --output /tmp/binding.json --write-out '%{http_code}' \
+            "$SEVASUTRA_BASE_URL/api/platform/security-binding")"
+          [ "$code" = "200" ] || { echo "::error::SevaSutra binding endpoint answered HTTP $code."; exit 1; }
+          python - <<'PY'
+          import json, os
+          body = json.load(open("/tmp/binding.json", encoding="utf-8"))
+          if body.get("clientId") != os.environ["SEVASUTRA_CLIENT_ID"]:
+              raise SystemExit("SevaSutra published a different client id")
+          secret_hash = body.get("secretHash")
+          if not isinstance(secret_hash, str) or not secret_hash.startswith("$argon2id$"):
+              raise SystemExit("SevaSutra did not publish an argon2id hash")
+          from argon2 import extract_parameters
+          extract_parameters(secret_hash)  # refuses a malformed hash before it reaches the database
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"SEVASUTRA_SECRET_HASH={secret_hash}\n")
+          print("SEVASUTRA_SECRET_HASH=READ")
+          PY
+
+      - name: Resolve Security DEV database
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${MIGRATION_DATABASE_URL:-${DEV_DATABASE_URL:-}}"
+          [ -n "$raw" ] || { echo '::error::Security DEV database URL is missing.'; exit 1; }
+          case "$raw" in
+            postgresql+psycopg://*) db="$raw" ;;
+            postgresql+asyncpg://*) db="postgresql+psycopg://${raw#postgresql+asyncpg://}" ;;
+            postgresql://*) db="postgresql+psycopg://${raw#postgresql://}" ;;
+            postgres://*) db="postgresql+psycopg://${raw#postgres://}" ;;
+            *) echo '::error::Security DEV database URL is not PostgreSQL.'; exit 1 ;;
+          esac
+          echo "::add-mask::$db"
+          echo "DATABASE_URL=$db" >> "$GITHUB_ENV"
+
+      - name: Register the SevaSutra ServiceIntegration credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from datetime import UTC, datetime
+          from uuid import uuid4
+
+          from sqlalchemy import create_engine, text
+
+          integration_key = os.environ["SEVASUTRA_CLIENT_ID"]
+          secret_hash = os.environ["SEVASUTRA_SECRET_HASH"]
+          now = datetime.now(UTC)
+          engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+
+          with engine.begin() as conn:
+              if conn.execute(
+                  text("SELECT 1 FROM security.permissions WHERE module_key='sevasutra' AND status='ACTIVE' LIMIT 1")
+              ).first() is None:
+                  raise SystemExit("Migration 0052 (SevaSutra module) has not been applied")
+
+              admins = conn.execute(
+                  text(
+                      """
+                      SELECT DISTINCT a.user_id
+                      FROM security.user_admin_role_assignments a
+                      JOIN security.users u ON u.user_id=a.user_id AND u.status='ACTIVE'
+                      JOIN security.security_principals p ON p.principal_id=u.user_id AND p.status='ACTIVE'
+                      WHERE a.role_key='SuperAdmin'
+                        AND a.scope_type='PLATFORM'
+                        AND a.scope_id IS NULL
+                        AND a.status='ACTIVE'
+                      """
+                  )
+              ).all()
+              if len(admins) != 1:
+                  raise SystemExit(f"Expected exactly one ACTIVE SuperAdmin; found {len(admins)}")
+              admin_user_id = str(admins[0][0])
+
+              existing = conn.execute(
+                  text(
+                      """
+                      SELECT si.principal_id,p.actor_type,p.status
+                      FROM security.service_integrations si
+                      JOIN security.security_principals p ON p.principal_id=si.principal_id
+                      WHERE si.integration_key=:integration_key
+                      FOR UPDATE OF p
+                      """
+                  ),
+                  {"integration_key": integration_key},
+              ).mappings().first()
+
+              if existing is None:
+                  principal_id = str(uuid4())
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.security_principals
+                          (principal_id,actor_type,principal_name,status,created_at_utc,updated_at_utc)
+                          VALUES (:principal_id,'SERVICE_INTEGRATION','SevaSutra','ACTIVE',:now,:now)
+                          """
+                      ),
+                      {"principal_id": principal_id, "now": now},
+                  )
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.service_integrations
+                          (principal_id,integration_key,description,created_at_utc)
+                          VALUES (:principal_id,:integration_key,'SevaSutra workshop audit authorization client',:now)
+                          """
+                      ),
+                      {"principal_id": principal_id, "integration_key": integration_key, "now": now},
+                  )
+              else:
+                  if existing["actor_type"] != "SERVICE_INTEGRATION" or existing["status"] != "ACTIVE":
+                      raise SystemExit("Existing sevasutra principal is not an ACTIVE SERVICE_INTEGRATION")
+                  principal_id = str(existing["principal_id"])
+
+              credential = conn.execute(
+                  text(
+                      """
+                      SELECT credential_id,principal_id,status,secret_hash
+                      FROM security.principal_credentials
+                      WHERE client_id=:client_id
+                      FOR UPDATE
+                      """
+                  ),
+                  {"client_id": integration_key},
+              ).mappings().first()
+
+              if credential is None:
+                  conn.execute(
+                      text(
+                          """
+                          INSERT INTO security.principal_credentials
+                          (credential_id,principal_id,client_id,secret_hash,status,valid_from_utc,valid_to_utc,
+                           created_by_user_id,created_at_utc,last_used_at_utc)
+                          VALUES (:credential_id,:principal_id,:client_id,:secret_hash,'ACTIVE',:now,NULL,
+                                  :admin_user_id,:now,NULL)
+                          """
+                      ),
+                      {
+                          "credential_id": str(uuid4()),
+                          "principal_id": principal_id,
+                          "client_id": integration_key,
+                          "secret_hash": secret_hash,
+                          "admin_user_id": admin_user_id,
+                          "now": now,
+                      },
+                  )
+                  outcome = "CREATED"
+              else:
+                  if str(credential["principal_id"]) != principal_id:
+                      raise SystemExit("sevasutra client_id belongs to a different principal")
+                  if credential["status"] == "REVOKED":
+                      raise SystemExit("Existing sevasutra credential is REVOKED")
+                  if credential["secret_hash"] == secret_hash and credential["status"] == "ACTIVE":
+                      outcome = "UNCHANGED"
+                  else:
+                      conn.execute(
+                          text(
+                              """
+                              UPDATE security.principal_credentials
+                              SET secret_hash=:secret_hash,status='ACTIVE',valid_from_utc=:now,
+                                  valid_to_utc=NULL,last_used_at_utc=NULL
+                              WHERE credential_id=:credential_id
+                              """
+                          ),
+                          {"secret_hash": secret_hash, "now": now, "credential_id": credential["credential_id"]},
+                      )
+                      outcome = "UPDATED"
+
+          print(f"SEVASUTRA_SERVICE_INTEGRATION={outcome} principal_id={principal_id}")
+          PY
+
+      - name: SevaSutra proves it can obtain a service token
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$SECURITY_BASE_URL/health/ready" >/dev/null
+          for attempt in 1 2 3; do
+            code="$(curl --silent --show-error --output /tmp/check.json --write-out '%{http_code}' \
+              --request POST "$SEVASUTRA_BASE_URL/api/platform/security-binding/check")"
+            if [ "$code" = "200" ] && python -c "import json,sys; sys.exit(0 if json.load(open('/tmp/check.json')).get('ok') is True else 1)"; then
+              echo "SEVASUTRA_SERVICE_TOKEN=PASS"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::SevaSutra could not obtain a Security service token (HTTP $code)."
+          cat /tmp/check.json
+          exit 1
