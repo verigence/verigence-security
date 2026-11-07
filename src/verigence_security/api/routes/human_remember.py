@@ -90,6 +90,7 @@ def _issue_remember_credential(
     user_id: str,
     session_id: str,
     device_id: str,
+    device_type: str,
     settings: Settings,
     now: datetime,
 ) -> tuple[str, datetime]:
@@ -99,6 +100,7 @@ def _issue_remember_credential(
         user_id=user_id,
         session_id=session_id,
         device_id=device_id,
+        device_type=device_type,
         token_hash=_hash_credential(credential),
         expires_at=expires_at,
         now=now,
@@ -183,6 +185,7 @@ def remember_human_session(
         user_id=user_id,
         session_id=str(session_id),
         device_id=str(token_device_id),
+        device_type=body.device.deviceType,
         settings=settings,
         now=now,
     )
@@ -284,6 +287,11 @@ def _resume_human_session(
         remember.revoke_session(session_id=str(session_id), now=now)
         raise security_error("AUTH_TOKEN_EXPIRED")
     if body.device.deviceId != device_id:
+        raise security_error("AUTH_TOKEN_INVALID")
+    # A remembered sign-in belongs to one device type (one phone and one PC may each hold one):
+    # a phone credential is never accepted as a browser's, nor the other way round.
+    record_device_type = record.get("device_type")
+    if record_device_type is not None and record_device_type != body.device.deviceType:
         raise security_error("AUTH_TOKEN_INVALID")
     require_supported_app(
         repo.s, browser_name=body.device.browserName, app_version=body.device.appVersion

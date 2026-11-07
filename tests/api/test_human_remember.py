@@ -58,6 +58,7 @@ class _FakeObservationRepository:
 
 class _FakeRememberRepository:
     record: dict[str, object] | None = None
+    replaced_for_type: str | None = None
 
     def __init__(self, session: object) -> None:
         _ = session
@@ -68,14 +69,17 @@ class _FakeRememberRepository:
         user_id: str,
         session_id: str,
         device_id: str,
+        device_type: str,
         token_hash: str,
         expires_at: datetime,
         now: datetime,
     ) -> None:
+        self.__class__.replaced_for_type = device_type
         self.__class__.record = {
             "access_session_id": session_id,
             "user_id": user_id,
             "device_id": device_id,
+            "device_type": device_type,
             "token_hash": token_hash,
             "previous_token_hash": None,
             "status": "ACTIVE",
@@ -122,6 +126,7 @@ class _FakeRememberRepository:
 @pytest.fixture(autouse=True)
 def _dependencies(monkeypatch: pytest.MonkeyPatch):
     _FakeRememberRepository.record = None
+    _FakeRememberRepository.replaced_for_type = None
     app.dependency_overrides.clear()
     app.dependency_overrides[get_settings] = lambda: Settings(
         platform_admin_token_ttl_minutes=15,
@@ -347,3 +352,40 @@ def test_a_retry_from_another_device_is_still_refused() -> None:
     }
     r = client.post("/security/v1/auth/resume", json={"device": _device("MOBILE"), "rememberToken": held})
     assert r.status_code in {401, 403}
+
+
+def test_remember_is_kept_per_device_type() -> None:
+    """One remembered sign-in per user per device type: the repository is told which type the new
+    credential belongs to, so it replaces only the previous credential of that type."""
+    response = client.post(
+        "/security/v1/auth/remember",
+        headers={"Authorization": "Bearer current-access"},
+        json={"device": _device("MOBILE")},
+    )
+    assert response.status_code == 200
+    assert _FakeRememberRepository.replaced_for_type == "MOBILE"
+    assert _FakeRememberRepository.record is not None
+    assert _FakeRememberRepository.record["device_type"] == "MOBILE"
+
+
+def test_a_phone_credential_is_not_accepted_as_a_browser_one() -> None:
+    token = "p" * 48
+    _FakeRememberRepository.record = {
+        "access_session_id": SESSION_ID,
+        "user_id": USER_ID,
+        "device_id": DEVICE_ID,
+        "device_type": "MOBILE",
+        "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+        "previous_token_hash": None,
+        "status": "ACTIVE",
+        "created_at_utc": datetime.now(UTC),
+        "expires_at_utc": datetime.now(UTC) + timedelta(days=30),
+        "last_used_at_utc": datetime.now(UTC),
+    }
+    response = client.post(
+        "/security/v1/auth/resume",
+        headers={"Cookie": f"verigence_remember={token}"},
+        json={"device": _device("WEB")},
+    )
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_TOKEN_INVALID"
