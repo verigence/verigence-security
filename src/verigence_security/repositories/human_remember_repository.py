@@ -23,12 +23,15 @@ class HumanRememberRepository:
         user_id: str,
         session_id: str,
         device_id: str,
+        device_type: str,
         token_hash: str,
         expires_at: datetime,
         now: datetime,
     ) -> None:
-        # Keep the existing one-active-remembered-session behaviour aligned with the already
-        # enforced one-active-human-session policy. The upsert makes a transient client retry safe.
+        # One remembered sign-in per user PER DEVICE TYPE (product owner, 7 Nov 2026), aligned with
+        # the one-active-human-session-per-device-type policy: a phone and a PC may both stay signed
+        # in; a new phone replaces the previous phone, a new browser the previous browser. The upsert
+        # makes a transient client retry safe.
         self.s.execute(
             text(
                 """
@@ -37,22 +40,24 @@ class HumanRememberRepository:
                 WHERE user_id=:user_id
                   AND access_session_id<>:session_id
                   AND status='ACTIVE'
+                  AND device_type=:device_type
                 """
             ),
-            {"user_id": user_id, "session_id": session_id, "now": now},
+            {"user_id": user_id, "session_id": session_id, "device_type": device_type, "now": now},
         )
         self.s.execute(
             text(
                 """
                 INSERT INTO security.human_remember_sessions
-                  (access_session_id,user_id,device_id,token_hash,previous_token_hash,status,
-                   created_at_utc,expires_at_utc,last_used_at_utc,revoked_at_utc)
+                  (access_session_id,user_id,device_id,device_type,token_hash,previous_token_hash,
+                   status,created_at_utc,expires_at_utc,last_used_at_utc,revoked_at_utc)
                 VALUES
-                  (:session_id,:user_id,:device_id,:token_hash,NULL,'ACTIVE',
-                   :now,:expires_at,:now,NULL)
+                  (:session_id,:user_id,:device_id,:device_type,:token_hash,NULL,
+                   'ACTIVE',:now,:expires_at,:now,NULL)
                 ON CONFLICT (access_session_id) DO UPDATE SET
                   user_id=EXCLUDED.user_id,
                   device_id=EXCLUDED.device_id,
+                  device_type=EXCLUDED.device_type,
                   token_hash=EXCLUDED.token_hash,
                   previous_token_hash=NULL,
                   status='ACTIVE',
@@ -66,6 +71,7 @@ class HumanRememberRepository:
                 "session_id": session_id,
                 "user_id": user_id,
                 "device_id": device_id,
+                "device_type": device_type,
                 "token_hash": token_hash,
                 "now": now,
                 "expires_at": expires_at,
@@ -78,8 +84,8 @@ class HumanRememberRepository:
             self.s.execute(
                 text(
                     """
-                SELECT access_session_id,user_id,device_id,token_hash,previous_token_hash,status,
-                       created_at_utc,expires_at_utc,last_used_at_utc
+                SELECT access_session_id,user_id,device_id,device_type,token_hash,previous_token_hash,
+                       status,created_at_utc,expires_at_utc,last_used_at_utc
                 FROM security.human_remember_sessions
                 WHERE token_hash=:token_hash OR previous_token_hash=:token_hash
                 FOR UPDATE

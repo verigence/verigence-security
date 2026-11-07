@@ -37,7 +37,7 @@ class HumanObservationRepository:
         now: datetime,
     ) -> dict[str, Any]:
         # A USER row lock serializes simultaneous observation registration for the same account and
-        # makes the one-ACTIVE-session rule deterministic without introducing distributed locking.
+        # makes the one-ACTIVE-session-per-device-type rule deterministic without introducing distributed locking.
         self.s.execute(
             text("SELECT user_id FROM security.users WHERE user_id=:user_id FOR UPDATE"),
             {"user_id": user_id},
@@ -100,16 +100,19 @@ class HumanObservationRepository:
         superseded = 0
         previous_different_device = False
         if existing is None:
+            # One ACTIVE session per user PER DEVICE TYPE (product owner, 7 Nov 2026): a sign-in on a
+            # PC browser no longer ends the person's phone session, and the other way round. A new
+            # sign-in on another device of the same type still supersedes the previous one.
             previous = (
                 self.s.execute(
                     text(
                         """
                     SELECT device_id
                     FROM security.human_access_sessions
-                    WHERE user_id=:user_id AND status='ACTIVE'
+                    WHERE user_id=:user_id AND status='ACTIVE' AND device_type=:device_type
                     """
                     ),
-                    {"user_id": user_id},
+                    {"user_id": user_id, "device_type": device_type},
                 )
                 .mappings()
                 .all()
@@ -121,19 +124,19 @@ class HumanObservationRepository:
                     """
                     UPDATE security.human_access_sessions
                     SET status='SUPERSEDED',superseded_at_utc=:now,last_seen_at_utc=:now
-                    WHERE user_id=:user_id AND status='ACTIVE'
+                    WHERE user_id=:user_id AND status='ACTIVE' AND device_type=:device_type
                     """
                 ),
-                {"user_id": user_id, "now": now},
+                {"user_id": user_id, "device_type": device_type, "now": now},
             )
             self.s.execute(
                 text(
                     """
                     INSERT INTO security.human_access_sessions
-                      (access_session_id,user_id,device_id,status,source_ip,started_at_utc,
+                      (access_session_id,user_id,device_id,device_type,status,source_ip,started_at_utc,
                        token_expires_at_utc,last_seen_at_utc,geo_status,observation_mode)
                     VALUES
-                      (:session_id,:user_id,:device_id,'ACTIVE',:source_ip,:now,
+                      (:session_id,:user_id,:device_id,:device_type,'ACTIVE',:source_ip,:now,
                        :token_expires_at,:now,'PENDING','OBSERVE')
                     """
                 ),
@@ -141,6 +144,7 @@ class HumanObservationRepository:
                     "session_id": str(session_id),
                     "user_id": user_id,
                     "device_id": str(device_id),
+                    "device_type": device_type,
                     "source_ip": source_ip,
                     "now": now,
                     "token_expires_at": token_expires_at,
