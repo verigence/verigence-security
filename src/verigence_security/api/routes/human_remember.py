@@ -252,17 +252,33 @@ def _resume_human_session(
     device_id = UUID(str(record["device_id"]))
     now = datetime.now(UTC)
 
-    # A replay of the immediately previous rotated credential is strong evidence of copying. Revoke
-    # the active family rather than allowing either holder to continue using the remembered session.
+    # A replay of the immediately previous rotated credential is strong evidence of copying, unless
+    # it arrives within a few minutes of that rotation: then it is the same phone retrying a resume
+    # whose reply it never received (2026-11-06; "Keep me signed in" was being lost on weak mobile
+    # networks). The previous credential can only still match while the newer one has never been
+    # used, because using it rotates again. Outside the window, revoke the whole family.
+    retry = False
     if record.get("previous_token_hash") == credential_hash:
-        remember.revoke_session(session_id=str(session_id), now=now)
-        logger.warning(
-            "security_remember_token_replay",
-            extra={"event_name": "security_remember_token_replay", "outcome": "DENIED"},
+        rotated_at = record.get("last_used_at_utc")
+        grace = timedelta(seconds=settings.human_remember_retry_grace_seconds)
+        retry = (
+            record.get("status") == "ACTIVE"
+            and isinstance(rotated_at, datetime)
+            and timedelta(0) <= now - rotated_at <= grace
         )
-        raise security_error("AUTH_TOKEN_INVALID")
+        if not retry:
+            remember.revoke_session(session_id=str(session_id), now=now)
+            logger.warning(
+                "security_remember_token_replay",
+                extra={"event_name": "security_remember_token_replay", "outcome": "DENIED"},
+            )
+            raise security_error("AUTH_TOKEN_INVALID")
+        logger.info(
+            "security_remember_resume_retry",
+            extra={"event_name": "security_remember_resume_retry", "outcome": "ALLOWED"},
+        )
 
-    if record.get("token_hash") != credential_hash or record.get("status") != "ACTIVE":
+    if (not retry and record.get("token_hash") != credential_hash) or record.get("status") != "ACTIVE":
         raise security_error("AUTH_TOKEN_INVALID")
     if record["expires_at_utc"] <= now:
         remember.revoke_session(session_id=str(session_id), now=now)
@@ -301,11 +317,14 @@ def _resume_human_session(
     )
 
     rotated = _new_credential()
-    remember.rotate(
-        session_id=str(session_id),
-        new_token_hash=_hash_credential(rotated),
-        now=now,
-    )
+    if retry:
+        remember.rotate_retry(session_id=str(session_id), new_token_hash=_hash_credential(rotated))
+    else:
+        remember.rotate(
+            session_id=str(session_id),
+            new_token_hash=_hash_credential(rotated),
+            now=now,
+        )
 
     if body.device.deviceType == "WEB":
         set_web_remember_cookie(response, rotated, record["expires_at_utc"], now)

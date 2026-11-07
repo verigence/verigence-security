@@ -117,6 +117,21 @@ class HumanRememberRepository:
         )
         self.s.commit()
 
+    def rotate_retry(self, *, session_id: str, new_token_hash: str) -> None:
+        """A retried resume whose earlier reply was lost: issue a new current credential, keep the
+        previous one as it is and keep the time of the first rotation, so the retry window never grows."""
+        self.s.execute(
+            text(
+                """
+                UPDATE security.human_remember_sessions
+                SET token_hash=:new_token_hash
+                WHERE access_session_id=:session_id AND status='ACTIVE'
+                """
+            ),
+            {"session_id": session_id, "new_token_hash": new_token_hash},
+        )
+        self.s.commit()
+
     def revoke_session(self, *, session_id: str, now: datetime) -> None:
         self.s.execute(
             text(

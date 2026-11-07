@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # "Keep me signed in" uses a separate opaque, rotating resume credential. Normal API access
     # tokens remain short-lived. Thirty days is an absolute lifetime, not a sliding session.
     human_remember_session_ttl_days: int = Field(default=30, gt=0, le=90)
+    # A phone can lose the reply to a resume (weak signal, the app closed mid-request) after Security
+    # has already rotated the credential. Within this many seconds of that rotation, presenting the
+    # previous credential again is treated as that retry, not as copying. Beyond it, replay revokes.
+    human_remember_retry_grace_seconds: int = Field(default=300, ge=0, le=900)
 
     # Global-human device registration is observation-only in the first rollout. Exceeding this
     # number is recorded and surfaced to the client but does not block authentication.
