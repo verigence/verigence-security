@@ -111,6 +111,8 @@ Stores:
 
 There is at most one `ACTIVE` observation session per global user. A new observation registration marks the previous active session `SUPERSEDED` and activates the new session atomically.
 
+**Changed 7 Nov 2026 (migration 0055, product owner):** the rule is now one `ACTIVE` session per global user **per device type** (`MOBILE` = the Android app, `WEB` = a browser). A sign-in on a PC no longer supersedes the phone's session, and the other way round; a sign-in on another phone still supersedes the previous phone, and another browser the previous browser. The same rule applies to remembered sign-ins ("Keep me signed in", `human_remember_sessions`): one per user per device type. "Device A" and "Device B" below are two devices of the same type.
+
 ## Simultaneous login behaviour
 
 The new login always proceeds. The previous session is not interrupted mid-token.
