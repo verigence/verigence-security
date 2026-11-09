@@ -80,3 +80,10 @@ SevaSutra's secret changed.
 - Internal roles (`ANALYST`, `TL`, `PM`) are not restricted to employees.
 - Existing Projects are backfilled with the `CLIENT` bundle; new Projects receive it through provisioning,
   which seeds every `OPERATING` role's defaults.
+
+## Executive (product owner, 9 Nov 2026)
+
+"Lets have executive role in seva sutra.. it is required." The Executive operating role, the senior oversight
+role of a Project, holds the PM's SevaSutra bundle (migration 0057): it sees everything, approves, issues
+reports, settles leakage and governs thresholds and the team. Capture stays with the Analyst. Existing Projects
+are backfilled; new ones receive it at provisioning.

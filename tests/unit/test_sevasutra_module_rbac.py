@@ -133,3 +133,20 @@ def test_super_admin_does_not_sign_off_in_sevasutra() -> None:
 
     assert {"sevasutra.observation.approve", "sevasutra.leakage.settle"} <= SUPER_ADMIN_EXCLUDED_PERMISSIONS
     assert "sevasutra.analytics.read" not in SUPER_ADMIN_EXCLUDED_PERMISSIONS
+
+
+# ---------------------------------------------------------------- Executive (0057, 9 Nov 2026)
+
+EXECUTIVE_MIGRATION = Path("migrations/0057_sevasutra_executive.sql")
+
+
+def test_the_executive_holds_the_pm_bundle() -> None:
+    assert _bundle("Executive", EXECUTIVE_MIGRATION) == _bundle("PM")
+    assert "sevasutra.evidence.upload" not in _bundle("Executive", EXECUTIVE_MIGRATION)
+
+
+def test_existing_projects_are_backfilled_with_the_executive_sevasutra_bundle_only() -> None:
+    backfill = EXECUTIVE_MIGRATION.read_text().split("INSERT INTO security.tenant_role_permissions", 1)[1]
+    assert "d.role_key='Executive'" in backfill
+    assert "d.permission_key LIKE 'sevasutra.%'" in backfill
+    assert "ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING" in backfill
