@@ -245,7 +245,7 @@ jobs:
             exit 1
           }
 
-          # SevaSutra module bundles (migrations 0052, 0056, 0057): ANALYST 6, CLIENT 2, Executive 12, TL 10, PM 12.
+          # SevaSutra module bundles (migrations 0052, 0056, 0057, 0058): ANALYST 6, CLIENT 2, Executive 12, PC 6, TL 10, PM 12.
           sevasutra_default_count="$(psql "$SECURITY_MIGRATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
             SELECT string_agg(d.role_key || '=' || n, ',' ORDER BY d.role_key) FROM (
               SELECT d.role_key, count(*) AS n
@@ -255,8 +255,8 @@ jobs:
               GROUP BY d.role_key
             ) d;
           ")"
-          [ "$sevasutra_default_count" = "ANALYST=6,CLIENT=2,Executive=12,PM=12,TL=10" ] || {
-            echo "::error::SevaSutra module role bundles are not as migrations 0052, 0056 and 0057 define (got: ${sevasutra_default_count})."
+          [ "$sevasutra_default_count" = "ANALYST=6,CLIENT=2,Executive=12,PC=6,PM=12,TL=10" ] || {
+            echo "::error::SevaSutra module role bundles are not as migrations 0052, 0056, 0057 and 0058 define (got: ${sevasutra_default_count})."
             exit 1
           }
 
