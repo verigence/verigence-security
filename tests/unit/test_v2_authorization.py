@@ -673,7 +673,12 @@ def test_super_admin_oversees_sevasutra_but_does_not_sign_off() -> None:
     """Super Admin sees and manages SevaSutra; approving observations and settling leakage stay with
     the Team Lead and the PM of the Project (product owner, 9 Nov 2026)."""
     repo = FakeAuthorizationRepository()
-    for key in ("sevasutra.analytics.read", "sevasutra.settings.manage", "sevasutra.observation.approve", "sevasutra.leakage.settle"):
+    for key in (
+        "sevasutra.analytics.read",
+        "sevasutra.settings.manage",
+        "sevasutra.observation.approve",
+        "sevasutra.leakage.settle",
+    ):
         repo.permissions[key] = "sevasutra"
     repo.admin_assignments = [{"role_key": "SuperAdmin", "scope_type": "PLATFORM", "scope_id": None}]
     resolver = HumanAuthorizationResolver(repo)
