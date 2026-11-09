@@ -667,3 +667,21 @@ def test_fast_batch_keeps_the_super_admin_exclusions() -> None:
         permission_keys=["hr.payroll.read", "hr.payroll.approve"],
     )
     assert [d.allowed for d in got] == [True, False]
+
+
+def test_super_admin_oversees_sevasutra_but_does_not_sign_off() -> None:
+    """Super Admin sees and manages SevaSutra; approving observations and settling leakage stay with
+    the Team Lead and the PM of the Project (product owner, 9 Nov 2026)."""
+    repo = FakeAuthorizationRepository()
+    for key in ("sevasutra.analytics.read", "sevasutra.settings.manage", "sevasutra.observation.approve", "sevasutra.leakage.settle"):
+        repo.permissions[key] = "sevasutra"
+    repo.admin_assignments = [{"role_key": "SuperAdmin", "scope_type": "PLATFORM", "scope_id": None}]
+    resolver = HumanAuthorizationResolver(repo)
+
+    def check(key: str):
+        return resolver.check(user_id=USER_ID, tenant_id=TENANT_A, permission_key=key)
+
+    assert check("sevasutra.analytics.read").reason_code == "ALLOW_SUPER_ADMIN"
+    assert check("sevasutra.settings.manage").reason_code == "ALLOW_SUPER_ADMIN"
+    assert check("sevasutra.observation.approve").allowed is False
+    assert check("sevasutra.leakage.settle").allowed is False

@@ -52,9 +52,18 @@ GLOBAL_MODULE_ROLE_MODULES = frozenset({"attendance", "hr"})
 
 
 # Permissions SuperAdmin does not get through its blanket access. They are held only through the
-# module role named for them: approving a payroll run, or an employee's status change, belongs to
-# the CEO role alone.
-SUPER_ADMIN_EXCLUDED_PERMISSIONS = frozenset({"hr.payroll.approve", "hr.employee.status_approve"})
+# role named for them: approving a payroll run, or an employee's status change, belongs to the CEO
+# role alone; in SevaSutra, approving an observation and settling leakage belong to the Team Lead and
+# the PM of the Project -- Super Admin oversees SevaSutra but does not sign off (product owner, 9 Nov
+# 2026).
+SUPER_ADMIN_EXCLUDED_PERMISSIONS = frozenset(
+    {
+        "hr.payroll.approve",
+        "hr.employee.status_approve",
+        "sevasutra.observation.approve",
+        "sevasutra.leakage.settle",
+    }
+)
 
 
 class AuthorizationRepository(Protocol):

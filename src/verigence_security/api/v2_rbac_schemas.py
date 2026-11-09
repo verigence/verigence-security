@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 # are codes. Kept in step with security.role_definitions, where migration 0046
 # added REVIEWER and 0052 added ANALYST (SevaSutra), and with the CHECK on
 # user_tenant_operating_roles.role_key.
-OperatingRoleKey = Literal["PC", "TL", "PM", "CRM", "Executive", "REVIEWER", "ANALYST"]
+OperatingRoleKey = Literal["PC", "TL", "PM", "CRM", "Executive", "REVIEWER", "ANALYST", "CLIENT"]
 RoleClass = Literal["OPERATING", "ADMIN", "TEST"]
 RoleStatus = Literal["ACTIVE", "INACTIVE"]
 

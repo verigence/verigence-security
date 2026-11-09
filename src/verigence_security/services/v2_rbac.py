@@ -17,7 +17,7 @@ from verigence_security.repositories.v2_rbac_repository import V2RbacRepository
 # five. It was missing here, so Role Mapping got HTTP 409 "Role must be an
 # ACTIVE Phase-1 operating role" for it on dev (23 Oct 2026). ANALYST (migration
 # 0052) is SevaSutra's on-site role.
-OPERATING_ROLE_KEYS = frozenset({"PC", "TL", "PM", "CRM", "Executive", "REVIEWER", "ANALYST"})
+OPERATING_ROLE_KEYS = frozenset({"PC", "TL", "PM", "CRM", "Executive", "REVIEWER", "ANALYST", "CLIENT"})
 ADMIN_ROLE_SCOPES = {
     "SuperAdmin": "PLATFORM",
     "TenantAdmin": "TENANT",
