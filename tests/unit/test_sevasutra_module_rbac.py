@@ -12,12 +12,13 @@ from pathlib import Path
 from verigence_security.api.v2_rbac_schemas import OperatingRoleKey
 
 MIGRATION = Path("migrations/0052_sevasutra_module_rbac.sql")
+CLIENT_MIGRATION = Path("migrations/0056_sevasutra_client_role.sql")
 WORKFLOW = Path(".github/workflows/sevasutra-security-bind.yml")
 
 
-def _bundle(role_key: str) -> set[str]:
-    match = re.search(rf"\('{role_key}',ARRAY\[(.*?)\]::varchar\[\]\)", MIGRATION.read_text(), re.DOTALL)
-    assert match is not None, f"No {role_key} bundle in {MIGRATION.name}"
+def _bundle(role_key: str, migration: Path = MIGRATION) -> set[str]:
+    match = re.search(rf"\('{role_key}',ARRAY\[(.*?)\]::varchar\[\]\)", migration.read_text(), re.DOTALL)
+    assert match is not None, f"No {role_key} bundle in {migration.name}"
     return set(re.findall(r"'([a-z0-9._]+)'", match.group(1)))
 
 
@@ -101,3 +102,34 @@ def test_the_binding_workflow_never_handles_the_plaintext_secret() -> None:
     assert "SEVASUTRA_SECRET_HASH" in source
     assert "$argon2id$" in source
     assert "CLIENT_SECRET" not in source
+
+
+# ---------------------------------------------------------------- client access (0056, 9 Nov 2026)
+
+
+def test_client_is_an_assignable_operating_role() -> None:
+    from verigence_security.services.v2_rbac import OPERATING_ROLE_KEYS
+
+    assert "CLIENT" in OperatingRoleKey.__args__
+    assert "CLIENT" in OPERATING_ROLE_KEYS
+    source = CLIENT_MIGRATION.read_text()
+    assert "('CLIENT','OPERATING','Client (analytics)','ACTIVE'" in source
+    assert "CHECK (role_key IN ('PC','TL','PM','CRM','Executive','REVIEWER','ANALYST','CLIENT'))" in source
+
+
+def test_a_client_sees_the_analytics_and_nothing_else() -> None:
+    assert _bundle("CLIENT", CLIENT_MIGRATION) == {"sevasutra.project.read", "sevasutra.analytics.read"}
+    assert _bundle("CLIENT", CLIENT_MIGRATION) <= _catalogue()
+
+
+def test_existing_projects_are_backfilled_with_the_client_bundle_only() -> None:
+    backfill = CLIENT_MIGRATION.read_text().split("INSERT INTO security.tenant_role_permissions", 1)[1]
+    assert "d.role_key='CLIENT'" in backfill
+    assert "ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING" in backfill
+
+
+def test_super_admin_does_not_sign_off_in_sevasutra() -> None:
+    from verigence_security.services.v2_authorization import SUPER_ADMIN_EXCLUDED_PERMISSIONS
+
+    assert {"sevasutra.observation.approve", "sevasutra.leakage.settle"} <= SUPER_ADMIN_EXCLUDED_PERMISSIONS
+    assert "sevasutra.analytics.read" not in SUPER_ADMIN_EXCLUDED_PERMISSIONS

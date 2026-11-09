@@ -64,3 +64,19 @@ The binding workflow:
 
 The plaintext secret never leaves SevaSutra's Worker. Running the workflow again rotates nothing unless
 SevaSutra's secret changed.
+
+## Client access and Super Admin oversight (product owner, 9 November 2026)
+
+**Migration:** `migrations/0056_sevasutra_client_role.sql`
+
+| Who | Key | Holds |
+| --- | --- | --- |
+| Client (analytics) | `CLIENT`, new operating role | People who are not JBR employees (dealer principal, service manager, OEM or other client people). The analytics of the Project's dealership and nothing else: `sevasutra.project.read`, `sevasutra.analytics.read`. |
+| Super Admin | existing admin role | Oversees SevaSutra: every dealership, settings, rules, the platform console. Does **not** approve observations (`sevasutra.observation.approve`) or settle leakage (`sevasutra.leakage.settle`); those stay with the Team Lead and the PM, as payroll approval stays with the CEO. Enforced in `SUPER_ADMIN_EXCLUDED_PERMISSIONS`. |
+
+- What `CLIENT` shows is set once per Project, through the Project's `CLIENT` bundle; the default is the
+  analytics only. A client sees only figures from observations a Team Lead has approved.
+- `CLIENT` carries no `audit.*` or `di.*` permission, so in a sales-audit Project it gives nothing.
+- Internal roles (`ANALYST`, `TL`, `PM`) are not restricted to employees.
+- Existing Projects are backfilled with the `CLIENT` bundle; new Projects receive it through provisioning,
+  which seeds every `OPERATING` role's defaults.
