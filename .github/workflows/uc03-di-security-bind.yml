@@ -46,7 +46,7 @@ jobs:
       - name: Install Security runtime and Railway CLI
         run: |
           python -m pip install -e .
-          npm install --global @railway/cli
+          npm install --global @railway/cli@5.70.0
 
       - name: Verify approved shared DEV target
         shell: bash

@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: dev}
-      - run: npm install --global @railway/cli
+      - run: npm install --global @railway/cli@5.70.0
       - name: Capture live Security state
         shell: bash
         run: |
