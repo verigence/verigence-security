@@ -150,3 +150,16 @@ def test_existing_projects_are_backfilled_with_the_executive_sevasutra_bundle_on
     assert "d.role_key='Executive'" in backfill
     assert "d.permission_key LIKE 'sevasutra.%'" in backfill
     assert "ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING" in backfill
+
+
+# ---------------------------------------------------------------- PC (0058, 9 Nov 2026)
+
+PC_MIGRATION = Path("migrations/0058_sevasutra_pc.sql")
+
+
+def test_the_pc_holds_the_analyst_bundle_and_never_approves() -> None:
+    pc = _bundle("PC", PC_MIGRATION)
+    assert pc == _bundle("ANALYST")
+    assert "sevasutra.observation.approve" not in pc
+    backfill = PC_MIGRATION.read_text().split("INSERT INTO security.tenant_role_permissions", 1)[1]
+    assert "d.role_key='PC'" in backfill and "d.permission_key LIKE 'sevasutra.%'" in backfill

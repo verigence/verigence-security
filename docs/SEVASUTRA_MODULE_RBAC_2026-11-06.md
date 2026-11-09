@@ -87,3 +87,8 @@ SevaSutra's secret changed.
 role of a Project, holds the PM's SevaSutra bundle (migration 0057): it sees everything, approves, issues
 reports, settles leakage and governs thresholds and the team. Capture stays with the Analyst. Existing Projects
 are backfilled; new ones receive it at provisioning.
+
+## PC (product owner, 9 Nov 2026)
+
+"PC = Analyst in SevaSutra." The PC operating role holds the Analyst's SevaSutra bundle (migration 0058), at the
+outlets mapped to them, and like the Analyst never approves. Existing Projects are backfilled.
