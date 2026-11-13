@@ -7,6 +7,13 @@ the container's CPU and memory, read from the cgroup every 5 seconds and kept
 as the per-minute average and peak, in platform_ops.service_resource_minutes.
 
 Best effort: a failed write is logged and dropped. It never stops Security.
+
+The night's sleep (product owner 2026-11-13: "we can make system sleep from 12:30 am to 8:00 am"):
+the database is billed for every hour it runs and stops only after five minutes without a query, and
+a beat a minute kept it running all night. Inside the window (India time, VERIGENCE_SLEEP_WINDOW_IST,
+"off" to disable; the same setting as Audit Core's audit_core.sleep_window) nothing is sampled or
+written. Security still answers every request. System Health reads a service last heard from as the
+window opened as running.
 """
 from __future__ import annotations
 
@@ -16,9 +23,11 @@ import threading
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
+from datetime import time as clock_time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Engine, text
 
@@ -27,6 +36,39 @@ logger = logging.getLogger(__name__)
 SAMPLE_SECONDS = 5.0
 BEAT_EVERY_SAMPLES = 12
 _CGROUP = Path("/sys/fs/cgroup")
+
+
+_IST = ZoneInfo("Asia/Kolkata")
+DEFAULT_SLEEP_WINDOW = "00:30-08:00"
+
+
+def parse_sleep_window(value: str | None) -> tuple[clock_time, clock_time] | None:
+    """``"00:30-08:00"`` as two India times; None for "off". Anything unreadable is the default."""
+    raw = (value or "").strip().lower()
+    if raw in {"off", "none", "never", "false", "0"}:
+        return None
+    for candidate in (raw, DEFAULT_SLEEP_WINDOW):
+        start_text, _, end_text = candidate.partition("-")
+        try:
+            start = clock_time.fromisoformat(start_text.strip())
+            end = clock_time.fromisoformat(end_text.strip())
+        except ValueError:
+            continue
+        if start != end:
+            return start, end
+    return None
+
+
+SLEEP_WINDOW = parse_sleep_window(os.environ.get("VERIGENCE_SLEEP_WINDOW_IST", DEFAULT_SLEEP_WINDOW))
+
+
+def asleep(now: datetime | None = None) -> bool:
+    """Whether the clock is inside the night's sleep: no beat, no samples."""
+    if SLEEP_WINDOW is None:
+        return False
+    start, end = SLEEP_WINDOW
+    local = (now or datetime.now(UTC)).astimezone(_IST).time()
+    return start <= local < end if start < end else (local >= start or local < end)
 
 
 def _minute(now: float) -> datetime:
@@ -199,6 +241,8 @@ def start_platform_heartbeat(
         _safe("sample", heartbeat.sample)
         n = 0
         while not stop.wait(sample_seconds):
+            if asleep():
+                continue
             n += 1
             _safe("sample", heartbeat.sample)
             if n % BEAT_EVERY_SAMPLES == 0:
