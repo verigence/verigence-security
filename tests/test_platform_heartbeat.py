@@ -66,3 +66,55 @@ def test_a_missing_boot_row_is_written_by_the_next_beat() -> None:
     beat = hb.PlatformHeartbeat(_Engine(), "security")  # type: ignore[arg-type]
     beat.beat()
     assert executed == ["UPDATE", "INSERT"]
+
+
+# ── the night's sleep (product owner 2026-11-13) ────────────────────────────
+
+def test_the_sleep_window_is_half_past_midnight_to_eight_india_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime
+    from datetime import time as clock_time
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+
+    def at(hour: int, minute: int = 0) -> datetime:
+        return datetime(2026, 11, 14, hour, minute, tzinfo=ist).astimezone(UTC)
+
+    monkeypatch.setattr(hb, "SLEEP_WINDOW", hb.parse_sleep_window(hb.DEFAULT_SLEEP_WINDOW))
+    assert (clock_time(0, 30), clock_time(8, 0)) == hb.SLEEP_WINDOW
+    assert not hb.asleep(at(0, 29)) and hb.asleep(at(0, 30)) and hb.asleep(at(7, 59)) and not hb.asleep(at(8, 0))
+    assert hb.parse_sleep_window("off") is None
+    assert hb.parse_sleep_window("not a window") == (clock_time(0, 30), clock_time(8, 0))
+    monkeypatch.setattr(hb, "SLEEP_WINDOW", None)
+    assert not hb.asleep(at(3, 0))
+
+
+def test_asleep_nothing_is_sampled_or_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import time as clock_time
+
+    calls: list[str] = []
+    monkeypatch.setattr(hb.PlatformHeartbeat, "boot", lambda self: calls.append("boot"))
+    monkeypatch.setattr(hb.PlatformHeartbeat, "sample", lambda self: calls.append("sample"))
+    monkeypatch.setattr(hb.PlatformHeartbeat, "beat", lambda self, **_k: calls.append("beat"))
+    monkeypatch.setattr(hb.PlatformHeartbeat, "stop", lambda self, *_a: calls.append("stop"))
+    monkeypatch.setattr(hb, "BEAT_EVERY_SAMPLES", 2)
+    monkeypatch.setattr(hb, "SLEEP_WINDOW", (clock_time(0, 0), clock_time(23, 59, 59)))  # asleep all day
+
+    class Stop:
+        """Lets the loop turn five times, then stops it."""
+
+        turns = 0
+
+        def wait(self, _seconds: float) -> bool:
+            self.turns += 1
+            return self.turns > 5
+
+    thread = hb.start_platform_heartbeat(None, "security", Stop(), sample_seconds=0)  # type: ignore[arg-type]
+    thread.join(timeout=5)
+    assert calls == ["boot", "sample", "stop"]  # the start and the stop only
+
+    calls.clear()
+    monkeypatch.setattr(hb, "SLEEP_WINDOW", None)  # by day
+    thread = hb.start_platform_heartbeat(None, "security", Stop(), sample_seconds=0)  # type: ignore[arg-type]
+    thread.join(timeout=5)
+    assert calls.count("sample") == 6 and calls.count("beat") == 2
