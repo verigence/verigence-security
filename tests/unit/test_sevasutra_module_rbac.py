@@ -185,7 +185,8 @@ def test_an_uploader_scans_papers_and_nothing_else() -> None:
     assert "('sevasutra.papers.submit','sevasutra','papers','submit'" in source
     assert _bundle("UPLOADER", UPLOADER_MIGRATION) == {"sevasutra.project.read", "sevasutra.papers.submit"}
     # No evidence review, observation, DMS upload or analytics.
-    assert not {"sevasutra.evidence.upload", "sevasutra.evidence.verify", "sevasutra.analytics.read"} & _bundle("UPLOADER", UPLOADER_MIGRATION)
+    others = {"sevasutra.evidence.upload", "sevasutra.evidence.verify", "sevasutra.analytics.read"}
+    assert not others & _bundle("UPLOADER", UPLOADER_MIGRATION)
 
 
 def test_existing_projects_are_backfilled_with_the_uploader_bundle_only() -> None:
