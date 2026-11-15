@@ -164,3 +164,71 @@ def test_wrong_verifier_other_service_or_unknown_redirect_get_nothing() -> None:
 def test_a_superseded_verigence_session_gets_no_code() -> None:
     _FakeObservation.status = "SUPERSEDED"
     assert _code(secrets.token_urlsafe(48)).status_code == 401
+
+
+class _FakeRemember:
+    rows: dict[str, dict[str, Any]] = {}
+
+    def __init__(self, session: object) -> None:
+        _ = session
+
+    def create(self, **kw: Any) -> None:
+        self.__class__.rows[kw["credential_hash"]] = {**kw, "revoked": False}
+
+    def use(self, *, credential_hash: str, client_key: str, now: datetime) -> dict[str, Any] | None:
+        row = self.__class__.rows.get(credential_hash)
+        if not row or row["revoked"] or row["client_key"] != client_key or row["expires_at"] <= now:
+            return None
+        return {"user_id": row["user_id"], "session_id": row["session_id"], "device_id": row["device_id"]}
+
+    def revoke(self, *, credential_hash: str, client_key: str, now: datetime) -> None:
+        if credential_hash in self.__class__.rows:
+            self.__class__.rows[credential_hash]["revoked"] = True
+
+
+class _FakeHumanTokensForRemember(_FakeTokens):
+    def verify_human_token(self, token: str) -> dict[str, object]:
+        assert token in {"verigence-app-access", "sevasutra-access-token-xyz"}
+        return {"sub": USER_ID, "session_id": SESSION_ID, "device_id": SEVASUTRA_DEVICE}
+
+
+def test_the_app_keeps_the_person_signed_in_until_they_sign_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FakeRemember.rows = {}
+    monkeypatch.setattr(app_sign_in, "AppRememberRepository", _FakeRemember)
+    app.dependency_overrides[token_service] = lambda: _FakeHumanTokensForRemember()
+    kept = client.post(
+        "/security/v1/auth/app-sign-in/remember",
+        headers={"Authorization": "Bearer sevasutra-service"},
+        json={"accessToken": "sevasutra-access-token-xyz"},
+    )
+    assert kept.status_code == 200
+    credential = kept.json()["rememberToken"]
+    assert credential not in _FakeRemember.rows
+    resume = client.post(
+        "/security/v1/auth/app-sign-in/resume",
+        headers={"Authorization": "Bearer sevasutra-service"},
+        json={"rememberToken": credential},
+    )
+    assert resume.status_code == 200
+    assert resume.json()["accessToken"] == "sevasutra-access"
+    # Another app's service cannot use it.
+    other = client.post(
+        "/security/v1/auth/app-sign-in/resume",
+        headers={"Authorization": "Bearer other-service"},
+        json={"rememberToken": credential},
+    )
+    assert other.status_code == 401
+    assert (
+        client.post(
+            "/security/v1/auth/app-sign-in/forget",
+            headers={"Authorization": "Bearer sevasutra-service"},
+            json={"rememberToken": credential},
+        ).status_code
+        == 204
+    )
+    again = client.post(
+        "/security/v1/auth/app-sign-in/resume",
+        headers={"Authorization": "Bearer sevasutra-service"},
+        json={"rememberToken": credential},
+    )
+    assert again.status_code == 401
