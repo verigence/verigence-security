@@ -35,7 +35,7 @@ from verigence_security.config import Settings, get_settings
 from verigence_security.core.errors import security_error
 from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.core.types import ActorType
-from verigence_security.repositories.app_sign_in_repository import AppSignInRepository
+from verigence_security.repositories.app_sign_in_repository import AppRememberRepository, AppSignInRepository
 from verigence_security.repositories.human_observation_repository import HumanObservationRepository
 from verigence_security.repositories.security_repository import SecurityRepository
 from verigence_security.repositories.v2_authorization_repository import V2AuthorizationRepository
@@ -56,10 +56,15 @@ class AppClient:
     integration: str
     # Where the Verigence app may hand a code back.
     redirect_uris: tuple[str, ...]
+    # How long the app may keep a person signed in on their phone, at most, from when they signed in.
+    remember_days: int = 3
 
 
 APPS: dict[str, AppClient] = {
-    "sevasutra": AppClient(name="SevaSutra", integration="sevasutra", redirect_uris=("sevasutra://sso",)),
+    # SevaSutra keeps a person signed in for 3 days at most (product owner, 15 Nov 2026: "3 days max, not a month").
+    "sevasutra": AppClient(
+        name="SevaSutra", integration="sevasutra", redirect_uris=("sevasutra://sso",), remember_days=3
+    ),
 }
 
 
@@ -233,3 +238,119 @@ def app_sign_in_token(
         "deviceId": device_id,
         "email": store.email_of(actor.user_id),
     }
+
+
+# ---------------------------------------------------------------- staying signed in to the app (15 Nov 2026)
+
+
+class AppRememberRequest(BaseModel):
+    accessToken: str = Field(min_length=20, max_length=8000)
+
+
+class AppRememberResponse(BaseModel):
+    rememberToken: str
+    expiresAtUtc: datetime
+
+
+class AppResumeRequest(BaseModel):
+    rememberToken: str = Field(min_length=20, max_length=200)
+
+
+def _app_of(subject: str, repo: SecurityRepository) -> str:
+    """The registered app whose service integration is calling."""
+    if not V2AuthorizationRepository(repo.s).active_service_integration(subject):
+        raise security_error("AUTH_TOKEN_INVALID")
+    for key, app in APPS.items():
+        if app.integration == subject:
+            return key
+    raise security_error("AUTH_TOKEN_INVALID")
+
+
+@router.post("/remember", response_model=AppRememberResponse)
+def app_remember(
+    body: AppRememberRequest,
+    subject: str = Depends(_service_subject),
+    repo: SecurityRepository = Depends(repository),
+    tokens: TokenService = Depends(token_service),
+) -> dict[str, object]:
+    """The app's server keeps the person signed in on their phone: a credential for the app's remember days."""
+
+    client_key = _app_of(subject, repo)
+    claims = tokens.verify_human_token(body.accessToken)
+    actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(str(claims["sub"]))
+    attach_trusted_user_id(actor.user_id)
+    require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
+    now = datetime.now(UTC)
+    credential = secrets.token_urlsafe(32)
+    expires_at = now + timedelta(days=APPS[client_key].remember_days)
+    AppRememberRepository(repo.s).create(
+        credential_hash=_hash(credential),
+        user_id=actor.user_id,
+        client_key=client_key,
+        session_id=_claim_uuid(claims, "session_id") or str(uuid4()),
+        device_id=_claim_uuid(claims, "device_id") or str(uuid4()),
+        now=now,
+        expires_at=expires_at,
+    )
+    repo.commit()
+    return {"rememberToken": credential, "expiresAtUtc": expires_at}
+
+
+@router.post("/resume", response_model=AppSignInTokenResponse)
+def app_resume(
+    body: AppResumeRequest,
+    subject: str = Depends(_service_subject),
+    settings: Settings = Depends(get_settings),
+    repo: SecurityRepository = Depends(repository),
+    tokens: TokenService = Depends(token_service),
+) -> dict[str, object]:
+    """A fresh sign-in for a person the app keeps signed in.
+
+    Refused when the credential ended or was revoked, or the person is no longer active.
+    """
+
+    client_key = _app_of(subject, repo)
+    now = datetime.now(UTC)
+    kept = AppRememberRepository(repo.s).use(credential_hash=_hash(body.rememberToken), client_key=client_key, now=now)
+    repo.commit()
+    if kept is None:
+        raise security_error("AUTH_TOKEN_INVALID", detail="The remembered sign-in has ended")
+    actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(str(kept["user_id"]))
+    attach_trusted_user_id(actor.user_id)
+    require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
+    ttl = settings.platform_admin_token_ttl_minutes
+    if ttl is None:
+        raise RuntimeError("Configured Security human access-token lifetime is unavailable")
+    expires_at = now + timedelta(minutes=ttl)
+    token = tokens.issue_human_token(
+        HumanTokenClaims(
+            user_id=actor.user_id,
+            expires_at=expires_at,
+            session_id=str(kept["session_id"]),
+            device_id=str(kept["device_id"]),
+        )
+    )
+    return {
+        "accessToken": token,
+        "expiresAtUtc": expires_at,
+        "actorType": ActorType.USER.value,
+        "isSuperAdmin": actor.is_super_admin,
+        "sessionId": kept["session_id"],
+        "deviceId": kept["device_id"],
+        "email": AppSignInRepository(repo.s).email_of(actor.user_id),
+    }
+
+
+@router.post("/forget", status_code=204)
+def app_forget(
+    body: AppResumeRequest,
+    subject: str = Depends(_service_subject),
+    repo: SecurityRepository = Depends(repository),
+) -> None:
+    """The person signed out of the app: the remembered sign-in ends."""
+
+    client_key = _app_of(subject, repo)
+    AppRememberRepository(repo.s).revoke(
+        credential_hash=_hash(body.rememberToken), client_key=client_key, now=datetime.now(UTC)
+    )
+    repo.commit()

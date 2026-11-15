@@ -83,3 +83,78 @@ class AppSignInRepository:
             {"user_id": user_id},
         ).first()
         return str(row[0]) if row and row[0] else None
+
+
+class AppRememberRepository:
+    """Long-lived sign-ins another Verigence app's server keeps for a person (hash only, bound to the app)."""
+
+    def __init__(self, session: Session) -> None:
+        self.s = session
+
+    def create(
+        self,
+        *,
+        credential_hash: str,
+        user_id: str,
+        client_key: str,
+        session_id: str,
+        device_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> None:
+        self.s.execute(
+            text(
+                """
+                INSERT INTO security.app_remember_sessions
+                  (credential_hash,user_id,client_key,session_id,device_id,created_at_utc,expires_at_utc,
+                   last_used_at_utc,revoked_at_utc)
+                VALUES (:credential_hash,:user_id,:client_key,:session_id,:device_id,:now,:expires_at,:now,NULL)
+                """
+            ),
+            {
+                "credential_hash": credential_hash,
+                "user_id": user_id,
+                "client_key": client_key,
+                "session_id": session_id,
+                "device_id": device_id,
+                "now": now,
+                "expires_at": expires_at,
+            },
+        )
+        # Ended ones are of no use: kept a week for the record, then gone.
+        self.s.execute(
+            text(
+                "DELETE FROM security.app_remember_sessions WHERE user_id=:user_id "
+                "AND (expires_at_utc < :before OR revoked_at_utc < :before)"
+            ),
+            {"user_id": user_id, "before": now - timedelta(days=7)},
+        )
+
+    def use(self, *, credential_hash: str, client_key: str, now: datetime) -> dict[str, Any] | None:
+        """The live credential (not ended, not revoked, this app's), marked used; None otherwise."""
+        row = (
+            self.s.execute(
+                text(
+                    """
+                    UPDATE security.app_remember_sessions
+                    SET last_used_at_utc=:now
+                    WHERE credential_hash=:credential_hash AND client_key=:client_key
+                      AND revoked_at_utc IS NULL AND expires_at_utc > :now
+                    RETURNING user_id,session_id,device_id,expires_at_utc
+                    """
+                ),
+                {"credential_hash": credential_hash, "client_key": client_key, "now": now},
+            )
+            .mappings()
+            .first()
+        )
+        return dict(row) if row else None
+
+    def revoke(self, *, credential_hash: str, client_key: str, now: datetime) -> None:
+        self.s.execute(
+            text(
+                "UPDATE security.app_remember_sessions SET revoked_at_utc=:now "
+                "WHERE credential_hash=:credential_hash AND client_key=:client_key AND revoked_at_utc IS NULL"
+            ),
+            {"credential_hash": credential_hash, "client_key": client_key, "now": now},
+        )
