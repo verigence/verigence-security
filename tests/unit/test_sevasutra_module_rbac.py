@@ -163,3 +163,33 @@ def test_the_pc_holds_the_analyst_bundle_and_never_approves() -> None:
     assert "sevasutra.observation.approve" not in pc
     backfill = PC_MIGRATION.read_text().split("INSERT INTO security.tenant_role_permissions", 1)[1]
     assert "d.role_key='PC'" in backfill and "d.permission_key LIKE 'sevasutra.%'" in backfill
+
+
+# ---------------------------------------------------------------- Uploader (0059, 15 Nov 2026)
+
+UPLOADER_MIGRATION = Path("migrations/0059_sevasutra_uploader.sql")
+
+
+def test_uploader_is_an_assignable_operating_role() -> None:
+    from verigence_security.services.v2_rbac import OPERATING_ROLE_KEYS
+
+    assert "UPLOADER" in OperatingRoleKey.__args__
+    assert "UPLOADER" in OPERATING_ROLE_KEYS
+    source = UPLOADER_MIGRATION.read_text()
+    assert "('UPLOADER','OPERATING','Uploader (scans papers)','ACTIVE'" in source
+    assert "CHECK (role_key IN ('PC','TL','PM','CRM','Executive','REVIEWER','ANALYST','CLIENT','UPLOADER'))" in source
+
+
+def test_an_uploader_scans_papers_and_nothing_else() -> None:
+    source = UPLOADER_MIGRATION.read_text()
+    assert "('sevasutra.papers.submit','sevasutra','papers','submit'" in source
+    assert _bundle("UPLOADER", UPLOADER_MIGRATION) == {"sevasutra.project.read", "sevasutra.papers.submit"}
+    # No evidence review, observation, DMS upload or analytics.
+    others = {"sevasutra.evidence.upload", "sevasutra.evidence.verify", "sevasutra.analytics.read"}
+    assert not others & _bundle("UPLOADER", UPLOADER_MIGRATION)
+
+
+def test_existing_projects_are_backfilled_with_the_uploader_bundle_only() -> None:
+    backfill = UPLOADER_MIGRATION.read_text().split("INSERT INTO security.tenant_role_permissions", 1)[1]
+    assert "d.role_key='UPLOADER'" in backfill
+    assert "ON CONFLICT (tenant_id,role_key,permission_key) DO NOTHING" in backfill

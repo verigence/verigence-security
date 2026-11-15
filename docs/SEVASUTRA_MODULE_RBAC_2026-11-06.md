@@ -72,6 +72,7 @@ SevaSutra's secret changed.
 | Who | Key | Holds |
 | --- | --- | --- |
 | Client (analytics) | `CLIENT`, new operating role | People who are not JBR employees (dealer principal, service manager, OEM or other client people). The analytics of the Project's dealership and nothing else: `sevasutra.project.read`, `sevasutra.analytics.read`. |
+| Uploader (scans papers) | `UPLOADER`, new operating role (0059, 15 Nov 2026) | The dealership's own people who are not JBR employees -- a Service Advisor, a gate security guard -- mapped to the outlets they work at. Scan papers on the SevaSutra app and upload them for SevaSutra to read, and nothing else: `sevasutra.project.read`, `sevasutra.papers.submit` (new). |
 | Super Admin | existing admin role | Oversees SevaSutra: every dealership, settings, rules, the platform console. Does **not** approve observations (`sevasutra.observation.approve`) or settle leakage (`sevasutra.leakage.settle`); those stay with the Team Lead and the PM, as payroll approval stays with the CEO. Enforced in `SUPER_ADMIN_EXCLUDED_PERMISSIONS`. |
 
 - What `CLIENT` shows is set once per Project, through the Project's `CLIENT` bundle; the default is the
