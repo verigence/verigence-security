@@ -11,6 +11,7 @@ from verigence_security.api.dependencies import correlation_header_parameter
 from verigence_security.api.routes import (
     access,
     announcements,
+    app_sign_in,
     app_version,
     authorization,
     client_diagnostics,
@@ -92,6 +93,7 @@ app.include_router(jwks.router)
 app.include_router(access.oauth_router)
 app.include_router(access.router)
 app.include_router(human_remember.router)
+app.include_router(app_sign_in.router)
 app.include_router(human_observation.router)
 app.include_router(password_recovery.router)
 app.include_router(service_tokens.router)
