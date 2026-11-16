@@ -176,6 +176,21 @@ def test_housekeeping_permission_exists_but_no_hr_role_holds_it(session: Session
     assert held == set()
 
 
+def test_access_pause_permission_exists_but_no_hr_role_holds_it(session: Session) -> None:
+    # Restoring a person paused by the Monday approvals rule is SuperAdmin's alone.
+    active = _rows(
+        session,
+        "SELECT permission_key FROM security.permissions"
+        " WHERE permission_key='hr.access_pause.manage' AND status='ACTIVE'",
+    )
+    assert active == {("hr.access_pause.manage",)}
+    held = _rows(
+        session,
+        "SELECT role_key FROM security.module_role_permissions WHERE permission_key='hr.access_pause.manage'",
+    )
+    assert held == set()
+
+
 def test_only_the_ceo_role_holds_the_employee_status_approval(session: Session) -> None:
     held = _rows(
         session,
