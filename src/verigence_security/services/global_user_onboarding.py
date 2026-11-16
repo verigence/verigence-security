@@ -537,6 +537,79 @@ class GlobalUserOnboardingService:
             clerk.ban_user(clerk_user_id)
         return self._user_by_id(user_id)
 
+    def rename_user(
+        self,
+        *,
+        user_id: str,
+        first_name: str,
+        last_name: str,
+        actor_user_id: str,
+        reason: str | None,
+        correlation_id: str,
+        clerk: ClerkBackendClient | None,
+    ) -> dict[str, Any]:
+        """Change a USER's name (product owner 2026-11-16: "users for verigence
+        should be allowed to change name"). Security's record is the name every
+        screen shows; it is committed and audited first, then the Clerk profile
+        follows (a Clerk failure leaves Security's name in place and is reported)."""
+        first = " ".join(first_name.split())
+        last = " ".join(last_name.split())
+        if not first:
+            raise ValueError("A first name is required")
+        display = f"{first} {last}".strip()
+        row = (
+            self.s.execute(
+                text(
+                    """
+                SELECT u.user_id,u.display_name,u.first_name,u.last_name,
+                       e.provider_subject AS clerk_user_id
+                FROM security.users u
+                LEFT JOIN security.external_identities e
+                  ON e.user_id=u.user_id AND e.provider='CLERK' AND e.status='ACTIVE'
+                WHERE u.user_id=:user_id
+                """
+                ),
+                {"user_id": user_id},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise LookupError("USER not found")
+        now = datetime.now(UTC)
+        try:
+            self.s.execute(
+                text(
+                    """
+                    UPDATE security.users
+                    SET first_name=:first,last_name=:last,display_name=:display,updated_at_utc=:now
+                    WHERE user_id=:user_id
+                    """
+                ),
+                {"first": first, "last": last or None, "display": display, "now": now, "user_id": user_id},
+            )
+            self._admin_audit(
+                actor_user_id=actor_user_id,
+                correlation_id=correlation_id,
+                operation_key="security.user.rename",
+                resource_type="USER",
+                resource_id=user_id,
+                after={"displayName": display, "previousDisplayName": row["display_name"], "reason": reason},
+                now=now,
+            )
+            self.s.commit()
+        except Exception:
+            self.s.rollback()
+            raise
+        clerk_synced = None
+        if clerk is not None and row["clerk_user_id"] is not None:
+            try:
+                clerk.update_user_profile(str(row["clerk_user_id"]), first_name=first, last_name=last)
+                clerk_synced = True
+            except ClerkBackendError:
+                clerk_synced = False
+        return {**self._user_by_id(user_id), "clerkSynced": clerk_synced}
+
     def precheck(self, email: str) -> bool:
         clean_email = email.strip().lower()
         row = self.s.execute(

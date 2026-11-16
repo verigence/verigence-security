@@ -41,6 +41,12 @@ class GlobalUserStatusRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=1000)
 
 
+class GlobalUserRenameRequest(BaseModel):
+    firstName: str = Field(min_length=1, max_length=100)
+    lastName: str = Field(default="", max_length=100)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
 class AuthenticationPrecheckRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
 
@@ -232,6 +238,35 @@ def change_global_user_status(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ClerkBackendError as exc:
         raise HTTPException(status_code=502, detail="Identity-provider lifecycle synchronization failed") from exc
+
+
+@router.patch("/platform/users/{userId}/name")
+def rename_global_user(
+    userId: str,
+    body: GlobalUserRenameRequest,
+    request: Request,
+    claims: dict[str, Any] = Depends(require_platform_permission("security.user.manage")),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(platform_session),
+) -> dict[str, object]:
+    try:
+        clerk = _clerk(settings)
+    except Exception:  # Clerk not configured: Security's name still changes
+        clerk = None
+    try:
+        return GlobalUserOnboardingService(session, settings).rename_user(
+            user_id=userId,
+            first_name=body.firstName,
+            last_name=body.lastName,
+            actor_user_id=str(claims["sub"]),
+            reason=body.reason,
+            correlation_id=request.state.correlation_id,
+            clerk=clerk,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/auth/precheck")
