@@ -34,7 +34,12 @@ from verigence_security.repositories.human_observation_repository import HumanOb
 from verigence_security.repositories.security_repository import SecurityRepository, UserContext
 from verigence_security.services.access_blocks import require_not_blocked
 from verigence_security.services.access_service import MachineAccessService, UserAccessService
-from verigence_security.services.app_version_policy import require_supported_app, require_supported_device
+from verigence_security.services.app_version_policy import (
+    require_project_app,
+    require_project_device,
+    require_supported_app,
+    require_supported_device,
+)
 from verigence_security.services.clerk_credentials import ClerkCredentialService
 from verigence_security.services.geo import GeoSample
 from verigence_security.services.login_activity import record_login_attempt
@@ -221,6 +226,13 @@ def credential_login(
     attach_trusted_user_id(actor.user_id)
     try:
         require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
+        # A Project's own minimum app version, for the people who work in it.
+        require_project_app(
+            repo.s,
+            user_id=actor.user_id,
+            browser_name=device.browserName if device else None,
+            app_version=device.appVersion if device else None,
+        )
     except SecurityError as exc:
         record("FAILED", actor.user_id, exc.code)
         raise
@@ -276,6 +288,7 @@ def refresh_human_access_token(
     device_id = _uuid_or_new(claims, "device_id")
     require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
     require_supported_device(repo.s, user_id=actor.user_id, device_id=str(device_id))
+    require_project_device(repo.s, user_id=actor.user_id, device_id=str(device_id))
     observation = HumanObservationRepository(repo.s)
     status = observation.session_status(
         user_id=actor.user_id,

@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,29 @@ class PolicyIn(BaseModel):
     downloadUrl: str | None = Field(default=None, min_length=8, max_length=300, pattern=r"^https://")
 
 
+class ProjectPolicyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # None removes the Project's own minimum.
+    minimumVersion: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$")
+    # None means at once.
+    effectiveFrom: datetime | None = None
+
+
+def _admin_view(service: AppVersionPolicyService) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    policy = service.policy()
+    return {
+        **policy.view(now),
+        "devicesBelow": service.devices_below(policy.minimum_version),
+        # A minimum of its own for the people of one Project (product owner, 19 Nov 2026).
+        "projects": [
+            {**p.view(now), "devicesBelow": service.project_devices_below(p.tenant_id, p.minimum_version)}
+            for p in service.project_policies()
+        ],
+        "projectChoices": service.project_choices(),
+    }
+
+
 @router.get("/status/app-version")
 def app_version_status(session: Session = Depends(platform_session)) -> dict[str, Any]:
     """Needs no sign-in: the oldest app version allowed, from when, and where to get the latest."""
@@ -41,12 +65,7 @@ def get_policy(
 ) -> dict[str, Any]:
     if not actor.is_super_admin:
         raise security_error("PERMISSION_DENIED")
-    service = AppVersionPolicyService(session)
-    policy = service.policy()
-    return {
-        **policy.view(datetime.now(UTC)),
-        "devicesBelow": service.devices_below(policy.minimum_version),
-    }
+    return _admin_view(AppVersionPolicyService(session))
 
 
 @router.get("/admin/app-version-policy/impact")
@@ -71,14 +90,49 @@ def set_policy(
     if not actor.is_super_admin:
         raise security_error("PERMISSION_DENIED")
     service = AppVersionPolicyService(session)
-    policy = service.set_policy(
+    service.set_policy(
         minimum_version=body.minimumVersion,
         effective_from=body.effectiveFrom,
         download_url=body.downloadUrl,
         actor_user_id=actor.user_id,
         correlation_id=getattr(request.state, "correlation_id", ""),
     )
-    return {
-        **policy.view(datetime.now(UTC)),
-        "devicesBelow": service.devices_below(policy.minimum_version),
-    }
+    return _admin_view(service)
+
+
+@router.get("/admin/app-version-policy/projects/{tenantId}/impact")
+def project_policy_impact(
+    tenantId: UUID,
+    minimumVersion: str = Query(pattern=r"^\d+\.\d+\.\d+$"),
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> dict[str, Any]:
+    """Before saving: the app installations of the Project's people that a minimum would stop."""
+    if not actor.is_super_admin:
+        raise security_error("PERMISSION_DENIED")
+    return {"devicesBelow": AppVersionPolicyService(session).project_devices_below(str(tenantId), minimumVersion)}
+
+
+@router.put("/admin/app-version-policy/projects/{tenantId}")
+def set_project_policy(
+    tenantId: UUID,
+    body: ProjectPolicyIn,
+    request: Request,
+    actor: HumanActorContext = Depends(security_human_actor),
+    session: Session = Depends(platform_session),
+) -> dict[str, Any]:
+    """The minimum app version for the people who work in one Project; no version removes it."""
+    if not actor.is_super_admin:
+        raise security_error("PERMISSION_DENIED")
+    service = AppVersionPolicyService(session)
+    try:
+        service.set_project_policy(
+            tenant_id=str(tenantId),
+            minimum_version=body.minimumVersion,
+            effective_from=body.effectiveFrom,
+            actor_user_id=actor.user_id,
+            correlation_id=getattr(request.state, "correlation_id", ""),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
+    return _admin_view(service)

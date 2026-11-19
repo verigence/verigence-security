@@ -24,7 +24,7 @@ from verigence_security.repositories.human_observation_repository import HumanOb
 from verigence_security.repositories.human_remember_repository import HumanRememberRepository
 from verigence_security.repositories.security_repository import SecurityRepository
 from verigence_security.services.access_blocks import require_not_blocked
-from verigence_security.services.app_version_policy import require_supported_app
+from verigence_security.services.app_version_policy import require_project_app, require_supported_app
 from verigence_security.services.token_service import HumanTokenClaims, TokenService
 from verigence_security.services.v2_human_actor import HumanActorAuthenticationService
 
@@ -300,6 +300,9 @@ def _resume_human_session(
     actor = HumanActorAuthenticationService(repo.s).authenticate_user_id(user_id)
     attach_trusted_user_id(actor.user_id)
     require_not_blocked(repo.s, user_id=actor.user_id, is_super_admin=actor.is_super_admin)
+    require_project_app(
+        repo.s, user_id=actor.user_id, browser_name=body.device.browserName, app_version=body.device.appVersion
+    )
     try:
         _assert_session_resumable(
             repo=repo,
