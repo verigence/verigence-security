@@ -230,6 +230,13 @@ def _safe(action: str, fn: Any, *args: Any) -> None:
         logger.warning("platform_heartbeat_failed action=%s error=%s", action, type(exc).__name__)
 
 
+def _resting() -> bool:
+    """The shutdown switch (core/system_shutdown.py): the night's hours, or a Shut down now by day."""
+    from verigence_security.core import system_shutdown
+
+    return system_shutdown.resting()
+
+
 def start_platform_heartbeat(
     engine: Engine | None, default_service: str, stop: threading.Event, *, sample_seconds: float = SAMPLE_SECONDS,
 ) -> threading.Thread:
@@ -241,7 +248,7 @@ def start_platform_heartbeat(
         _safe("sample", heartbeat.sample)
         n = 0
         while not stop.wait(sample_seconds):
-            if asleep():
+            if _resting():
                 continue
             n += 1
             _safe("sample", heartbeat.sample)
