@@ -47,6 +47,9 @@ from verigence_security.core.problem import (
     security_error_handler,
     unexpected_error_handler,
 )
+from verigence_security.core.system_shutdown import STATUS_PATH as SYSTEM_STATUS_PATH
+from verigence_security.core.system_shutdown import SystemShutdownMiddleware
+from verigence_security.core.system_shutdown import status as system_status
 
 settings = get_settings()
 
@@ -81,11 +84,22 @@ app = FastAPI(
     dependencies=[Depends(correlation_header_parameter)],
     lifespan=_lifespan,
 )
+# While Verigence is shut for the night a person's request is answered here, from memory, before any
+# route or database session (core/system_shutdown.py). Added first so the correlation ID wraps it.
+app.add_middleware(SystemShutdownMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 app.add_exception_handler(SecurityError, security_error_handler)
 app.add_exception_handler(Exception, unexpected_error_handler)
 app.include_router(health.router)
+
+
+@app.get(SYSTEM_STATUS_PATH, tags=["Health"])
+def system_status_route() -> dict[str, object]:
+    """Whether Verigence is shut for the night and when it opens: for a sign-in page. No database."""
+    return system_status()
+
+
 app.include_router(jwks.router)
 # access.router contains the canonical /security/v1/auth/login plus the deprecated
 # /security/v1/access-sessions bridge. oauth_router is retained only because current Audit Core
