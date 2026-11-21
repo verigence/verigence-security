@@ -42,6 +42,9 @@ ERRORS: dict[str, tuple[int, str]] = {
     "NETWORK_RISK_UNKNOWN_DENIED": (403, "Unknown network risk is denied"),
     "ROLE_REQUIRED": (403, "An active role is required"),
     "PERMISSION_DENIED": (403, "Permission denied"),
+    # Verigence is shut for the night (core/system_shutdown.py). 403 on purpose: the apps keep
+    # "Keep me signed in" on a 403 and delete it on a 401.
+    "SYSTEM_CLOSED": (403, "Verigence is closed"),
     "IDENTITY_PROVIDER_UNAVAILABLE": (503, "Identity provider is unavailable"),
     "DATABASE_UNAVAILABLE": (503, "Security database is unavailable"),
     "SIGNING_KEY_UNAVAILABLE": (503, "Security signing key is unavailable"),

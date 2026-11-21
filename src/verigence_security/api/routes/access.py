@@ -27,6 +27,7 @@ from verigence_security.api.schemas import (
     HumanLoginResponse,
 )
 from verigence_security.config import Settings, get_settings
+from verigence_security.core import system_shutdown
 from verigence_security.core.errors import SecurityError, security_error
 from verigence_security.core.observability import attach_trusted_user_id
 from verigence_security.core.types import ActorType
@@ -181,6 +182,10 @@ def credential_login(
     ip: str = Depends(source_ip),
 ) -> dict[str, object]:
     """Authenticate a global human USER through Security -> Clerk Backend API."""
+
+    # Shut for the night, only the people listed to start Verigence get as far as the database;
+    # nothing is read or recorded for anyone else (core/system_shutdown.py).
+    system_shutdown.require_may_sign_in(body.identifier)
 
     credentials = ClerkCredentialService(settings, session=repo.s)
     device = body.device
