@@ -129,10 +129,12 @@ def test_shut_is_the_nights_sleep_and_only_with_a_list(monkeypatch: pytest.Monke
     assert system_shutdown.status(_ist(3)) == {
         "closed": True, "opensAtUtc": "2026-11-22T02:30:00Z", "message": message,
         "resting": True, "restUntilUtc": "2026-11-22T02:30:00Z",
-        "hoursFromIst": "00:30", "hoursToIst": "08:00", "manual": None, "manualUntilUtc": None}
+        "hoursFromIst": "00:30", "hoursToIst": "08:00",
+        "manual": None, "manualSinceUtc": None, "manualUntilUtc": None}
     assert system_shutdown.status(_ist(14)) == {
         "closed": False, "opensAtUtc": None, "message": None, "resting": False, "restUntilUtc": None,
-        "hoursFromIst": "00:30", "hoursToIst": "08:00", "manual": None, "manualUntilUtc": None}
+        "hoursFromIst": "00:30", "hoursToIst": "08:00",
+        "manual": None, "manualSinceUtc": None, "manualUntilUtc": None}
 
     # No list: never shut, whatever the hour. Nor with the gate switched off, nor with no sleep window.
     monkeypatch.setattr(system_shutdown, "OPENERS", system_shutdown.Openers())
@@ -275,6 +277,7 @@ def test_shut_down_now_by_day_lasts_to_the_next_opening_and_start_now_ends_it(mo
     assert not system_shutdown.resting(next_morning)
     state = system_shutdown.status(six_pm)
     assert (state["manual"], state["restUntilUtc"]) == ("SHUT", "2026-11-23T02:30:00Z")
+    assert (state["manualSinceUtc"], state["manualUntilUtc"]) == ("2026-11-22T12:30:00Z", "2026-11-23T02:30:00Z")
     assert state["message"].startswith("Verigence is closed until 8:00 am.")
 
     # Started again at 7 pm: running, and tonight's own hours still hold.

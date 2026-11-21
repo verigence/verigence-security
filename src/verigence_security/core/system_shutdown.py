@@ -302,6 +302,7 @@ def status(now: datetime | None = None) -> dict[str, Any]:
         "hoursFromIst": state.hours[0].strftime("%H:%M") if state.hours else None,
         "hoursToIst": state.hours[1].strftime("%H:%M") if state.hours else None,
         "manual": state.manual_now(moment),
+        "manualSinceUtc": _z(state.changed_at) if state.manual_now(moment) else None,
         "manualUntilUtc": _z(state.manual_until) if state.manual_now(moment) else None,
     }
 
