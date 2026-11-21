@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ from verigence_security.api.routes import (
     security_housekeeping,
     service_tokens,
     service_users,
+    system_shutdown,
     tenant_activation_compensation,
     v2_admin_roles,
     v2_groups,
@@ -38,7 +40,7 @@ from verigence_security.api.routes import (
     v2_user_admin,
     v2_user_lifecycle,
 )
-from verigence_security.config import get_settings
+from verigence_security.config import Settings, get_settings
 from verigence_security.core.correlation import CorrelationIdMiddleware
 from verigence_security.core.errors import SecurityError
 from verigence_security.core.observability import configure_observability
@@ -53,6 +55,25 @@ from verigence_security.core.system_shutdown import status as system_status
 
 settings = get_settings()
 
+def _load_shutdown_switch(settings: Settings) -> None:
+    """The stored hours and any Shut down / Start still in force (core/system_shutdown.py). Read once,
+    here; if it cannot be read, the clock every service started with stands, and Security starts."""
+    from verigence_security.core import system_shutdown as switchboard
+    from verigence_security.db.session import build_session_factory
+    from verigence_security.services import system_shutdown as store
+
+    try:
+        factory = build_session_factory(settings)
+        if factory is None:
+            return
+        with factory() as session:
+            state = store.load(session)
+        if state is not None:
+            switchboard.set_switch(state)
+    except Exception as exc:  # noqa: BLE001 - a table not there yet must not stop sign-in
+        logging.getLogger(__name__).warning("system_shutdown_load_failed error=%s", type(exc).__name__)
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Boot row, a beat a minute and CPU/memory for the SuperAdmin System Health page
@@ -65,6 +86,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     stop = threading.Event()
     heartbeat = None
     if settings.database_url and _is_postgresql(settings.database_url):
+        _load_shutdown_switch(settings)
         heartbeat = start_platform_heartbeat(build_engine(settings), "security", stop)
     try:
         yield
@@ -116,6 +138,7 @@ app.include_router(authorization.router)
 app.include_router(hr_roles.router)
 app.include_router(feature_access.router)
 app.include_router(night_control.router)
+app.include_router(system_shutdown.router)
 app.include_router(announcements.router)
 app.include_router(app_version.router)
 app.include_router(client_diagnostics.router)

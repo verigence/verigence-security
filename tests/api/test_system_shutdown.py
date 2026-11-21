@@ -47,6 +47,13 @@ def _listed() -> system_shutdown.Openers:
     ]))
 
 
+@pytest.fixture(autouse=True)
+def _the_clock_alone():
+    system_shutdown.reset_switch()
+    yield
+    system_shutdown.reset_switch()
+
+
 @pytest.fixture(scope="module")
 def keys() -> Settings:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -120,8 +127,14 @@ def test_shut_is_the_nights_sleep_and_only_with_a_list(monkeypatch: pytest.Monke
     message = "Verigence is closed until 8:00 am. It opens by itself at that time."
     assert system_shutdown.closed_message(_ist(3)) == message
     assert system_shutdown.status(_ist(3)) == {
-        "closed": True, "opensAtUtc": "2026-11-22T02:30:00Z", "message": message}
-    assert system_shutdown.status(_ist(14)) == {"closed": False, "opensAtUtc": None, "message": None}
+        "closed": True, "opensAtUtc": "2026-11-22T02:30:00Z", "message": message,
+        "resting": True, "restUntilUtc": "2026-11-22T02:30:00Z",
+        "hoursFromIst": "00:30", "hoursToIst": "08:00",
+        "manual": None, "manualSinceUtc": None, "manualUntilUtc": None}
+    assert system_shutdown.status(_ist(14)) == {
+        "closed": False, "opensAtUtc": None, "message": None, "resting": False, "restUntilUtc": None,
+        "hoursFromIst": "00:30", "hoursToIst": "08:00",
+        "manual": None, "manualSinceUtc": None, "manualUntilUtc": None}
 
     # No list: never shut, whatever the hour. Nor with the gate switched off, nor with no sleep window.
     monkeypatch.setattr(system_shutdown, "OPENERS", system_shutdown.Openers())
@@ -235,9 +248,178 @@ def test_open_by_day_and_with_no_list_nothing_changes(shut: TokenService, monkey
     # By day.
     monkeypatch.setattr(platform_heartbeat, "SLEEP_WINDOW", None)
     assert client.post("/security/v1/auth/refresh", headers=_person(shut, TEAM_LEAD)).status_code == 500
-    assert client.get("/security/v1/system/status").json() == {"closed": False, "opensAtUtc": None, "message": None}
+    state = client.get("/security/v1/system/status").json()
+    assert (state["closed"], state["resting"], state["opensAtUtc"]) == (False, False, None)
     # At night with no list configured.
     monkeypatch.setattr(platform_heartbeat, "SLEEP_WINDOW", ALL_DAY)
     monkeypatch.setattr(system_shutdown, "OPENERS", system_shutdown.Openers())
     assert client.post("/security/v1/auth/refresh", headers=_person(shut, TEAM_LEAD)).status_code == 500
     assert reached == ["renewal", "renewal"]
+
+
+# ── the switch: hours, Shut down now, Start now ─────────────────────────────
+def _switch(**over: object) -> system_shutdown.Switch:
+    return system_shutdown.Switch(**{"hours": NIGHT, "stored": True, **over})  # type: ignore[arg-type]
+
+
+def test_shut_down_now_by_day_lasts_to_the_next_opening_and_start_now_ends_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system_shutdown, "GATE_ON", True)
+    monkeypatch.setattr(system_shutdown, "OPENERS", _listed())
+    system_shutdown.set_switch(_switch())
+    six_pm = _ist(18)
+    assert not system_shutdown.resting(six_pm)
+
+    system_shutdown.set_switch(system_shutdown.shut_now(SUPER_ADMIN, six_pm))
+    next_morning = datetime(2026, 11, 23, 8, 0, tzinfo=IST).astimezone(UTC)
+    for at in (six_pm, _ist(23, 59), next_morning - timedelta(minutes=1)):
+        assert system_shutdown.resting(at) and system_shutdown.closed(at)
+        assert system_shutdown.opens_at(at) == next_morning
+    assert not system_shutdown.resting(next_morning)
+    state = system_shutdown.status(six_pm)
+    assert (state["manual"], state["restUntilUtc"]) == ("SHUT", "2026-11-23T02:30:00Z")
+    assert (state["manualSinceUtc"], state["manualUntilUtc"]) == ("2026-11-22T12:30:00Z", "2026-11-23T02:30:00Z")
+    assert state["message"].startswith("Verigence is closed until 8:00 am.")
+
+    # Started again at 7 pm: running, and tonight's own hours still hold.
+    seven_pm = _ist(19)
+    system_shutdown.set_switch(system_shutdown.start_now(EXECUTIVE, seven_pm))
+    assert not system_shutdown.resting(seven_pm)
+    assert system_shutdown.status(seven_pm)["manual"] is None
+    assert system_shutdown.resting(datetime(2026, 11, 23, 1, 0, tzinfo=IST).astimezone(UTC))
+
+
+def test_start_now_at_night_opens_until_the_morning_and_no_longer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system_shutdown, "GATE_ON", True)
+    monkeypatch.setattr(system_shutdown, "OPENERS", _listed())
+    system_shutdown.set_switch(_switch())
+    three_am = _ist(3)
+    assert system_shutdown.closed(three_am)
+    system_shutdown.set_switch(system_shutdown.start_now(SUPER_ADMIN, three_am))
+    for at in (three_am, _ist(7, 59)):
+        assert not system_shutdown.resting(at) and not system_shutdown.closed(at)
+    assert system_shutdown.status(three_am)["manual"] == "OPEN"
+    # The override is over at 8:00; the next night is shut as every night.
+    assert system_shutdown.status(_ist(9))["manual"] is None
+    assert system_shutdown.resting(datetime(2026, 11, 23, 0, 30, tzinfo=IST).astimezone(UTC))
+    # Shut down again the same night: shut to the morning.
+    system_shutdown.set_switch(system_shutdown.shut_now(SUPER_ADMIN, _ist(4)))
+    assert system_shutdown.opens_at(_ist(4)) == _ist(8)
+
+
+def test_new_hours_take_effect_and_keep_a_manual_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system_shutdown, "GATE_ON", True)
+    monkeypatch.setattr(system_shutdown, "OPENERS", _listed())
+    system_shutdown.set_switch(_switch())
+    system_shutdown.set_switch(system_shutdown.with_hours(clock_time(22, 0), clock_time(7, 30), SUPER_ADMIN, _ist(12)))
+    assert system_shutdown.resting(_ist(23)) and system_shutdown.resting(_ist(7, 29))
+    assert not system_shutdown.resting(_ist(7, 30)) and not system_shutdown.resting(_ist(21, 59))
+    assert system_shutdown.opens_at(_ist(23)) == datetime(2026, 11, 23, 7, 30, tzinfo=IST).astimezone(UTC)
+    with pytest.raises(ValueError):
+        system_shutdown.with_hours(clock_time(8, 0), clock_time(8, 0), SUPER_ADMIN)
+    # A shutdown by hand that runs out inside the daily hours goes on to that morning's opening.
+    system_shutdown.set_switch(_switch(manual="SHUT", manual_until=_ist(2)))
+    assert system_shutdown.opens_at(_ist(1)) == _ist(8)
+
+
+def test_until_the_state_is_read_the_clock_every_service_started_with_stands(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform_heartbeat, "SLEEP_WINDOW", (clock_time(1, 0), clock_time(6, 0)))
+    assert system_shutdown.switch().hours == (clock_time(1, 0), clock_time(6, 0))
+    assert system_shutdown.resting(_ist(2)) and not system_shutdown.resting(_ist(7))
+    system_shutdown.set_switch(_switch())
+    assert system_shutdown.resting(_ist(7))
+
+
+class _Tab:
+    """What the tab's endpoints keep and show, without a database."""
+
+    def __init__(self) -> None:
+        self.saved: list[tuple[str, system_shutdown.Switch]] = []
+        self.committed = 0
+        self.role: str | None = "SUPER_ADMIN"
+        self.me: dict[str, str] = {}
+
+    def commit(self) -> None:
+        self.committed += 1
+
+
+@pytest.fixture
+def tab(monkeypatch: pytest.MonkeyPatch, keys: Settings):
+    from verigence_security.api.platform_dependencies import platform_session
+    from verigence_security.api.routes import system_shutdown as routes
+    from verigence_security.api.v2_human_dependencies import security_human_actor
+
+    state = _Tab()
+    monkeypatch.setattr(system_shutdown, "GATE_ON", True)
+    monkeypatch.setattr(system_shutdown, "OPENERS", _listed())
+    system_shutdown.set_switch(_switch())
+    monkeypatch.setattr(routes.store, "save", lambda session, switch, *, action: state.saved.append((action, switch)))
+    monkeypatch.setattr(routes.store, "people", lambda session: [
+        {"userId": SUPER_ADMIN, "name": "superadmin", "role": "Super Admin", "mayStart": True}])
+    monkeypatch.setattr(routes.store, "last_change", lambda session: None)
+
+    class _Roles:
+        def __init__(self, session: object) -> None:
+            pass
+
+        def exempt_reason(self, user_id: str, *, is_super_admin: bool | None = None) -> str | None:
+            return state.role
+
+    monkeypatch.setattr(routes, "NightControlService", _Roles)
+    # Once shut, the tab's own calls pass the gate as any listed person's do: by their token.
+    monkeypatch.setattr(system_shutdown, "get_settings", lambda: keys)
+    state.me = _person(TokenService(keys), SUPER_ADMIN)
+    app.dependency_overrides.clear()
+    app.dependency_overrides[platform_session] = lambda: state
+    app.dependency_overrides[security_human_actor] = lambda: SimpleNamespace(user_id=SUPER_ADMIN, is_super_admin=True)
+    yield state
+    app.dependency_overrides.clear()
+
+
+def test_the_tab_shuts_down_starts_and_sets_hours_for_a_super_admin_or_executive(tab: _Tab) -> None:
+    base = "/security/v1/admin/system-shutdown"
+    seen = client.get(base, headers=tab.me)
+    assert seen.status_code == 200, seen.text
+    assert seen.json()["gate"] is True and seen.json()["people"][0]["mayStart"] is True
+
+    shut = client.post(f"{base}/shut-now", headers=tab.me)
+    assert shut.status_code == 200 and shut.json()["manual"] == "SHUT" and shut.json()["resting"] is True
+    assert system_shutdown.resting() and tab.saved[-1][0] == "SHUT_NOW" and tab.committed == 1
+    # Shut: the tab without a listed person's token is refused like everything else.
+    assert client.get(base).json()["code"] == "SYSTEM_CLOSED"
+
+    tab.role = "EXECUTIVE"
+    started = client.post(f"{base}/start-now", headers=tab.me)
+    assert started.status_code == 200 and tab.saved[-1][0] == "START_NOW"
+    assert system_shutdown.switch().manual != "SHUT"
+
+    hours = client.put(f"{base}/hours", json={"fromIst": "22:00", "toIst": "07:30"}, headers=tab.me)
+    assert hours.status_code == 200, hours.text
+    assert (hours.json()["hoursFromIst"], hours.json()["hoursToIst"]) == ("22:00", "07:30")
+    assert tab.saved[-1][0] == "HOURS 22:00-07:30"
+    # Whatever the hour this test runs at, open it before the last two calls.
+    client.post(f"{base}/start-now", headers=tab.me)
+    assert client.put(f"{base}/hours", json={"fromIst": "08:00", "toIst": "08:00"}, headers=tab.me).status_code == 422
+    assert client.put(f"{base}/hours", json={"fromIst": "8am", "toIst": "08:00"}, headers=tab.me).status_code == 422
+
+
+def test_the_tab_is_for_nobody_else_and_a_change_that_cannot_be_kept_is_not_in_force(
+        tab: _Tab, monkeypatch: pytest.MonkeyPatch) -> None:
+    from verigence_security.api.routes import system_shutdown as routes
+
+    base = "/security/v1/admin/system-shutdown"
+    tab.role = None  # a Team Lead, a PC: no
+    system_shutdown.set_switch(_switch(hours=None))  # running, whatever the hour this test runs at
+    for call in (client.get(base, headers=tab.me), client.post(f"{base}/shut-now", headers=tab.me),
+                 client.post(f"{base}/start-now", headers=tab.me),
+                 client.put(f"{base}/hours", json={"fromIst": "22:00", "toIst": "07:30"}, headers=tab.me)):
+        assert call.status_code == 403 and call.json()["code"] == "PERMISSION_DENIED"
+    assert tab.saved == [] and not system_shutdown.switch().manual
+
+    tab.role = "SUPER_ADMIN"
+
+    def cannot_keep(session: object, switch: object, *, action: str) -> None:
+        raise RuntimeError("the database refused")
+
+    monkeypatch.setattr(routes.store, "save", cannot_keep)
+    assert client.post(f"{base}/shut-now", headers=tab.me).status_code == 500
+    assert not system_shutdown.switch().manual and not system_shutdown.resting(_ist(14))

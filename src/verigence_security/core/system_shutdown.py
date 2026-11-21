@@ -37,6 +37,17 @@ session in the tab ends, "Keep me signed in" is kept, and the next opening of th
 
 With no list configured the gate does nothing at all: a deployment cannot shut everyone out by
 accident. SECURITY_SHUTDOWN_GATE=off switches it off without removing the list.
+
+The switch. Whether Verigence is shut is one piece of state, held here (``Switch``): the daily hours
+and, while it lasts, a Super Admin's or Executive's own "Shut down now" or "Start now" from the
+System shutdown tab. It is kept in security.system_shutdown, read once when this service starts and
+again only when one of them changes it (this service runs as one process), so answering "open or
+shut, until when" never needs the database. GET /security/v1/system/status gives that answer to
+anyone: the sign-in pages, and every Verigence service, which rests and runs by it.
+
+    Shut down now   shut from this moment to the next daily opening time.
+    Start now       running from this moment. Pressed during the daily hours, Verigence is open
+                    until that day's opening time; the next night is shut as every night.
 """
 from __future__ import annotations
 
@@ -44,8 +55,10 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from datetime import time as clock_time
 from typing import Any
 
 import jwt
@@ -121,22 +134,126 @@ OPENERS = parse_openers(os.environ.get("SECURITY_SHUTDOWN_OPENERS"))
 GATE_ON = _gate_on()
 
 
+SHUT = "SHUT"
+OPEN = "OPEN"
+
+
+@dataclass(frozen=True)
+class Switch:
+    """The daily hours (India time; None for no daily shutdown) and a manual Shut down / Start, if one
+    is in force: ``manual`` is SHUT or OPEN until ``manual_until``."""
+
+    hours: tuple[clock_time, clock_time] | None
+    manual: str | None = None
+    manual_until: datetime | None = None
+    changed_by: str | None = None
+    changed_at: datetime | None = None
+    # False until the state has been read from security.system_shutdown or set from the tab: the
+    # hours are then those of VERIGENCE_SLEEP_WINDOW_IST, the clock every service started with.
+    stored: bool = False
+
+    def manual_now(self, now: datetime) -> str | None:
+        if self.manual in {SHUT, OPEN} and self.manual_until is not None and now < self.manual_until:
+            return self.manual
+        return None
+
+    def in_hours(self, now: datetime) -> bool:
+        if self.hours is None:
+            return False
+        start, end = self.hours
+        local = now.astimezone(platform_heartbeat._IST).time()
+        return start <= local < end if start < end else (local >= start or local < end)
+
+    def next_opening(self, now: datetime) -> datetime | None:
+        """The next daily opening time after ``now``."""
+        if self.hours is None:
+            return None
+        end = self.hours[1]
+        local = now.astimezone(platform_heartbeat._IST)
+        opening = local.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+        if opening <= local:
+            opening += timedelta(days=1)
+        return opening.astimezone(UTC)
+
+    def resting(self, now: datetime) -> bool:
+        manual = self.manual_now(now)
+        return manual == SHUT if manual is not None else self.in_hours(now)
+
+    def rest_ends(self, now: datetime) -> datetime | None:
+        """When the shutdown in progress ends; None when Verigence is running."""
+        if not self.resting(now):
+            return None
+        until = self.manual_until if self.manual_now(now) == SHUT else self.next_opening(now)
+        # A manual shutdown that runs out inside the daily hours goes on to that day's opening.
+        if until is not None and self.manual_now(now) == SHUT and replace(self, manual=None).in_hours(until):
+            return replace(self, manual=None).next_opening(until)
+        return until
+
+
+_lock = threading.Lock()
+_switch = Switch(hours=platform_heartbeat.SLEEP_WINDOW)
+
+
+def switch() -> Switch:
+    """The state in force. Until one is loaded or set, the daily hours of VERIGENCE_SLEEP_WINDOW_IST."""
+    with _lock:
+        if not _switch.stored:
+            return replace(_switch, hours=platform_heartbeat.SLEEP_WINDOW)
+        return _switch
+
+
+def set_switch(state: Switch) -> None:
+    """Called when the state is read at start-up and after each change from the tab."""
+    global _switch
+    with _lock:
+        _switch = state
+
+
+def reset_switch() -> None:
+    """Back to the clock alone (tests)."""
+    set_switch(Switch(hours=platform_heartbeat.SLEEP_WINDOW))
+
+
+def resting(now: datetime | None = None) -> bool:
+    """Whether Verigence is shut at this moment: the services rest, and the heartbeat here."""
+    return switch().resting(now or datetime.now(UTC))
+
+
 def closed(now: datetime | None = None) -> bool:
-    """Whether Verigence is shut to people at this moment."""
-    return GATE_ON and bool(OPENERS) and platform_heartbeat.asleep(now)
+    """Whether people are refused at this moment: shut, with a list of who may still sign in."""
+    return GATE_ON and bool(OPENERS) and resting(now)
 
 
 def opens_at(now: datetime | None = None) -> datetime | None:
-    """When the night's sleep in progress ends (UTC); None when Verigence is not shut."""
+    """When the shutdown in progress ends (UTC); None when people are not being refused."""
     moment = now or datetime.now(UTC)
-    if not closed(moment) or platform_heartbeat.SLEEP_WINDOW is None:
-        return None
-    _, end = platform_heartbeat.SLEEP_WINDOW
-    local = moment.astimezone(platform_heartbeat._IST)
-    opening = local.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
-    if opening <= local:
-        opening += timedelta(days=1)
-    return opening.astimezone(UTC)
+    return switch().rest_ends(moment) if closed(moment) else None
+
+
+def shut_now(by: str, now: datetime | None = None) -> Switch:
+    """Shut from this moment to the next daily opening time (with no daily hours: 8:00 am India time)."""
+    moment = now or datetime.now(UTC)
+    current = switch()
+    hours = current.hours or (clock_time(0, 30), clock_time(8, 0))
+    until = replace(current, hours=hours, manual=None).next_opening(moment)
+    return replace(current, manual=SHUT, manual_until=until, changed_by=by, changed_at=moment, stored=True)
+
+
+def start_now(by: str, now: datetime | None = None) -> Switch:
+    """Running from this moment. A shutdown by hand is cleared; inside the daily hours Verigence is
+    open until that day's opening time, after which the hours hold again as every day."""
+    moment = now or datetime.now(UTC)
+    daily = replace(switch(), manual=None, manual_until=None, changed_by=by, changed_at=moment, stored=True)
+    if daily.in_hours(moment):
+        return replace(daily, manual=OPEN, manual_until=daily.next_opening(moment))
+    return daily
+
+
+def with_hours(start: clock_time, end: clock_time, by: str, now: datetime | None = None) -> Switch:
+    """New daily hours. A manual Shut down or Start in force stays as it is."""
+    if start == end:
+        raise ValueError("The shutdown must start and end at different times")
+    return replace(switch(), hours=(start, end), changed_by=by, changed_at=now or datetime.now(UTC), stored=True)
 
 
 def closed_message(now: datetime | None = None) -> str:
@@ -164,13 +281,29 @@ def closed_error(now: datetime | None = None) -> SecurityError:
     return security_error(CODE, closed_message(now))
 
 
+def _z(moment: datetime | None) -> str | None:
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z") if moment else None
+
+
 def status(now: datetime | None = None) -> dict[str, Any]:
-    """For a sign-in page: whether Verigence is shut, and until when. No database."""
-    opening = opens_at(now)
+    """Open or shut, and until when. No database. ``closed`` is for a sign-in page (people are being
+    refused); ``resting`` is for a service (Verigence is shut, rest until ``restUntilUtc``), with the
+    daily hours so a service that cannot reach this one for a while still knows them."""
+    moment = now or datetime.now(UTC)
+    state = switch()
+    opening = opens_at(moment)
+    rest_ends = state.rest_ends(moment)
     return {
         "closed": opening is not None,
-        "opensAtUtc": opening.isoformat().replace("+00:00", "Z") if opening else None,
-        "message": closed_message(now) if opening else None,
+        "opensAtUtc": _z(opening),
+        "message": closed_message(moment) if opening else None,
+        "resting": rest_ends is not None,
+        "restUntilUtc": _z(rest_ends),
+        "hoursFromIst": state.hours[0].strftime("%H:%M") if state.hours else None,
+        "hoursToIst": state.hours[1].strftime("%H:%M") if state.hours else None,
+        "manual": state.manual_now(moment),
+        "manualSinceUtc": _z(state.changed_at) if state.manual_now(moment) else None,
+        "manualUntilUtc": _z(state.manual_until) if state.manual_now(moment) else None,
     }
 
 
@@ -239,7 +372,7 @@ class SystemShutdownMiddleware:
                 "status": error.status_code,
                 "detail": error.detail,
                 "correlationId": cid,
-                "opensAtUtc": opening.isoformat().replace("+00:00", "Z") if opening else None,
+                "opensAtUtc": _z(opening),
             },
             media_type="application/problem+json",
         )
